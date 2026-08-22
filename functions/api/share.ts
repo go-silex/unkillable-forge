@@ -19,7 +19,7 @@ import {
 } from "../_lib/access"
 import { assetExists } from "../_lib/assets"
 import { enforceMutationGuard } from "../_lib/csrf"
-import { maybeShortlink } from "../_lib/shlink"
+import { upsertShortlink } from "../_lib/shlink"
 
 type Env = ForgeEnv
 
@@ -73,7 +73,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     return json({ error: "public_host_not_configured" }, 500)
   }
   const shareUrl = `${origin}/s/${slug}/${key}/`
-  const shortUrl = await maybeShortlink(context.env, shareUrl, slug)
+  const shortUrl = await upsertShortlink(context.env, shareUrl, slug)
 
   return json({
     slug,

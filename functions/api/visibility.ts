@@ -20,7 +20,7 @@ import {
 } from "../_lib/access"
 import { assetExists } from "../_lib/assets"
 import { enforceMutationGuard } from "../_lib/csrf"
-import { maybeShortlink } from "../_lib/shlink"
+import { upsertShortlink } from "../_lib/shlink"
 
 const VIS: Visibility[] = ["private", "shared", "public"]
 
@@ -79,7 +79,7 @@ export const onRequestPost: PagesFunction<ForgeEnv> = async (context) => {
     try {
       const origin = publicOrigin(context.env, context.request)
       shareUrl = `${origin}/s/${slug}/${key}/`
-      shortUrl = (await maybeShortlink(context.env, shareUrl, slug)) || null
+      shortUrl = (await upsertShortlink(context.env, shareUrl, slug)) || null
     } catch {
       return json({ error: "public_host_not_configured" }, 500)
     }

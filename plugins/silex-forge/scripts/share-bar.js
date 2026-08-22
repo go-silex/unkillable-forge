@@ -180,7 +180,7 @@
 
   function setVis(vis, copyAfter) {
     setBusy(true);
-    apiVis("POST", { slug: slug, visibility: vis })
+    return apiVis("POST", { slug: slug, visibility: vis })
       .then(function (data) {
         applyVis(data);
         var msg =
@@ -192,7 +192,12 @@
         if (copyAfter) {
           var url = currentCopyUrl();
           return copyText(url).then(function () {
-            toast(msg + " · lien copié");
+            toast(
+              msg +
+                (vis === "shared" && !state.shortUrl
+                  ? " · lien direct copié (raccourci indisponible)"
+                  : " · lien copié"),
+            );
           });
         }
         toast(msg);
@@ -207,7 +212,10 @@
   }
 
   function onSeg(vis, copyAfter) {
-    if (state.visibility === vis) return;
+    if (state.visibility === vis) {
+      if (vis === "shared" && copyAfter) setVis(vis, true);
+      return;
+    }
     setVis(vis, copyAfter);
   }
   privateBtn.addEventListener("click", function () {
@@ -220,6 +228,10 @@
     onSeg("public", true);
   });
   copyBtn.addEventListener("click", function () {
+    if (state.visibility === "shared") {
+      setVis("shared", true);
+      return;
+    }
     var url = currentCopyUrl();
     setBusy(true);
     copyText(url)
