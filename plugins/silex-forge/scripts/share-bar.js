@@ -151,6 +151,7 @@
 
   function currentCopyUrl() {
     if (state.visibility === "shared") return state.shortUrl || state.shareUrl || pageUrl();
+    if (state.visibility === "public") return state.shortUrl || pageUrl();
     return pageUrl();
   }
 
@@ -196,6 +197,8 @@
               msg +
                 (vis === "shared" && !state.shortUrl
                   ? " · lien direct copié (raccourci indisponible)"
+                  : vis === "public" && !state.shortUrl
+                    ? " · lien public direct copié (raccourci indisponible)"
                   : " · lien copié"),
             );
           });
@@ -213,7 +216,7 @@
 
   function onSeg(vis, copyAfter) {
     if (state.visibility === vis) {
-      if (vis === "shared" && copyAfter) setVis(vis, true);
+      if ((vis === "shared" || vis === "public") && copyAfter) setVis(vis, true);
       return;
     }
     setVis(vis, copyAfter);
@@ -228,8 +231,8 @@
     onSeg("public", true);
   });
   copyBtn.addEventListener("click", function () {
-    if (state.visibility === "shared") {
-      setVis("shared", true);
+    if (state.visibility === "shared" || state.visibility === "public") {
+      setVis(state.visibility, true);
       return;
     }
     var url = currentCopyUrl();

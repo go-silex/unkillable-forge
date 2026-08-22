@@ -84,8 +84,15 @@ export const onRequestPost: PagesFunction<ForgeEnv> = async (context) => {
       return json({ error: "public_host_not_configured" }, 500)
     }
   } else if (vis === "public") {
+    let publicUrl: string
+    try {
+      publicUrl = `${publicOrigin(context.env, context.request)}/a/${slug}/`
+    } catch {
+      return json({ error: "public_host_not_configured" }, 500)
+    }
     await setVisibility(context.env.SHARES, slug, "public")
     await context.env.SHARES.delete(`share:${slug}`)
+    shortUrl = (await upsertShortlink(context.env, publicUrl, slug)) || null
   } else {
     await revokeShare(context.env.SHARES, slug)
   }

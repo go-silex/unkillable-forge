@@ -1,6 +1,6 @@
 {
   "name": "silex-forge",
-  "version": "1.7.2",
+  "version": "1.7.3",
   "description": "Team HTML artifact host on Cloudflare Pages — Claude plugin (forge-publish, forge-setup). Craft HTML = silex-craft@silex-plugins.",
   "owner": {
     "name": "Silex",

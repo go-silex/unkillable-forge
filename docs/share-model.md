@@ -29,11 +29,13 @@ publish --share / toolbar Shared    │
 - **Key** = high-entropy path segment (`token_urlsafe(18)`)
 - **Unlisted**: share does not add a catalogue card
 - **Shortlink** (best-effort → `f-<slug>` on your Shlink domain):
-  - **Functions**: Pages env `SHLINK_API_KEY` + `SHLINK_API_URL` (full create URL, **no default**) — silent fail OK
+  - **Functions**: Pages env `SHLINK_API_KEY` + `SHLINK_API_URL` (full create URL, **no default**) — direct-URL fallback
   - **CLI** `publish.sh --share`: local `shlink` CLI + `shlink_domain` in forge config
 - **Toolbar** on `/a/<slug>/` (team):
-  - **Private / Public** — copy `/a/<slug>/`
-  - **Shared** — `POST /api/visibility` → `/s/<slug>/<key>/` (+ `shortUrl` if Shlink Pages OK)
+  - **Private** — copy `/a/<slug>/`
+  - **Public** — upsert `f-<slug>` → `/a/<slug>/`
+  - **Shared** — upsert the same `f-<slug>` → `/s/<slug>/<key>/`
+  - Copying in Public or Shared mode revalidates the alias; Shlink failure is shown before falling back to the direct URL
 
 ## Commands
 

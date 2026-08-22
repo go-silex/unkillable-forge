@@ -7,6 +7,13 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the Claude plu
 
 **Out of scope for this file:** team HTML artifacts (hub + live deploy). Those are not versioned in git.
 
+## [1.7.3] - 2026-08-22
+
+### Added
+
+- Public artifacts reuse the deterministic Shlink alias `f-<slug>` targeting `/a/<slug>/`
+- Copying in Public mode revalidates the alias and reports direct-URL fallback
+
 ## [1.7.2] - 2026-08-22
 
 ### Fixed
@@ -102,6 +109,7 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the Claude plu
 - Cloudflare Pages host for team decks and guides
 - Plugin marketplace manifest (`.claude-plugin/marketplace.json`)
 
+[1.7.3]: https://github.com/go-silex/silex-forge/compare/v1.7.2...v1.7.3
 [1.7.2]: https://github.com/go-silex/silex-forge/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/go-silex/silex-forge/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/go-silex/silex-forge/compare/v1.6.0...v1.7.0
