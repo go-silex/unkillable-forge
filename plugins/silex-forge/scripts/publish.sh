@@ -363,18 +363,48 @@ kv_curl() {
   fi
 }
 
+wrangler_bin() {
+  if command -v wrangler >/dev/null 2>&1; then
+    printf '%s\n' wrangler
+  elif command -v npx >/dev/null 2>&1; then
+    printf '%s\n' 'npx --yes wrangler'
+  else
+    return 1
+  fi
+}
+
+# Pages deploy tokens often lack KV API scope; wrangler OAuth may still work.
+kv_wrangler() {
+  local wb ns="${FORGE_SHARES_KV_ID:-}"
+  [ -n "$ns" ] || return 1
+  wb=$(wrangler_bin) || return 1
+  # shellcheck disable=SC2086
+  env -u CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-}" \
+    $wb "$@" --remote --namespace-id="$ns"
+}
+
 kv_put_value() {
   local key="$1" val="$2"
-  kv_auth_ok || return 1
-  kv_curl PUT "/values/${key}" -H "Content-Type: text/plain" --data "$val" \
-    | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("success") else 1)'
+  if kv_auth_ok; then
+    if kv_curl PUT "/values/${key}" -H "Content-Type: text/plain" --data "$val" \
+      | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("success") else 1)'; then
+      return 0
+    fi
+    warn "KV API token rejected — trying wrangler OAuth"
+  fi
+  kv_wrangler kv key put "$key" "$val" >/dev/null 2>&1
 }
 
 kv_delete_key() {
   local key="$1"
-  kv_auth_ok || return 1
-  kv_curl DELETE "/values/${key}" \
-    | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("success") else 1)'
+  if kv_auth_ok; then
+    if kv_curl DELETE "/values/${key}" \
+      | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("success") else 1)'; then
+      return 0
+    fi
+    warn "KV API token rejected — trying wrangler OAuth"
+  fi
+  kv_wrangler kv key delete "$key" >/dev/null 2>&1
 }
 
 kv_put_share() {
@@ -403,7 +433,7 @@ kv_revoke_share() {
 
 kv_clear_artifact_auth() {
   local slug="$1"
-  kv_auth_ok || return 1
+  [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] && [ -n "${FORGE_SHARES_KV_ID:-}" ] || return 1
   kv_delete_key "share:${slug}" || true
   kv_delete_key "vis:${slug}" || true
   return 0
@@ -460,7 +490,7 @@ create_share_kv() {
   if kv_activate_share "$slug" "$key"; then
     info "KV share:${slug} + vis:shared OK"
   else
-    die "KV share activation failed — set CLOUDFLARE_API_TOKEN (share key never goes to git/hub)"
+    die "KV share activation failed — set CLOUDFLARE_API_TOKEN with Workers KV Edit, or wrangler login (OAuth)"
   fi
   set_hub_shared "$slug" true
   short_url=""
