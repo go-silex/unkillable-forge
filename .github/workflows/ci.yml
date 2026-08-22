@@ -55,7 +55,11 @@ jobs:
             [ "$extras" -eq 0 ] || (echo "registry must not contain JSON payloads" && exit 1)
           fi
 
-      - name: No hardcoded CF account id in tree
+      - name: No hardcoded infra IDs in tree
         run: |
-          ! git grep -E 'YOUR_CF|YOUR_KV_NAMESPACE_ID' -- ':!CHANGELOG.md' ':!docs/public-release.md' ':!scripts/purge-git-history.sh' || \
-            (echo "found infra id in tracked files" && exit 1)
+          ! git grep -E 'CLOUDFLARE_ACCOUNT_ID=[0-9a-f]{32}' -- . || \
+            (echo "found hardcoded CF account id" && exit 1)
+          ! git grep -E 'FORGE_SHARES_KV_ID=[0-9a-f]{32}' -- . || \
+            (echo "found hardcoded KV namespace id" && exit 1)
+          ! git grep -E 'id = "[0-9a-f]{32}"' wrangler.toml 2>/dev/null || \
+            (echo "found KV id in wrangler.toml" && exit 1)
