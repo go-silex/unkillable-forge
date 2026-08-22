@@ -1,4 +1,9 @@
-/** Cloudflare Access JWT + forge visibility (KV). Fail-closed. */
+/**
+ * Cloudflare Access JWT + forge visibility (KV). Fail-closed.
+ *
+ * Visibility SSOT = `vis:<slug>` only. Missing or unknown `vis:` → strictly private.
+ * Legacy `share:<slug>` without `vis:shared` does not grant /s access (no inference).
+ */
 
 export interface ForgeEnv {
   SHARES: KVNamespace
@@ -69,16 +74,25 @@ type Jwks = {
   }>
 }
 
-let jwksCache: { at: number; keys: Jwks["keys"] } | null = null
+const JWKS_TTL_MS = 3600_000
+const JWT_CLOCK_SKEW_MS = 30_000
+
+const jwksCacheByTeam = new Map<
+  string,
+  { at: number; keys: Jwks["keys"] }
+>()
 
 async function fetchAccessJwks(teamDomain: string): Promise<Jwks["keys"]> {
   const now = Date.now()
-  if (jwksCache && now - jwksCache.at < 3600_000) return jwksCache.keys
+  const cached = jwksCacheByTeam.get(teamDomain)
+  if (cached && now - cached.at < JWKS_TTL_MS) return cached.keys
+
   const res = await fetch(`https://${teamDomain}/cdn-cgi/access/certs`)
   if (!res.ok) throw new Error(`jwks_http_${res.status}`)
   const data = (await res.json()) as Jwks
-  jwksCache = { at: now, keys: data.keys || [] }
-  return jwksCache.keys
+  const keys = data.keys || []
+  jwksCacheByTeam.set(teamDomain, { at: now, keys })
+  return keys
 }
 
 function b64urlToBytes(s: string): Uint8Array {
@@ -149,8 +163,12 @@ export async function verifyAccessJwt(
   if (parsed.header.alg !== "RS256") return false
 
   const { payload } = parsed
+  const now = Date.now()
   const exp = Number(payload.exp)
-  if (!Number.isFinite(exp) || exp * 1000 < Date.now() - 30_000) return false
+  if (!Number.isFinite(exp) || exp * 1000 < now - JWT_CLOCK_SKEW_MS) return false
+
+  const nbf = Number(payload.nbf)
+  if (Number.isFinite(nbf) && nbf * 1000 > now + JWT_CLOCK_SKEW_MS) return false
 
   const iss = String(payload.iss || "")
   const expectedIss = `https://${team}`
@@ -237,8 +255,6 @@ export async function getVisibility(
 ): Promise<Visibility> {
   const v = await kv.get(`vis:${slug}`)
   if (v === "public" || v === "shared" || v === "private") return v
-  const share = await kv.get(`share:${slug}`)
-  if (share) return "shared"
   return "private"
 }
 
@@ -250,29 +266,47 @@ export async function setVisibility(
   await kv.put(`vis:${slug}`, vis)
 }
 
+/**
+ * Mint share key + vis:shared. Fail-closed: rolls back share key if vis write fails.
+ */
 export async function activateShare(
   kv: KVNamespace,
   slug: string,
   key: string,
 ): Promise<void> {
   await kv.put(`share:${slug}`, key)
-  await setVisibility(kv, slug, "shared")
+  try {
+    await setVisibility(kv, slug, "shared")
+  } catch (err) {
+    try {
+      await kv.delete(`share:${slug}`)
+    } catch {
+      /* best-effort compensation */
+    }
+    throw err
+  }
 }
 
+/**
+ * Revoke share. Fail-closed: vis→private first so /s stops even if key delete fails.
+ */
 export async function revokeShare(
   kv: KVNamespace,
   slug: string,
 ): Promise<void> {
-  await kv.delete(`share:${slug}`)
   await setVisibility(kv, slug, "private")
+  await kv.delete(`share:${slug}`)
 }
 
+/**
+ * Remove all auth KV for slug. Fail-closed: drop vis first (missing vis = private).
+ */
 export async function clearArtifactAuth(
   kv: KVNamespace,
   slug: string,
 ): Promise<void> {
-  await kv.delete(`share:${slug}`)
   await kv.delete(`vis:${slug}`)
+  await kv.delete(`share:${slug}`)
 }
 
 export function mintKey(): string {

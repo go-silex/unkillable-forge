@@ -47,6 +47,8 @@ Fail-closed: missing `vis:` → private. Share keys live in **KV only** — neve
 
 Toolbar on `/a/<slug>/` (team): **Private** · **Shared** · **Public**.
 
+Publishers are trusted team members. Artifact HTML is active same-origin content: prefer self-contained output and avoid untrusted third-party scripts.
+
 ---
 
 ## Quick start
@@ -112,7 +114,7 @@ Best-effort. Failures are silent — you still get the long `/s/…` URL.
 | `/` + `/a/*` | Access after Functions deploy · Bypass only once Functions are live |
 | `/s/*` | Access Bypass + KV key check |
 | `/login` | Access Allow team |
-| `*.pages.dev` | Access + middleware 403 outside `/s/` |
+| `*.pages.dev` | Access + middleware 403 on every path |
 | Repo | Engine only — **no** HTML, **no** share keys, **no** account/AUD/KV IDs, **no** API tokens |
 
 Never put secrets in `site/`. Never list share keys in the catalogue.

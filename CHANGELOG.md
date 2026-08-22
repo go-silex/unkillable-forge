@@ -7,6 +7,29 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the Claude plu
 
 **Out of scope for this file:** team HTML artifacts (hub + live deploy). Those are not versioned in git.
 
+## [1.7.1] - 2026-08-22
+
+### Added
+
+- Runtime tests for Access JWT, CSRF, share routing, KV compensation, deploy tooling, and doctor output
+- Online doctor checks for Cloudflare token, account, Pages project, and KV namespace
+
+### Changed
+
+- Pages environment variables are read and merged before deploy; remote plain vars are preserved
+- CLI mutations run a Cloudflare preflight and use a scoped Wrangler OAuth fallback when needed
+- `pages.dev` is denied on every path, including keyed shares
+- Trusted-publisher boundary is documented for active same-origin HTML
+
+### Fixed
+
+- Missing `vis:` is strictly private; orphan share keys no longer imply shared visibility
+- Share activation/revocation and artifact removal fail closed with compensation and private tombstones
+- Cookie-authenticated mutations require JSON and a canonical Origin/Referer
+- Share asset paths reject traversal and encoded separators
+- Deploy no longer silently wipes `SHLINK_API_URL` or other Pages plain variables
+- Doctor JSON/quiet output modes no longer fall through to the human report
+
 ## [1.7.0] - 2026-08-22
 
 ### Added
@@ -72,6 +95,7 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the Claude plu
 - Cloudflare Pages host for team decks and guides
 - Plugin marketplace manifest (`.claude-plugin/marketplace.json`)
 
+[1.7.1]: https://github.com/go-silex/silex-forge/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/go-silex/silex-forge/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/go-silex/silex-forge/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/go-silex/silex-forge/compare/v1.0.0...v1.5.0

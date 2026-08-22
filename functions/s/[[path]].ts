@@ -3,12 +3,14 @@
  * GET /s/<slug>/?k=<key> — same secret in query (alias)
  *
  * Requires vis:shared + valid KV share:<slug> key, then serves /a/<slug>/… via ASSETS.
+ * Path confined to slug subtree; dot-segments and encoded separators rejected.
  */
 import {
   type ForgeEnv,
   getVisibility,
   timingSafeEqualStr,
 } from "../_lib/access"
+import { parseShareRoute, shareAssetPath } from "../_lib/share-path"
 
 async function plain404(): Promise<Response> {
   return new Response("Not found", {
@@ -21,55 +23,29 @@ async function plain404(): Promise<Response> {
 }
 
 export const onRequest: PagesFunction<ForgeEnv> = async (context) => {
-  const url = new URL(context.request.url)
-  const parts = url.pathname.replace(/^\/s\/?/, "").split("/").filter(Boolean)
-  const qk = url.searchParams.get("k") || ""
+  const request = context.request
+  const url = new URL(request.url)
+  const parsed = parseShareRoute(url, request.url)
+  if (!parsed.ok) return plain404()
 
-  let slug = ""
-  let key = ""
-  let rest: string[] = []
-
-  if (parts.length >= 2 && !qk) {
-    slug = parts[0]
-    key = parts[1]
-    rest = parts.slice(2)
-  } else if (parts.length >= 1 && qk) {
-    slug = parts[0]
-    key = qk
-    rest = parts.slice(1)
-  } else {
-    return plain404()
-  }
+  const { slug, key, rest } = parsed.route
 
   const vis = await getVisibility(context.env.SHARES, slug)
-  if (vis !== "shared") {
-    return plain404()
-  }
+  if (vis !== "shared") return plain404()
 
   const stored = await context.env.SHARES.get(`share:${slug}`)
-  if (!stored || !key || !timingSafeEqualStr(stored, key)) {
-    return plain404()
-  }
+  if (!stored || !timingSafeEqualStr(stored, key)) return plain404()
 
-  let assetPath: string
-  if (rest.length === 0) {
-    assetPath = `/a/${slug}/index.html`
-  } else if (rest[rest.length - 1].includes(".")) {
-    assetPath = `/a/${slug}/${rest.join("/")}`
-  } else {
-    assetPath = `/a/${slug}/${rest.join("/")}/index.html`
-  }
-
+  const assetPath = shareAssetPath(slug, rest)
   const assetUrl = new URL(assetPath, url.origin)
   const res = await context.env.ASSETS.fetch(assetUrl.toString())
 
-  if (res.status === 404) {
-    return plain404()
-  }
+  if (res.status === 404) return plain404()
 
   const headers = new Headers(res.headers)
   headers.set("cache-control", "no-store")
   headers.set("x-robots-tag", "noindex, nofollow, noarchive")
   headers.set("x-forge-share", "1")
+  headers.set("x-content-type-options", "nosniff")
   return new Response(res.body, { status: res.status, headers })
 }

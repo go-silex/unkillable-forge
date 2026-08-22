@@ -5,11 +5,11 @@
  *   /                    catalogue shell (no private titles in HTML)
  *   /api/catalogue       public OK (filtered)
  *   /a/<slug>/*          vis KV: public | shared | private  (+ JWT cookie)
- *   /s/*                 KV key (existing Function)
+ *   /s/*                 KV key + vis:shared (Function)
  *   /manifest.json       never to clients (worker reads via ASSETS)
  *
- * Fail-closed: unknown vis = private.
- * pages.dev: 403 except /s/* .
+ * Fail-closed: missing/unknown vis = private (no share-key inference).
+ * pages.dev: 403 on all paths (including /s) — production custom domain only.
  */
 import {
   type ForgeEnv,
@@ -70,11 +70,8 @@ export const onRequest: PagesFunction<ForgeEnv> = async (context) => {
   const path = url.pathname
 
   if (isPagesDev(host)) {
-    if (path === "/s" || path.startsWith(SHARE_PREFIX)) {
-      return context.next()
-    }
     return new Response(
-      `Forbidden — use the production custom domain. This pages.dev origin does not serve team content.`,
+      `Forbidden — use the production custom domain. This pages.dev origin does not serve forge content (including share links).`,
       {
         status: 403,
         headers: {

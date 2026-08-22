@@ -1,0 +1,23 @@
+{
+  "success": true,
+  "result": {
+    "name": "silex-forge",
+    "deployment_configs": {
+      "production": {
+        "env_vars": {
+          "SHLINK_API_URL": {
+            "type": "plain_text",
+            "value": "https://s.example.com/rest/v3/short-urls"
+          },
+          "FORGE_SHARE_SECRET": {
+            "type": "secret_text"
+          },
+          "CF_ACCESS_AUD": {
+            "type": "plain_text",
+            "value": "aud-one"
+          }
+        }
+      }
+    }
+  }
+}

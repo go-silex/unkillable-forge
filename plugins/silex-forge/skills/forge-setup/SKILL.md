@@ -138,6 +138,7 @@ fi
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/forge-doctor.sh"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/forge-doctor.sh --online   # optional: token/account/project/KV via API
 ```
 
 Report:
@@ -177,7 +178,9 @@ Order:
 2. Password manager available → fill from your ops vault (do **not** echo the token in chat)
 3. Otherwise **ask for the token** (one question) and write the same way
 
-Scopes: Pages Write + Read, Account Settings Read, Workers KV Storage Edit (CLI `--share`).
+Scopes: Pages Write + Read, Account Settings Read, Workers KV Storage Write (CLI `--share` via REST).
+
+**KV fallback:** if the token lacks KV scope (or REST is rejected), `publish.sh` retries with `wrangler login` OAuth (`wrangler kv … --remote`, `CLOUDFLARE_API_TOKEN` unset for that call). Deploy still requires a valid token in `forge.env`.
 
 ## Step 5b — Shlink shortlinks (optional)
 

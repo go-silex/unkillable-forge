@@ -41,7 +41,13 @@ ok()   { echo "✓ $*"; }
 GIT() { git -c core.hooksPath=/dev/null "$@"; }
 
 WORK=""
-cleanup() { [ -n "${WORK:-}" ] && rm -rf "$WORK"; }
+PUBLISH_LOCK_FD=""
+cleanup() {
+  if [ -n "${PUBLISH_LOCK_FD:-}" ]; then
+    flock -u "$PUBLISH_LOCK_FD" 2>/dev/null || true
+  fi
+  [ -n "${WORK:-}" ] && rm -rf "$WORK"
+}
 trap cleanup EXIT
 
 require_forge_config() {
@@ -77,7 +83,7 @@ validate_slug() {
   local s="${1-}"
   case "$s" in
     '' )            die "empty slug" ;;
-    */*|*..*|.|.. ) die "invalid slug (path): '$s'" ;;
+    */*|*..*|. ) die "invalid slug (path): '$s'" ;;
   esac
   [[ "$s" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || die "invalid slug: '$s'"
   case "$s" in
@@ -118,11 +124,28 @@ build_from_hub() {
 }
 
 # Load token + account from ~/.config/silex/forge.env (never print values)
+forge_env_mode() {
+  local f="${FORGE_ENV_FILE:-$HOME/.config/silex/forge.env}"
+  [ -f "$f" ] || return 0
+  stat -c '%a' "$f" 2>/dev/null || stat -f '%OLp' "$f" 2>/dev/null || echo ""
+}
+
+require_forge_env_secure() {
+  local f="${FORGE_ENV_FILE:-$HOME/.config/silex/forge.env}"
+  [ -f "$f" ] || return 0
+  local mode
+  mode=$(forge_env_mode)
+  case "$mode" in
+    600|400) return 0 ;;
+    * ) die "forge.env permissions ${mode:-unknown} — chmod 600 required before publish" ;;
+  esac
+}
+
 source_cf_credentials() {
   local f="${FORGE_ENV_FILE:-$HOME/.config/silex/forge.env}"
   [ -f "$f" ] || return 0
   local mode
-  mode=$(stat -c '%a' "$f" 2>/dev/null || stat -f '%OLp' "$f" 2>/dev/null || echo "")
+  mode=$(forge_env_mode)
   case "$mode" in
     600|400|"" ) ;;
     *) warn "forge.env mode $mode — chmod 600 recommandé" ;;
@@ -147,27 +170,49 @@ source_cf_credentials() {
   done < "$f"
 }
 
-# Fetch a plain Pages production var (preserve SHLINK_API_URL when absent locally)
+# Fetch remote plain Pages vars for deploy patch (raises on API failure — no silent wipe)
 fetch_pages_plain_var() {
   local name="$1"
   source_cf_credentials
-  local acct="${CLOUDFLARE_ACCOUNT_ID:-}"
-  local project="${FORGE_PAGES_PROJECT:-silex-forge}"
-  [ -n "$acct" ] && [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || return 1
-  curl -sS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-    "https://api.cloudflare.com/client/v4/accounts/${acct}/pages/projects/${project}" \
-    | python3 - "$name" <<'PY'
-import json, sys
-name = sys.argv[1]
+  PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
+    'import sys
+from load_config import PagesEnvFetchError, fetch_pages_plain_var as f
 try:
-    d = json.load(sys.stdin)
-    ev = (d.get("result") or {}).get("deployment_configs", {}).get("production", {}).get("env_vars") or {}
-    v = ev.get(name) or {}
-    if v.get("type") == "plain_text" and v.get("value"):
-        print(v["value"])
-except Exception:
-    pass
-PY
+    sys.stdout.write(f(sys.argv[1]))
+except PagesEnvFetchError as e:
+    print(f"✗ Pages env fetch failed ({e.kind}): {e.message}", file=sys.stderr)
+    sys.exit(2)' \
+    "$name"
+}
+
+preflight_cf_mutations() {
+  require_forge_env_secure
+  source_cf_credentials
+  local pf_json
+  pf_json=$(PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
+    'import json; from load_config import preflight_mutations; print(json.dumps(preflight_mutations(require_kv=False)))')
+  if python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("ok") else 1)' <<<"$pf_json"; then
+    python3 -c 'import json,sys; d=json.load(sys.stdin); [print("  ⚠", w, file=sys.stderr) for w in d.get("warnings",[])]' <<<"$pf_json" || true
+    return 0
+  fi
+  python3 -c 'import json,sys; d=json.load(sys.stdin); [print("✗", e, file=sys.stderr) for e in d.get("errors",[])]' <<<"$pf_json"
+  die "Cloudflare preflight failed — fix forge.env / credentials before mutating"
+}
+
+preflight_before_live() {
+  source_cf_credentials
+  preflight_cf_mutations
+}
+
+acquire_publish_lock() {
+  local slug="${1:-_global}"
+  [ -n "${ARTIFACTS_ROOT:-}" ] || return 0
+  local lock_dir="${ARTIFACTS_ROOT}/.forge-locks"
+  mkdir -p "$lock_dir"
+  exec {PUBLISH_LOCK_FD}>"${lock_dir}/${slug}.lock"
+  if ! flock -w 120 "$PUBLISH_LOCK_FD"; then
+    die "publish lock timeout: $slug (another machine/process?)"
+  fi
 }
 
 # Patch cloned wrangler.toml: KV id + plain [vars] from forge.env (+ API fallback)
@@ -186,15 +231,15 @@ patch_wrangler_for_deploy() {
     "CF_ACCESS_AUD missing — set in ~/.config/silex/forge.env (see .env.example)"
   [ -n "$host" ] || die \
     "PUBLIC_HOST missing — set in forge.config.json or ~/.config/silex/forge.env"
-  if [ -z "$shlink_url" ]; then
-    shlink_url="$(fetch_pages_plain_var SHLINK_API_URL 2>/dev/null || true)"
-  fi
   [ -f "$toml" ] || die "wrangler.toml missing: $toml"
-  python3 "$LIB_DIR/patch_wrangler.py" "$toml" "$kv" "$team" "$aud" "$host" "$shlink_url"
+  # --fetch-remote: preserve all Pages plain_text vars; local managed vars override.
+  PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 "$LIB_DIR/patch_wrangler.py" --fetch-remote "$toml" "$kv" "$team" "$aud" "$host" "${shlink_url:-}"
 }
 
 # Direct Upload — HTML never touches git
 deploy_pages() {
+  preflight_cf_mutations
   source_cf_credentials
   [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || die \
     "CLOUDFLARE_API_TOKEN missing — forge-setup (~/.config/silex/forge.env, chmod 600)"
@@ -300,8 +345,11 @@ gen_og_images() {
   local sh
   sh="$(SCRIPTS)/gen-og-images.sh"
   if [ -f "$sh" ]; then
-    (cd "$WORK/repo" && bash "$sh" "${args[@]}") \
-      && ok "og thumbs" || warn "gen-og-images skip/failed (publish continues)"
+    if (cd "$WORK/repo" && bash "$sh" "${args[@]}"); then
+      ok "og thumbs"
+    else
+      warn "gen-og-images skip/failed (publish continues)"
+    fi
   fi
 }
 
@@ -325,8 +373,9 @@ inject_og_for_slug() {
   # write enhanced HTML back to hub SSOT
   if [ -n "${ARTIFACTS_ROOT:-}" ] && [ -d "${ARTIFACTS_ROOT}/${slug}" ]; then
     cp -f "$html" "${ARTIFACTS_ROOT}/${slug}/index.html"
-    [ -f "$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/og.jpg" ] \
-      && cp -f "$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/og.jpg" "${ARTIFACTS_ROOT}/${slug}/og.jpg" || true
+    if [ -f "$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/og.jpg" ]; then
+      cp -f "$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/og.jpg" "${ARTIFACTS_ROOT}/${slug}/og.jpg"
+    fi
   fi
 }
 
@@ -347,22 +396,6 @@ kv_auth_ok() {
   { [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || { [ -n "${CLOUDFLARE_API_KEY:-}" ] && [ -n "${CLOUDFLARE_EMAIL:-}" ]; }; }
 }
 
-kv_curl() {
-  local method="$1" path="$2"
-  shift 2
-  local acct="${CLOUDFLARE_ACCOUNT_ID:-}"
-  local ns="${FORGE_SHARES_KV_ID:-}"
-  [ -n "$acct" ] || die "CLOUDFLARE_ACCOUNT_ID missing for KV"
-  [ -n "$ns" ] || die "FORGE_SHARES_KV_ID missing for KV"
-  local url="https://api.cloudflare.com/client/v4/accounts/${acct}/storage/kv/namespaces/${ns}${path}"
-  if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
-    curl -sS -X "$method" "$url" -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" "$@"
-  else
-    curl -sS -X "$method" "$url" \
-      -H "X-Auth-Email: ${CLOUDFLARE_EMAIL}" -H "X-Auth-Key: ${CLOUDFLARE_API_KEY}" "$@"
-  fi
-}
-
 wrangler_bin() {
   if command -v wrangler >/dev/null 2>&1; then
     printf '%s\n' wrangler
@@ -373,38 +406,135 @@ wrangler_bin() {
   fi
 }
 
+kv_curl() {
+  local method="$1" path="$2"
+  shift 2
+  local acct="${CLOUDFLARE_ACCOUNT_ID:-}"
+  local ns="${FORGE_SHARES_KV_ID:-}"
+  [ -n "$acct" ] || die "CLOUDFLARE_ACCOUNT_ID missing for KV"
+  [ -n "$ns" ] || die "FORGE_SHARES_KV_ID missing for KV"
+  local url="https://api.cloudflare.com/client/v4/accounts/${acct}/storage/kv/namespaces/${ns}${path}"
+  local -a auth=()
+  if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+    auth=(-H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}")
+  else
+    auth=(-H "X-Auth-Email: ${CLOUDFLARE_EMAIL}" -H "X-Auth-Key: ${CLOUDFLARE_API_KEY}")
+  fi
+  curl -sS -w '\n%{http_code}' -X "$method" "$url" "${auth[@]}" "$@"
+}
+
+kv_api_success() {
+  python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("success") else 1)' 2>/dev/null
+}
+
+kv_get_key() {
+  local key="$1"
+  local acct="${CLOUDFLARE_ACCOUNT_ID:-}"
+  local ns="${FORGE_SHARES_KV_ID:-}"
+  local url tmp http_code
+  tmp=$(mktemp)
+  url="https://api.cloudflare.com/client/v4/accounts/${acct}/storage/kv/namespaces/${ns}/values/${key}"
+  if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+    http_code=$(curl -sS -o "$tmp" -w '%{http_code}' -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" "$url" 2>/dev/null) || {
+      rm -f "$tmp"
+      return 1
+    }
+  else
+    http_code=$(curl -sS -o "$tmp" -w '%{http_code}' \
+      -H "X-Auth-Email: ${CLOUDFLARE_EMAIL}" -H "X-Auth-Key: ${CLOUDFLARE_API_KEY}" \
+      "$url" 2>/dev/null) || {
+      rm -f "$tmp"
+      return 1
+    }
+  fi
+  if [ "$http_code" != "200" ]; then
+    rm -f "$tmp"
+    return 1
+  fi
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
+_KV_WRANGLER_OK=0
+kv_wrangler_verify() {
+  local wb="$1" acct="$2" ns="$3"
+  [ "$_KV_WRANGLER_OK" -eq 1 ] && return 0
+  local out
+  if ! out=$(env -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_API_KEY -u CLOUDFLARE_EMAIL \
+    CLOUDFLARE_ACCOUNT_ID="$acct" \
+    $wb whoami 2>&1); then
+    warn "wrangler OAuth not available — run: wrangler login"
+    return 1
+  fi
+  if ! echo "$out" | grep -qF "$acct"; then
+    warn "wrangler OAuth account mismatch (expected ${acct:0:8}…)"
+    return 1
+  fi
+  if ! env -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_API_KEY -u CLOUDFLARE_EMAIL \
+    CLOUDFLARE_ACCOUNT_ID="$acct" \
+    $wb kv namespace list 2>/dev/null | grep -qF "$ns"; then
+    warn "wrangler OAuth cannot see KV namespace ${ns:0:8}…"
+    return 1
+  fi
+  _KV_WRANGLER_OK=1
+  return 0
+}
+
 # Pages deploy tokens often lack KV API scope; wrangler OAuth may still work.
 kv_wrangler() {
-  local wb ns="${FORGE_SHARES_KV_ID:-}"
+  local wb ns="${FORGE_SHARES_KV_ID:-}" acct="${CLOUDFLARE_ACCOUNT_ID:-}"
   [ -n "$ns" ] || return 1
+  [ -n "$acct" ] || return 1
   wb=$(wrangler_bin) || return 1
+  kv_wrangler_verify "$wb" "$acct" "$ns" || return 1
   # shellcheck disable=SC2086
-  env -u CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-}" \
+  env -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_API_KEY -u CLOUDFLARE_EMAIL \
+    CLOUDFLARE_ACCOUNT_ID="$acct" \
     $wb "$@" --remote --namespace-id="$ns"
 }
 
 kv_put_value() {
   local key="$1" val="$2"
   if kv_auth_ok; then
-    if kv_curl PUT "/values/${key}" -H "Content-Type: text/plain" --data "$val" \
-      | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("success") else 1)'; then
+    local resp body code
+    resp=$(kv_curl PUT "/values/${key}" -H "Content-Type: text/plain" --data "$val" 2>/dev/null) || true
+    body="${resp%$'\n'*}"
+    code="${resp##*$'\n'}"
+    if [ "$code" = "200" ] && echo "$body" | kv_api_success; then
       return 0
     fi
     warn "KV API token rejected — trying wrangler OAuth"
   fi
-  kv_wrangler kv key put "$key" "$val" >/dev/null 2>&1
+  if ! kv_wrangler kv key put "$key" "$val" >/dev/null 2>&1; then
+    return 1
+  fi
+  local got
+  got=$(kv_get_key "$key" 2>/dev/null || true)
+  if [ -n "$got" ] && [ "$got" != "$val" ]; then
+    warn "KV post-read mismatch for $key"
+    return 1
+  fi
 }
 
 kv_delete_key() {
   local key="$1"
   if kv_auth_ok; then
-    if kv_curl DELETE "/values/${key}" \
-      | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("success") else 1)'; then
+    local resp body code
+    resp=$(kv_curl DELETE "/values/${key}" 2>/dev/null) || true
+    body="${resp%$'\n'*}"
+    code="${resp##*$'\n'}"
+    if [ "$code" = "200" ] && echo "$body" | kv_api_success; then
       return 0
     fi
     warn "KV API token rejected — trying wrangler OAuth"
   fi
-  kv_wrangler kv key delete "$key" >/dev/null 2>&1
+  if ! kv_wrangler kv key delete "$key" >/dev/null 2>&1; then
+    return 1
+  fi
+  if kv_get_key "$key" >/dev/null 2>&1; then
+    warn "KV post-read: $key still present after delete"
+    return 1
+  fi
 }
 
 kv_put_share() {
@@ -422,20 +552,34 @@ kv_set_visibility() {
 kv_activate_share() {
   local slug="$1" key="$2"
   kv_put_share "$slug" "$key" || return 1
-  kv_set_visibility "$slug" "shared" || return 1
+  if ! kv_set_visibility "$slug" "shared"; then
+    kv_delete_share "$slug" || true
+    return 1
+  fi
 }
 
 kv_revoke_share() {
   local slug="$1"
-  kv_delete_share "$slug" || return 1
   kv_set_visibility "$slug" "private" || return 1
+  kv_delete_share "$slug" || return 1
 }
 
+# Fail-closed clear for slug removal/reuse:
+#   1) delete share key (link stops working)
+#   2) set vis:private tombstone (kept intentionally — NOT deleted)
 kv_clear_artifact_auth() {
   local slug="$1"
-  [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] && [ -n "${FORGE_SHARES_KV_ID:-}" ] || return 1
-  kv_delete_key "share:${slug}" || true
-  kv_delete_key "vis:${slug}" || true
+  if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ] || [ -z "${FORGE_SHARES_KV_ID:-}" ]; then
+    warn "KV credentials missing — cannot clear share/vis for $slug"
+    return 1
+  fi
+  kv_delete_key "share:${slug}" || return 1
+  kv_set_visibility "$slug" "private" || return 1
+  local v
+  v=$(kv_get_key "share:${slug}" 2>/dev/null || true)
+  [ -z "$v" ] || { warn "post-read: share:${slug} still present"; return 1; }
+  v=$(kv_get_key "vis:${slug}" 2>/dev/null || true)
+  [ "$v" = "private" ] || { warn "post-read: vis:${slug} tombstone missing"; return 1; }
   return 0
 }
 
@@ -450,13 +594,19 @@ maybe_shortlink() {
     warn "shlink CLI missing — no auto shortlink"
     return 1
   fi
-  if shlink short -- "$long_url" "$short_slug" 2>/dev/null; then
+  # Upsert: edit existing short code when possible (no API key in output)
+  if shlink short-url:edit --long-url="$long_url" "$short_slug" >/dev/null 2>&1 \
+    || shlink update -- "$short_slug" "$long_url" >/dev/null 2>&1; then
+    echo "https://${SHLINK_DOMAIN}/${short_slug}"
+    return 0
+  fi
+  if shlink short -- "$long_url" "$short_slug" >/dev/null 2>&1; then
     echo "https://${SHLINK_DOMAIN}/${short_slug}"
     return 0
   fi
   local r
   r=$(python3 -c "import secrets; print(secrets.token_hex(2))")
-  if shlink short -- "$long_url" "${short_slug}-${r}" 2>/dev/null; then
+  if shlink short -- "$long_url" "${short_slug}-${r}" >/dev/null 2>&1; then
     echo "https://${SHLINK_DOMAIN}/${short_slug}-${r}"
     return 0
   fi
@@ -488,9 +638,9 @@ create_share_kv() {
   [ -d "${ARTIFACTS_ROOT}/${slug}" ] || die "hub artifact missing: $slug"
 
   if kv_activate_share "$slug" "$key"; then
-    info "KV share:${slug} + vis:shared OK"
+    info "KV share:${slug} + vis:shared OK" >&2
   else
-    die "KV share activation failed — set CLOUDFLARE_API_TOKEN with Workers KV Edit, or wrangler login (OAuth)"
+    return 1
   fi
   set_hub_shared "$slug" true
   short_url=""
@@ -498,10 +648,23 @@ create_share_kv() {
     short_url="$su"
   fi
   if [ -n "$short_url" ]; then
-    echo "$short_url"
+    printf '%s\n' "$short_url"
   else
-    echo "$share_url"
+    printf '%s\n' "$share_url"
   fi
+}
+
+# Deploy first, then activate share KV — rollback on activation failure after deploy.
+create_share_after_deploy() {
+  local slug="$1"
+  local url
+  if ! url=$(create_share_kv "$slug"); then
+    warn "share KV activation failed after deploy — rolling back"
+    kv_revoke_share "$slug" || true
+    set_hub_shared "$slug" false
+    die "share activation failed — set CLOUDFLARE_API_TOKEN with Workers KV Edit, or wrangler login (OAuth)"
+  fi
+  printf '%s' "$url"
 }
 
 cmd_list() {
@@ -541,13 +704,12 @@ cmd_remove() {
   validate_slug "$slug"
   require_forge_config
   [ -n "${ARTIFACTS_ROOT:-}" ] || die "ARTIFACTS_ROOT missing"
+  acquire_publish_lock "$slug"
   source_cf_credentials
-  if kv_clear_artifact_auth "$slug"; then
-    info "KV cleared for $slug (share + vis)"
-  else
-    warn "KV clear failed for $slug — old share/vis may survive slug reuse"
-  fi
-  rm -rf "${ARTIFACTS_ROOT}/${slug}"
+  preflight_before_live
+  kv_clear_artifact_auth "$slug" || die "KV clear failed for $slug — abort remove (fix credentials and retry)"
+  info "KV cleared for $slug (share + vis)"
+  rm -rf "${ARTIFACTS_ROOT:?}/${slug}"
   ok "removed from hub SSOT: $slug"
   clone_engine
   build_from_hub
@@ -560,7 +722,9 @@ cmd_unshare() {
   local slug="$1"
   validate_slug "$slug"
   require_forge_config
+  acquire_publish_lock "$slug"
   source_cf_credentials
+  preflight_before_live
   if kv_revoke_share "$slug"; then
     info "KV share:${slug} revoked + vis:private"
   else
@@ -572,7 +736,9 @@ cmd_unshare() {
   local html="$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/index.html"
   if [ -f "$html" ]; then
     python3 "$(SCRIPTS)/inject-share-bar.py" "$html" --slug "$slug" || true
-    [ -n "${ARTIFACTS_ROOT:-}" ] && cp -f "$html" "${ARTIFACTS_ROOT}/${slug}/index.html" || true
+    if [ -n "${ARTIFACTS_ROOT:-}" ]; then
+      cp -f "$html" "${ARTIFACTS_ROOT}/${slug}/index.html"
+    fi
   fi
   deploy_pages || die "deploy failed after unshare"
   ok "share revoked for $slug"
@@ -582,8 +748,9 @@ cmd_share_only() {
   local slug="$1"
   validate_slug "$slug"
   require_forge_config
-  local url
-  url=$(create_share_kv "$slug")
+  acquire_publish_lock "$slug"
+  source_cf_credentials
+  preflight_before_live
   clone_engine
   build_from_hub
   local html="$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/index.html"
@@ -591,11 +758,12 @@ cmd_share_only() {
     python3 "$(SCRIPTS)/inject-share-bar.py" "$html" --slug "$slug" || true
     cp -f "$html" "${ARTIFACTS_ROOT}/${slug}/index.html" || true
   fi
-  if deploy_pages; then
-    ok "share mint"
-    echo "  URL:   $url"
-    hub_index_update "$slug"
-  fi
+  deploy_pages || die "deploy failed — share not activated"
+  local url
+  url=$(create_share_after_deploy "$slug")
+  ok "share mint"
+  echo "  URL:   $url"
+  hub_index_update "$slug"
 }
 
 inject_share_bars() {
@@ -628,6 +796,9 @@ inject_share_bars() {
 
 cmd_rebuild_index() {
   require_forge_config
+  acquire_publish_lock "_global"
+  source_cf_credentials
+  preflight_before_live
   clone_engine
   build_from_hub
   gen_og_images
@@ -638,7 +809,9 @@ cmd_rebuild_index() {
       [ -d "$s" ] || continue
       local slug
       slug=$(basename "$s")
-      [ -f "${s}og.jpg" ] && cp -f "${s}og.jpg" "${ARTIFACTS_ROOT}/${slug}/og.jpg" || true
+      if [ -f "${s}og.jpg" ]; then
+        cp -f "${s}og.jpg" "${ARTIFACTS_ROOT}/${slug}/og.jpg"
+      fi
     done
   fi
   build_from_hub
@@ -670,6 +843,9 @@ cmd_publish() {
   done
   validate_slug "$slug"
   require_forge_config
+  acquire_publish_lock "$slug"
+  source_cf_credentials
+  preflight_before_live
   [ -n "$title" ] || title="$slug"
 
   # resolve source → always land in hub first
@@ -686,7 +862,9 @@ cmd_publish() {
   resolve_source "$source"
   write_source_to_hub "$slug"
 
-  export SLUG="$slug" TITLE="$title" TYP="$typ" DESC="$desc" DAY="$(date -u +%Y-%m-%d)"
+  local day
+  day="$(date -u +%Y-%m-%d)"
+  export SLUG="$slug" TITLE="$title" TYP="$typ" DESC="$desc" DAY="$day"
   export INTERNAL_PREFIX="$INTERNAL_PREFIX"
   export SHARED=""   # preserve existing meta.shared
   export OUT="${ARTIFACTS_ROOT}/${slug}/meta.json"
@@ -721,20 +899,16 @@ cmd_publish() {
   build_from_hub
 
   local share_url=""
-  if $do_share; then
-    share_url=$(create_share_kv "$slug")
-    build_from_hub
-    python3 "$(SCRIPTS)/inject-share-bar.py" \
-      "$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/index.html" --slug "$slug" || true
-  fi
-
   if deploy_pages; then
     ok "published (hub SSOT + wrangler Pages)"
     echo "  Team: https://${PUBLIC_HOST}${path_url}  (Access)"
-    if [ -n "$share_url" ]; then
+    if $do_share; then
+      share_url=$(create_share_after_deploy "$slug")
       echo "  Share:   $share_url  (public, unlisted)"
     fi
     hub_index_update "$slug"
+  elif $do_share; then
+    warn "deploy failed — share not activated (no KV mutation)"
   fi
 }
 

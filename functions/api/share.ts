@@ -2,11 +2,14 @@
  * POST /api/share  { slug, rotate? }  → mint share URL (sets visibility=shared)
  * GET  /api/share?slug=…             → { active } only (team JWT)
  * DELETE /api/share { slug }         → revoke + visibility=private
+ *
+ * POST/DELETE: team JWT or X-Forge-Share-Secret (ops). Team path requires CSRF guard.
  */
 import {
   type ForgeEnv,
   SLUG_RE,
   activateShare,
+  isOpsShareBypass,
   isShareApiRequest,
   isTeamRequest,
   json,
@@ -14,15 +17,11 @@ import {
   publicOrigin,
   revokeShare,
 } from "../_lib/access"
+import { assetExists } from "../_lib/assets"
+import { enforceMutationGuard } from "../_lib/csrf"
 import { maybeShortlink } from "../_lib/shlink"
 
 type Env = ForgeEnv
-
-async function assetExists(env: Env, request: Request, slug: string): Promise<boolean> {
-  const url = new URL(`/a/${slug}/index.html`, request.url)
-  const res = await env.ASSETS.fetch(new Request(url.toString()))
-  return res.ok
-}
 
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   const url = new URL(context.request.url)
@@ -41,6 +40,11 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
   const request = context.request
   if (!(await isShareApiRequest(request, context.env))) {
     return json({ error: "unauthorized" }, 401)
+  }
+
+  if (!isOpsShareBypass(request, context.env)) {
+    const csrf = enforceMutationGuard(request, context.env)
+    if (csrf) return csrf
   }
 
   let body: { slug?: string; rotate?: boolean } = {}
@@ -83,6 +87,11 @@ export const onRequestDelete: PagesFunction<Env> = async (context) => {
   const request = context.request
   if (!(await isShareApiRequest(request, context.env))) {
     return json({ error: "unauthorized" }, 401)
+  }
+
+  if (!isOpsShareBypass(request, context.env)) {
+    const csrf = enforceMutationGuard(request, context.env)
+    if (csrf) return csrf
   }
 
   let body: { slug?: string } = {}

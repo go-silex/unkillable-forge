@@ -24,7 +24,10 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +65,15 @@ _ENV_PUBLIC_KEYS = frozenset(
 )
 
 VAULT_MARKERS = ("00_COCKPIT", "01_COMPANY")
+
+
+class PagesEnvFetchError(Exception):
+    """Pages project env fetch failed (API unreachable or denied)."""
+
+    def __init__(self, kind: str, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -211,6 +223,280 @@ def vault_ok(hub: Path) -> bool:
     return hub.is_dir() and all((hub / m).is_dir() for m in VAULT_MARKERS)
 
 
+def forge_env_permissions(path: Path | None = None) -> dict[str, Any]:
+    """Return {ok, mode, path, issue}. Publish requires 600 or 400."""
+    p = path or forge_env_path()
+    if not p.is_file():
+        return {"ok": True, "mode": None, "path": str(p), "issue": None}
+    try:
+        mode = stat.S_IMODE(p.stat().st_mode)
+    except OSError as e:
+        return {"ok": False, "mode": None, "path": str(p), "issue": str(e)}
+    mode_s = oct(mode)[-3:]
+    if mode in (0o600, 0o400):
+        return {"ok": True, "mode": mode_s, "path": str(p), "issue": None}
+    return {
+        "ok": False,
+        "mode": mode_s,
+        "path": str(p),
+        "issue": f"forge.env mode {mode_s} — chmod 600 required before publish",
+    }
+
+
+def _read_secret_from_forge_env(key: str, path: Path | None = None) -> str:
+    """Read a single secret key from forge.env (never log)."""
+    p = path or forge_env_path()
+    if not p.is_file():
+        return ""
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k.strip() == key:
+            return v.strip().strip("'").strip('"')
+    return ""
+
+
+def resolve_api_token() -> str:
+    tok = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+    if tok:
+        return tok
+    return _read_secret_from_forge_env("CLOUDFLARE_API_TOKEN")
+
+
+def _cf_api(
+    method: str,
+    path: str,
+    token: str,
+    *,
+    timeout: float = 20.0,
+) -> tuple[int, dict[str, Any] | None, str]:
+    url = f"https://api.cloudflare.com/client/v4{path}"
+    req = urllib.request.Request(
+        url,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            code = resp.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+        body = e.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError as e:
+        return 0, None, str(e.reason)
+    try:
+        data = json.loads(body) if body else {}
+    except json.JSONDecodeError:
+        return code, None, body[:200]
+    if not isinstance(data, dict):
+        return code, None, "invalid JSON response"
+    return code, data, ""
+
+
+def fetch_pages_project(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Fetch Pages project payload. Returns structured result (never silent empty on API error)."""
+    cfg = cfg or load_config()
+    token = resolve_api_token()
+    acct = resolved_account_id(cfg)
+    project = str(cfg.get("pages_project") or "silex-forge")
+    if not token:
+        return {
+            "ok": False,
+            "plain_vars": {},
+            "error_kind": "auth_missing",
+            "error": "CLOUDFLARE_API_TOKEN missing",
+            "http_code": 0,
+        }
+    if not acct:
+        return {
+            "ok": False,
+            "plain_vars": {},
+            "error_kind": "auth_missing",
+            "error": "CLOUDFLARE_ACCOUNT_ID missing",
+            "http_code": 0,
+        }
+    code, data, err = _cf_api(
+        "GET",
+        f"/accounts/{acct}/pages/projects/{project}",
+        token,
+    )
+    if code == 0:
+        return {
+            "ok": False,
+            "plain_vars": {},
+            "error_kind": "unreachable",
+            "error": err or "network error",
+            "http_code": code,
+        }
+    if code != 200 or not data or not data.get("success"):
+        msg = (data or {}).get("errors", [{}])[0].get("message") if data else err
+        return {
+            "ok": False,
+            "plain_vars": {},
+            "error_kind": "api_error",
+            "error": msg or f"HTTP {code}",
+            "http_code": code,
+        }
+    ev = (
+        (data.get("result") or {})
+        .get("deployment_configs", {})
+        .get("production", {})
+        .get("env_vars")
+        or {}
+    )
+    plain: dict[str, str] = {}
+    for name, entry in ev.items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") == "plain_text" and entry.get("value"):
+            plain[str(name)] = str(entry["value"])
+    return {
+        "ok": True,
+        "plain_vars": plain,
+        "error_kind": None,
+        "error": None,
+        "http_code": code,
+    }
+
+
+def fetch_pages_plain_vars(cfg: dict[str, Any] | None = None) -> dict[str, str]:
+    """All production plain_text Pages vars (never secrets). Raises PagesEnvFetchError on API failure."""
+    result = fetch_pages_project(cfg)
+    if not result["ok"]:
+        raise PagesEnvFetchError(
+            str(result["error_kind"]),
+            str(result["error"]),
+        )
+    return dict(result["plain_vars"])
+
+
+def fetch_pages_plain_var(name: str, cfg: dict[str, Any] | None = None) -> str:
+    """Return one plain Pages var. Empty string if absent. Raises PagesEnvFetchError on API failure."""
+    plain = fetch_pages_plain_vars(cfg)
+    return plain.get(name, "")
+
+
+def preflight_mutations(
+    cfg: dict[str, Any] | None = None,
+    *,
+    require_kv: bool = False,
+) -> dict[str, Any]:
+    """Online preflight before KV/deploy mutations.
+
+    Shell publish uses require_kv=False so REST KV denial can fall back to wrangler OAuth.
+    doctor_online uses require_kv=True to verify token KV scope.
+    """
+    cfg = cfg or load_config()
+    errors: list[str] = []
+    warnings: list[str] = []
+    checks: dict[str, str] = {}
+    perm = forge_env_permissions()
+    if not perm["ok"]:
+        errors.append(perm["issue"] or "forge.env permissions invalid")
+
+    token = resolve_api_token()
+    acct = resolved_account_id(cfg)
+    kv = resolved_shares_kv_id(cfg)
+    project = str(cfg.get("pages_project") or "silex-forge")
+
+    if not token:
+        errors.append("CLOUDFLARE_API_TOKEN missing")
+    if not acct:
+        errors.append("CLOUDFLARE_ACCOUNT_ID missing")
+    if not kv:
+        errors.append("FORGE_SHARES_KV_ID missing")
+
+    public, _ = parse_forge_env()
+    for key in ("CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD"):
+        val = (os.environ.get(key) or public.get(key) or "").strip()
+        if not val:
+            errors.append(f"{key} missing — deploy would wipe Access JWT vars on Pages")
+
+    if not token or not acct:
+        return {
+            "ok": False,
+            "errors": errors,
+            "warnings": warnings,
+            "checks": checks,
+            "require_kv": require_kv,
+        }
+
+    code, data, err = _cf_api("GET", "/user/tokens/verify", token)
+    if code == 200 and data and data.get("success"):
+        checks["token"] = "ok"
+    else:
+        msg = (data or {}).get("errors", [{}])[0].get("message") if data else err
+        errors.append(f"token verify failed ({code}): {msg or 'unknown'}")
+
+    code, data, err = _cf_api("GET", f"/accounts/{acct}", token)
+    if code == 200 and data and data.get("success"):
+        checks["account"] = "ok"
+    else:
+        msg = (data or {}).get("errors", [{}])[0].get("message") if data else err
+        errors.append(f"account {acct[:8]}… unreachable ({code}): {msg or err}")
+
+    code, data, err = _cf_api(
+        "GET", f"/accounts/{acct}/pages/projects/{project}", token
+    )
+    if code == 200 and data and data.get("success"):
+        checks["pages_project"] = project
+    else:
+        msg = (data or {}).get("errors", [{}])[0].get("message") if data else err
+        errors.append(f"pages project '{project}' missing ({code}): {msg or err}")
+
+    if kv:
+        code, data, err = _cf_api(
+            "GET", f"/accounts/{acct}/storage/kv/namespaces/{kv}", token
+        )
+        if code == 200 and data and data.get("success"):
+            checks["kv_namespace"] = kv[:8] + "…"
+        elif require_kv:
+            msg = (data or {}).get("errors", [{}])[0].get("message") if data else err
+            errors.append(f"KV namespace unreachable ({code}): {msg or err}")
+        else:
+            checks["kv_namespace"] = "skipped (OAuth fallback OK)"
+            warnings.append(
+                "KV REST unreachable — publish --share will try wrangler OAuth if needed"
+            )
+    elif require_kv:
+        errors.append("FORGE_SHARES_KV_ID missing")
+
+    return {
+        "ok": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings,
+        "checks": checks,
+        "require_kv": require_kv,
+    }
+
+
+def doctor_online(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Optional online doctor: token, account, Pages project, KV namespace (KV required)."""
+    base = doctor(cfg)
+    pf = preflight_mutations(cfg, require_kv=True)
+    online_issues = list(pf.get("errors") or [])
+    perm = forge_env_permissions()
+    return {
+        **base,
+        "online_ok": pf["ok"],
+        "online_checks": pf.get("checks") or {},
+        "online_issues": online_issues,
+        "online_warnings": pf.get("warnings") or [],
+        "forge_env_permissions": perm,
+        "deploy_ready": base.get("deploy_ready") and perm["ok"] and pf["ok"],
+    }
+
+
 def doctor(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return structured health check. ok=False ⇒ run forge-setup."""
     cfg = cfg or load_config()
@@ -280,6 +566,10 @@ def doctor(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
             f"Write {forge_env_path()} (chmod 600) via forge-setup"
         )
 
+    perm = forge_env_permissions()
+    if not perm["ok"] and perm.get("issue"):
+        warnings.append(perm["issue"])
+
     deploy_blockers: list[str] = []
     if not has_token:
         deploy_blockers.append("token")
@@ -293,6 +583,8 @@ def doctor(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         deploy_blockers.append("CF_ACCESS_AUD")
     if not str(cfg.get("public_host") or "").strip():
         deploy_blockers.append("public_host")
+    if not perm["ok"]:
+        deploy_blockers.append("forge_env_permissions")
 
     return {
         "ok": len(issues) == 0,
@@ -311,6 +603,7 @@ def doctor(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         "cloudflare_account_id": acct or None,
         "shares_kv_namespace_id": kv or None,
         "pages_project": cfg.get("pages_project") or "silex-forge",
+        "forge_env_permissions": perm,
         "skill": "forge-setup",
     }
 
@@ -346,6 +639,16 @@ def export_env(cfg: dict[str, Any] | None = None) -> str:
 
 def main(argv: list[str]) -> int:
     args = argv[1:]
+    if "--doctor-online" in args or "--online" in args:
+        d = doctor_online()
+        print(json.dumps(d, ensure_ascii=False, indent=2))
+        ok = d.get("ok") and d.get("online_ok", False)
+        return 0 if ok else 1
+    if "--preflight" in args:
+        require_kv = "--require-kv" in args
+        pf = preflight_mutations(require_kv=require_kv)
+        print(json.dumps(pf, ensure_ascii=False, indent=2))
+        return 0 if pf["ok"] else 1
     if "--doctor" in args or "-c" in args or "--check" in args:
         d = doctor()
         print(json.dumps(d, ensure_ascii=False, indent=2))

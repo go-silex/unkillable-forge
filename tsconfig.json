@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "types": ["@cloudflare/workers-types", "vitest/globals", "node"],
+    "lib": ["ES2022", "WebWorker"],
+    "noEmit": true,
+    "paths": {
+      "@functions/*": ["./functions/*"]
+    }
+  },
+  "include": ["functions/**/*.ts", "tests/**/*.ts"]
+}

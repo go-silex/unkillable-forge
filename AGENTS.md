@@ -38,11 +38,13 @@ Content URL: `/a/<slug>/`. Catalogue `GET /` = shell; **list = `GET /api/catalog
 
 Fail-closed: no `vis:` = private. `manifest.json` is **not** served to clients.
 
+Trust boundary: publishers are trusted team members. Artifact HTML can execute JavaScript on the Forge origin; prefer self-contained output and never include untrusted third-party scripts.
+
 ### Access Zero Trust (after Functions deploy)
 
 1. Functions fail-closed in prod
 2. **Then** Bypass `/`, `/a/*`, `/s/*`, `/api/*`; **Allow team** on `/login` (JWT cookie read by Functions)
-3. `pages.dev`: 403 outside `/s/` (middleware)
+3. `pages.dev`: 403 on every path (middleware)
 
 ### Toolbar UX (team, on `/a/<slug>/`)
 
@@ -170,7 +172,7 @@ Writes `site/a/<slug>/og.jpg` (1200×630). Wired in `publish.sh` + `--rebuild-in
 4. Publish = hub SSOT + `wrangler pages deploy`; CF token = `~/.config/silex/forge.env` — never in git / GH
 5. **main** does not hold HTML (`site/a`, `registry/*.json`) — engine only
 6. After a large publish: verify Access (302 without cookie) and share (200 without cookie on `/s/.../key/`)
-7. **pages.dev** under Access (+ middleware 403) — never probe `*.pages.dev` as an open origin
+7. **pages.dev** under Access (+ middleware 403 on every path) — never use it as an alternate share origin
 8. Share secrets = **KV only** — never `share_key` in meta/registry/HTML
 9. Missing forge config → **forge-setup** (do not invent hub_root)
 10. Artifacts → hub `$artifacts_dir/<slug>/`; live CF ← Direct Upload (not git)

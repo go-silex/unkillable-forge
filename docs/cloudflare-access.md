@@ -7,7 +7,7 @@
 | `/` catalogue shell · `/a/<slug>/` | Team (Access JWT) unless visibility is **public** |
 | `/s/<slug>/<key>/` | Anyone with the secret link (Access **Bypass**) |
 | `/login` | Access **Allow** team — issues the JWT cookie Functions read |
-| `*.pages.dev` | Team only + middleware 403 outside `/s/` |
+| `*.pages.dev` | Denied by middleware on every path |
 
 Open `/p/` paths are **gone**. External share = keyed `/s/…` only.
 
@@ -19,14 +19,14 @@ After Functions are live (`x-forge-acl: vis-v4`):
 |---|---|---|
 | **Silex Forge · login** | `forge.gosilex.com/login` | Allow team emails / IdP group |
 | **Silex Forge · public surface** | `forge.gosilex.com/`, `/a/*`, `/s/*`, `/api/*` | **Bypass** everyone (Functions enforce visibility) |
-| **Silex Forge · pages.dev** | `<project>.pages.dev` | Allow team + middleware 403 outside `/s/` |
+| **Silex Forge · pages.dev** | `<project>.pages.dev` | Allow team + middleware 403 on every path |
 
 **Order matters:** deploy fail-closed Functions **first**, then flip host Bypass. Bypass before Functions = public leak.
 
 | Origin | Catalogue + `/a` | Share `/s` |
 |---|---|---|
 | `forge.gosilex.com` | Worker visibility | Function + KV |
-| `<project>.pages.dev` | middleware 403 | Function + KV only |
+| `<project>.pages.dev` | middleware 403 | middleware 403 |
 
 ## Setup checklist
 
@@ -46,7 +46,7 @@ Separate app(s) or paths: `/`, `/a/*`, `/s/*`, `/api/*` → policy **Bypass** �
 ### 3. Protect pages.dev
 
 Self-hosted app on `*.pages.dev` for the Pages project → **Allow** team.  
-Functions middleware returns 403 for non-`/s/` on that host.
+Functions middleware also returns 403 on every path, including `/s/`. Shares are canonical on the custom host only.
 
 ### 4. Wire JWT env on Pages
 
@@ -68,12 +68,14 @@ curl -sI "https://forge.gosilex.com/s/<slug>/<key>/"        # 200 without cookie
 
 # pages.dev must not be an open origin
 curl -sI "https://<project>.pages.dev/" | head -5
+curl -sI "https://<project>.pages.dev/s/<slug>/<key>/" | head -5  # 403
 ```
 
 ## Notes
 
 - A shortlink to `/a/…` stays blocked by Access for outsiders.
 - Share shortlinks should target `/s/<slug>/<key>/` (or Shlink → that URL).
+- Trust boundary: only trusted team members publish HTML. Published artifacts may execute JavaScript on the Forge origin, so prefer self-contained HTML and avoid untrusted third-party scripts.
 - See also [share-model.md](./share-model.md) and [cloudflare-pages.md](./cloudflare-pages.md).
 
 ## References

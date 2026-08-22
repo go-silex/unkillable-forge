@@ -49,7 +49,7 @@ publish.sh --unshare my-deck
 |---|---|
 | Forge host `/login` | Allow team |
 | Forge host `/`, `/a/*`, `/s/*`, `/api/*` | Bypass (Functions enforce) |
-| `*.pages.dev` | Allow team (+ middleware 403 outside `/s`) |
+| `*.pages.dev` | Allow team + middleware 403 on every path |
 
 Details: [cloudflare-access.md](./cloudflare-access.md).
 
@@ -63,6 +63,7 @@ Details: [cloudflare-access.md](./cloudflare-access.md).
 6. Rotate via `POST /api/share` `{ slug, rotate: true }` when using the share API
 
 Auth: verified Cloudflare Access JWT on team APIs.  
+Publishing is restricted to trusted team members. Artifact HTML is active same-origin content; prefer self-contained output and do not include untrusted third-party scripts.
 Ops bypass: header `X-Forge-Share-Secret` on **POST/DELETE `/api/share` only** (Pages secret) — not catalogue, `/a/*`, or `/api/visibility`.
 
 - `GET /api/share` → `{ slug, active }` only (no raw key)

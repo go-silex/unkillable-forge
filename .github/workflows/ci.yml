@@ -19,6 +19,13 @@ jobs:
       - name: Shell syntax (publish.sh)
         run: bash -n plugins/silex-forge/scripts/publish.sh
 
+      - name: ShellCheck (publish.sh, forge-doctor)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -e SC1091,SC2086 plugins/silex-forge/scripts/publish.sh
+          shellcheck plugins/silex-forge/scripts/forge-doctor.sh
+
       - name: Python compile
         run: |
           python3 -m py_compile plugins/silex-forge/scripts/lib/load_config.py
@@ -36,6 +43,7 @@ jobs:
             "https://s.example.com/rest/v3/short-urls"
           grep -q 'CF_ACCESS_TEAM_DOMAIN' /tmp/wrangler-ci.toml
           grep -q 'PUBLIC_HOST' /tmp/wrangler-ci.toml
+          grep -q 'SHLINK_API_URL' /tmp/wrangler-ci.toml
 
       - name: Example config loads
         run: |
@@ -55,11 +63,66 @@ jobs:
             [ "$extras" -eq 0 ] || (echo "registry must not contain JSON payloads" && exit 1)
           fi
 
-      - name: No hardcoded infra IDs in tree
+      # Secret / infra scan — exclusions documented to avoid false positives:
+      #   :!*.md          prose may mention token shapes
+      #   :!tests/**      fake tokens / contract fixtures
+      #   :!.env.example placeholder names only
+      #   :!CHANGELOG.md  release notes
+      - name: Secret / infra ID scan
         run: |
-          ! git grep -E 'CLOUDFLARE_ACCOUNT_ID=[0-9a-f]{32}' -- . || \
-            (echo "found hardcoded CF account id" && exit 1)
-          ! git grep -E 'FORGE_SHARES_KV_ID=[0-9a-f]{32}' -- . || \
-            (echo "found hardcoded KV namespace id" && exit 1)
-          ! git grep -E 'id = "[0-9a-f]{32}"' wrangler.toml 2>/dev/null || \
-            (echo "found KV id in wrangler.toml" && exit 1)
+          set -e
+          scan() {
+            git grep -E "$1" -- . \
+              ':!*.md' \
+              ':!tests/**' \
+              ':!.env.example' \
+              ':!CHANGELOG.md' \
+              ':!package-lock.json'
+          }
+          if scan 'CLOUDFLARE_ACCOUNT_ID=[0-9a-f]{32}'; then
+            echo "found hardcoded CF account id"; exit 1
+          fi
+          if scan 'FORGE_SHARES_KV_ID=[0-9a-f]{32}'; then
+            echo "found hardcoded KV namespace id"; exit 1
+          fi
+          if git grep -E 'id = "[0-9a-f]{32}"' wrangler.toml 2>/dev/null; then
+            echo "found KV id in wrangler.toml"; exit 1
+          fi
+          token_prefix='cf''ut_'
+          key_prefix='cf''k_'
+          token_assignment='CLOUDFLARE_API_''TOKEN='
+          if scan "${token_prefix}[A-Za-z0-9_-]{20,}|${key_prefix}[A-Za-z0-9_-]{20,}|${token_assignment}[^[:space:]]{16,}"; then
+            echo "possible committed Cloudflare credential pattern"; exit 1
+          fi
+
+  test:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install JS test deps
+        run: npm ci
+
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Vitest (Functions hardening spec)
+        run: npm test
+
+      - name: Python unit tests
+        run: python3 -m unittest discover -s tests/python -p 'test_*.py' -v
+
+      - name: Shell contract tests
+        run: |
+          bash tests/shell/test_publish_contracts.sh
+          bash tests/shell/test_forge_doctor.sh
