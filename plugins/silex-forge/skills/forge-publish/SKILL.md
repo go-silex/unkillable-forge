@@ -29,10 +29,16 @@ Generating HTML = **`silex-craft@silex-plugins`** (`silex-slides` · `silex-onep
 ## Config prerequisites
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/forge-doctor.sh"
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
+if [ -z "$FORGE_ROOT" ]; then
+  echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
+  exit 1
+fi
+bash "$FORGE_ROOT/scripts/forge-doctor.sh"
 ```
 
-If **KO** → skill **`forge-setup`** (do not invent `hub_root`).  
+If **KO** → stop. Ask the operator to run **forge-setup** themselves (`/forge-setup`; Codex `$forge-setup`; OMP `/skill:forge-setup`). Do not invent `hub_root`. Do not invoke forge-setup.
+
 Publish also needs `~/.config/silex/forge.env` (Pages token + account + KV id).  
 Doctor warns if absent. See repo `.env.example`.
 
@@ -42,7 +48,12 @@ Local config: `~/.config/silex/forge.config.json` (fallback plugin
 ## Usage
 
 ```bash
-S="${CLAUDE_PLUGIN_ROOT}/scripts/publish.sh"
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
+if [ -z "$FORGE_ROOT" ]; then
+  echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
+  exit 1
+fi
+S="$FORGE_ROOT/scripts/publish.sh"
 # in-repo: S=plugins/silex-forge/scripts/publish.sh
 
 # From hub SSOT (path omitted if $artifacts/<slug>/index.html exists)

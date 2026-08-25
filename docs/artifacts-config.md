@@ -41,8 +41,7 @@ plugins/.../forge.config.example.json # defaults + code fallback
 ```
 
 Doctor: `plugins/silex-forge/scripts/forge-doctor.sh`  
-Setup: skill `forge-setup`  
-SessionStart hook: remind if config KO. Missing token = warning (generate OK, publish KO).
+Setup: `/forge-setup` (user-invoked; first publish if doctor KO). Missing token = warning (generate OK, publish KO).
 
 ## Commands
 

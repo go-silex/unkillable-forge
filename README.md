@@ -53,19 +53,51 @@ Publishers are trusted team members. Artifact HTML is active same-origin content
 
 ## Quick start
 
-### 1. Install the plugin (user scope)
+### Install the plugin
+
+One plugin tree (`plugins/silex-forge/`). Pick the harness:
+
+#### Claude Code
 
 ```text
 /plugin marketplace add go-silex/silex-forge
 /plugin install silex-forge@silex-forge
 ```
 
-Craft HTML separately: **`silex-craft@silex-plugins`**.
-
-### 2. Machine setup
+#### Grok
 
 ```bash
-# interactive skill → forge-setup
+grok plugin marketplace add go-silex/silex-forge
+grok plugin install silex-forge --trust
+```
+
+#### Codex
+
+```bash
+codex plugin marketplace add go-silex/silex-forge
+codex plugin add silex-forge@silex-forge
+```
+
+CLI verb is `plugin add`, not `plugin install`. Start a new thread after install.
+
+#### Oh My Pi
+
+From a clone of this repo (the installable package is `plugins/silex-forge/`, not the repo root):
+
+```bash
+omp plugin link ./plugins/silex-forge
+```
+
+Restart OMP. Link is user-global; files stay in the checkout.
+
+Marketplace install (`omp plugin marketplace add go-silex/silex-forge` then `omp plugin install silex-forge@silex-forge`) is the catalog path. Its skills load only if OMP’s `claude-plugins` provider is enabled. `link` is the native package path. Do not point `omp plugin install github:go-silex/silex-forge` at this repo — that installs the engine root, not the plugin.
+
+Craft HTML separately: **`silex-craft@silex-plugins`**.
+
+### Machine setup
+
+```bash
+# first publish if doctor KO → /forge-setup (manual)
 plugins/silex-forge/scripts/forge-doctor.sh
 
 cp .env.example ~/.config/silex/forge.env
@@ -80,7 +112,7 @@ chmod 600 ~/.config/silex/forge.env
 | `.env.example` | committed placeholders |
 | `plugins/…/forge.config.example.json` | defaults / fallback |
 
-### 3. Publish
+### Publish
 
 ```bash
 S=plugins/silex-forge/scripts/publish.sh
@@ -125,7 +157,7 @@ Never put secrets in `site/`. Never list share keys in the catalogue.
 
 ```
 .env.example                  # forge.env placeholders
-plugins/silex-forge/          # Claude plugin (publish + setup)
+plugins/silex-forge/          # multi-harness plugin (publish + setup)
 functions/                    # Access middleware, /api/*, /s/*
 site/                         # skeleton only — no artifact HTML
 docs/                         # Access, Pages, share, hub config

@@ -1,0 +1,5 @@
+interface:
+  display_name: "Forge setup"
+  short_description: "One-time silex-hub path and artifacts config"
+policy:
+  allow_implicit_invocation: false

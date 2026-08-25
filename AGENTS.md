@@ -73,7 +73,6 @@ Deploy: `publish.sh` → `wrangler pages deploy` (token in `~/.config/silex/forg
 # main = ENGINE only (CF upload)
 plugins/silex-forge/ # publish + setup — NOT HTML craft
  forge.config.example.json
- hooks/ # SessionStart → doctor
  scripts/publish.sh · build-site-from-hub.py · forge-doctor.sh
 functions/ # Access middleware, /api/*, /s/*
 site/ # skeleton only (404, _headers, …) — NOT artifact HTML
@@ -102,10 +101,10 @@ site/ # skeleton only (404, _headers, …) — NOT artifact HTML
 ```bash
 plugins/silex-forge/scripts/forge-doctor.sh
 plugins/silex-forge/scripts/publish.sh --rebuild-index # hub → wrangler Pages
-# interactive setup → skill forge-setup
+# first publish: doctor KO → operator runs /forge-setup
 ```
 
-Loader: local → example. Hook SessionStart: config KO → **forge-setup**.
+Loader: local → example. `forge-publish` doctor KO → operator runs **`/forge-setup`** (do not invent hub_root).
 
 ## Plugin in this repo
 
@@ -117,12 +116,11 @@ Craft HTML Halo / onepager / cheatsheet → **`silex-craft@silex-plugins`**.
 Generic slide engine + diagrams → external plugins (see **forge-setup**).  
 **Rocky**: `rocky@rocky` (`go-silex/rocky`) — outside this repo.
 
-Install (user scope):
+Harness-specific plugin install and validation: README → Install the plugin.
+
+Related plugins (Claude):
 
 ```
-/plugin marketplace add go-silex/silex-forge
-/plugin install silex-forge@silex-forge
-
 /plugin marketplace add go-silex/silex-plugins
 /plugin install silex-craft@silex-plugins
 
@@ -174,6 +172,6 @@ Writes `site/a/<slug>/og.jpg` (1200×630). Wired in `publish.sh` + `--rebuild-in
 6. After a large publish: verify Access (302 without cookie) and share (200 without cookie on `/s/.../key/`)
 7. **pages.dev** under Access (+ middleware 403 on every path) — never use it as an alternate share origin
 8. Share secrets = **KV only** — never `share_key` in meta/registry/HTML
-9. Missing forge config → **forge-setup** (do not invent hub_root)
+9. Missing forge config → tell the operator to run `/forge-setup` (do not invent hub_root; do not auto-invoke forge-setup)
 10. Artifacts → hub `$artifacts_dir/<slug>/`; live CF ← Direct Upload (not git)
 11. No Cloudflare account / Access AUD / KV namespace IDs in git — `.env.example` placeholders only

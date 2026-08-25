@@ -1,0 +1,7 @@
+{
+  "name": "silex-forge",
+  "version": "1.8.0",
+  "description": "Cloudflare Pages upload for team artifact hosts — forge-publish and forge-setup.",
+  "author": { "name": "Silex", "url": "https://github.com/go-silex" },
+  "skills": "./skills/"
+}

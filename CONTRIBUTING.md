@@ -2,7 +2,7 @@
 
 Thanks for your interest in this project.
 
-**silex-forge** is the **engine + Claude plugin** for hosting team HTML artifacts on Cloudflare Pages.  
+**silex-forge** is the **engine + plugin** for hosting team HTML artifacts on Cloudflare Pages (Claude, Grok, OMP, Codex).  
 It is **not** the place for decks, talks, or client HTML — those live in **silex-hub** (outside git).
 
 ## What we accept
@@ -22,12 +22,9 @@ It is **not** the place for decks, talks, or client HTML — those live in **sil
 
 ## Development setup
 
-### Install the plugin (user scope)
+### Install the plugin
 
-```text
-/plugin marketplace add go-silex/silex-forge
-/plugin install silex-forge@silex-forge --scope user
-```
+Harness-specific install commands: [README.md → Install the plugin](README.md#install-the-plugin).
 
 ### Machine config (for publish tests)
 
@@ -51,12 +48,19 @@ You need a valid **silex-hub** path in `~/.config/silex/forge.config.json`. Do n
 ## Plugin layout
 
 ```
-.claude-plugin/marketplace.json    # marketplace catalog
+.claude-plugin/marketplace.json    # Claude marketplace catalog
+.grok-plugin/marketplace.json      # Grok marketplace catalog
+.omp-plugin/marketplace.json       # OMP marketplace catalog
+.agents/plugins/marketplace.json   # Codex repo marketplace
 plugins/silex-forge/
-  .claude-plugin/plugin.json       # plugin manifest
+  .claude-plugin/plugin.json       # Claude plugin manifest
+  .grok-plugin/plugin.json         # Grok plugin manifest
+  .omp-plugin/plugin.json          # OMP plugin manifest
+  .codex-plugin/plugin.json        # Codex plugin manifest
+  package.json                     # OMP package (link / omp-plugins)
   skills/forge-publish/SKILL.md
   skills/forge-setup/SKILL.md
-  hooks/                           # SessionStart → doctor
+  skills/forge-setup/agents/openai.yaml  # Codex: no implicit invocation
   scripts/publish.sh
   scripts/forge-doctor.sh
   scripts/lib/load_config.py
@@ -81,10 +85,18 @@ When changing behavior, update **skills** if user-facing workflows change.
 
 ### Version bumps
 
-If you change the plugin surface (skills, scripts, hooks):
+If you change the plugin surface (skills, scripts, manifests):
 
-- Bump `version` in `plugins/silex-forge/.claude-plugin/plugin.json`
-- Bump `version` in `.claude-plugin/marketplace.json`
+- Bump `version` in all version-bearing manifests:
+  - `plugins/silex-forge/.claude-plugin/plugin.json`
+  - `plugins/silex-forge/.grok-plugin/plugin.json`
+  - `plugins/silex-forge/.omp-plugin/plugin.json`
+  - `plugins/silex-forge/.codex-plugin/plugin.json`
+  - `plugins/silex-forge/package.json`
+  - `.claude-plugin/marketplace.json` (catalog + plugin entry)
+  - `.grok-plugin/marketplace.json` (catalog + plugin entry)
+  - `.omp-plugin/marketplace.json` (`metadata.version` + plugin entry)
+- Codex `.agents/plugins/marketplace.json` has no version field — version comes from `.codex-plugin/plugin.json`
 - Add a CHANGELOG entry
 - Maintainers tag `vX.Y.Z` on merge when appropriate
 

@@ -1,0 +1,20 @@
+{
+  "name": "silex-forge",
+  "interface": {
+    "displayName": "Silex Forge"
+  },
+  "plugins": [
+    {
+      "name": "silex-forge",
+      "source": {
+        "source": "local",
+        "path": "./plugins/silex-forge"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

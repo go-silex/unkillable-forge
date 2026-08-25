@@ -1,18 +1,16 @@
 ---
 name: forge-setup
 description: >-
-  Set up / doctor machine config for silex-forge (hub_root + artifacts in
-  silex-hub). Creates ~/.config/silex/forge.config.json from the example if
-  missing, validates the vault, creates the artifacts folder. Triggers:
-  "forge setup" | "forge doctor" | "setup forge" | "config forge" |
-  "forge config missing".
+  One-time machine config for silex-forge — local silex-hub path and
+  artifacts folder.
+disable-model-invocation: true
 ---
 
 # forge-setup — machine config for silex-forge
 
 Configure the **local silex-hub path** (differs per person) and the central
-artifacts folder. Without this config, the SessionStart hook and publish
-skills refuse to invent a path.
+artifacts folder. Without this config, forge-publish stops and asks you to
+run this skill. Do not invent a path.
 
 ## Long-term model
 
@@ -41,7 +39,12 @@ path in the local config.
 ## Step 0 — Doctor
 
 ```bash
-S="${CLAUDE_PLUGIN_ROOT}/scripts/forge-doctor.sh"
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
+if [ -z "$FORGE_ROOT" ]; then
+  echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
+  exit 1
+fi
+S="$FORGE_ROOT/scripts/forge-doctor.sh"
 # in-repo:
 # S=plugins/silex-forge/scripts/forge-doctor.sh
 bash "$S"
@@ -77,13 +80,17 @@ If KO → do not write. Explain the vault lives outside the forge repo.
 ## Step 2 — Write local config
 
 ```bash
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
+if [ -z "$FORGE_ROOT" ]; then
+  echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
+  exit 1
+fi
 mkdir -p ~/.config/silex
 chmod 700 ~/.config/silex
 
-EXAMPLE="${CLAUDE_PLUGIN_ROOT}/forge.config.example.json"
+EXAMPLE="$FORGE_ROOT/forge.config.example.json"
 # in-repo: plugins/silex-forge/forge.config.example.json
 LOCAL=~/.config/silex/forge.config.json
-
 python3 - <<PY
 import json
 from pathlib import Path
@@ -118,7 +125,12 @@ fi
 ## Step 3 — Artifacts folder
 
 ```bash
-ART="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lib/load_config.py" --print-artifacts)"
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
+if [ -z "$FORGE_ROOT" ]; then
+  echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
+  exit 1
+fi
+ART="$(python3 "$FORGE_ROOT/scripts/lib/load_config.py" --print-artifacts)"
 mkdir -p "$ART"
 echo "artifacts: $ART"
 if [ ! -f "$ART/README.md" ]; then
@@ -137,8 +149,13 @@ fi
 ## Step 4 — Final doctor
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/forge-doctor.sh"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/forge-doctor.sh --online   # optional: token/account/project/KV via API
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
+if [ -z "$FORGE_ROOT" ]; then
+  echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
+  exit 1
+fi
+bash "$FORGE_ROOT/scripts/forge-doctor.sh"
+bash "$FORGE_ROOT/scripts/forge-doctor.sh" --online
 ```
 
 Report:
