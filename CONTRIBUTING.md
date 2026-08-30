@@ -92,6 +92,7 @@ If you change the plugin surface (skills, scripts, manifests):
   - `plugins/silex-forge/.grok-plugin/plugin.json`
   - `plugins/silex-forge/.omp-plugin/plugin.json`
   - `plugins/silex-forge/.codex-plugin/plugin.json`
+  - `plugins/silex-forge/plugin.json` (Agent Plugins `$schema` 1.0.0 — OMP marketplace skills with `claude-plugins` off)
   - `plugins/silex-forge/package.json`
   - `.claude-plugin/marketplace.json` (catalog + plugin entry)
   - `.grok-plugin/marketplace.json` (catalog + plugin entry)

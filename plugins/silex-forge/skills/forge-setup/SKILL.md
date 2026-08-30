@@ -2,8 +2,7 @@
 name: forge-setup
 description: >-
   One-time machine config for silex-forge — local silex-hub path and
-  artifacts folder.
-disable-model-invocation: true
+  artifacts folder. Operator-invoked only (do not run unless asked).
 ---
 
 # forge-setup — machine config for silex-forge
@@ -40,7 +39,25 @@ path in the local config.
 
 ```bash
 FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
-if [ -z "$FORGE_ROOT" ]; then
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  for _c in \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/omp/plugins/node_modules/silex-forge" \
+    "$HOME/.omp/plugins/node_modules/silex-forge"
+  do
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+  done
+fi
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  _d="$PWD"
+  while [ "$_d" != "/" ]; do
+    _c="$_d/.omp/plugins/node_modules/silex-forge"
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+    _d="$(dirname "$_d")"
+  done
+  unset _d
+fi
+unset _c
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
   echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
   exit 1
 fi
@@ -81,7 +98,25 @@ If KO → do not write. Explain the vault lives outside the forge repo.
 
 ```bash
 FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
-if [ -z "$FORGE_ROOT" ]; then
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  for _c in \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/omp/plugins/node_modules/silex-forge" \
+    "$HOME/.omp/plugins/node_modules/silex-forge"
+  do
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+  done
+fi
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  _d="$PWD"
+  while [ "$_d" != "/" ]; do
+    _c="$_d/.omp/plugins/node_modules/silex-forge"
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+    _d="$(dirname "$_d")"
+  done
+  unset _d
+fi
+unset _c
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
   echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
   exit 1
 fi
@@ -126,7 +161,25 @@ fi
 
 ```bash
 FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
-if [ -z "$FORGE_ROOT" ]; then
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  for _c in \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/omp/plugins/node_modules/silex-forge" \
+    "$HOME/.omp/plugins/node_modules/silex-forge"
+  do
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+  done
+fi
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  _d="$PWD"
+  while [ "$_d" != "/" ]; do
+    _c="$_d/.omp/plugins/node_modules/silex-forge"
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+    _d="$(dirname "$_d")"
+  done
+  unset _d
+fi
+unset _c
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
   echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
   exit 1
 fi
@@ -150,7 +203,25 @@ fi
 
 ```bash
 FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
-if [ -z "$FORGE_ROOT" ]; then
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  for _c in \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/omp/plugins/node_modules/silex-forge" \
+    "$HOME/.omp/plugins/node_modules/silex-forge"
+  do
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+  done
+fi
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  _d="$PWD"
+  while [ "$_d" != "/" ]; do
+    _c="$_d/.omp/plugins/node_modules/silex-forge"
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+    _d="$(dirname "$_d")"
+  done
+  unset _d
+fi
+unset _c
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
   echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
   exit 1
 fi

@@ -1,6 +1,6 @@
 {
   "name": "silex-forge",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "description": "Cloudflare Pages upload for team artifact hosts — forge-publish and forge-setup.",
   "author": {
     "name": "Silex",

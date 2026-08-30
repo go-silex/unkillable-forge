@@ -7,6 +7,18 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 **Out of scope for this file:** team HTML artifacts (hub + live deploy). Those are not versioned in git.
 
+## [1.8.1] - 2026-08-30
+
+### Added
+
+- Root `plugin.json` `$schema` Agent Plugins 1.0.0 — OMP marketplace install loads skills with `claude-plugins` off
+- OMP plugin-root fallback probes XDG, `~/.omp`, and project `.omp` in `forge-publish` / `forge-setup`
+
+### Changed
+
+- OMP install docs: `omp plugin install silex-forge@silex-forge` is the checkout-free path
+- `forge-setup` drops `disable-model-invocation` (not in the Agent Plugins frontmatter allow-list); Codex still uses `agents/openai.yaml`
+
 ## [1.8.0] - 2026-08-25
 
 ### Added
@@ -126,6 +138,7 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 - Cloudflare Pages host for team decks and guides
 - Plugin marketplace manifest (`.claude-plugin/marketplace.json`)
 
+[1.8.1]: https://github.com/go-silex/silex-forge/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/go-silex/silex-forge/compare/v1.7.3...v1.8.0
 [1.7.3]: https://github.com/go-silex/silex-forge/compare/v1.7.2...v1.7.3
 [1.7.2]: https://github.com/go-silex/silex-forge/compare/v1.7.1...v1.7.2
