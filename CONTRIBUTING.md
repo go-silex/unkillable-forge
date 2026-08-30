@@ -96,6 +96,7 @@ If you change the plugin surface (skills, scripts, manifests):
   - `.claude-plugin/marketplace.json` (catalog + plugin entry)
   - `.grok-plugin/marketplace.json` (catalog + plugin entry)
   - `.omp-plugin/marketplace.json` (`metadata.version` + plugin entry)
+- Keep `.omp-plugin/plugin.json` `$schema` on Agent Plugins 1.0.0 (OMP marketplace skills with `claude-plugins` off)
 - Codex `.agents/plugins/marketplace.json` has no version field — version comes from `.codex-plugin/plugin.json`
 - Add a CHANGELOG entry
 - Maintainers tag `vX.Y.Z` on merge when appropriate

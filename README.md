@@ -82,15 +82,20 @@ CLI verb is `plugin add`, not `plugin install`. Start a new thread after install
 
 #### Oh My Pi
 
-From a clone of this repo (the installable package is `plugins/silex-forge/`, not the repo root):
+Checkout-free (skills load via Agent Plugins `$schema`, even with `claude-plugins` off):
+
+```bash
+omp plugin marketplace add go-silex/silex-forge
+omp plugin install silex-forge@silex-forge
+```
+
+Then `/reload-plugins` (or restart). Dev on a clone — live symlink:
 
 ```bash
 omp plugin link ./plugins/silex-forge
 ```
 
-Restart OMP. Link is user-global; files stay in the checkout.
-
-Marketplace install (`omp plugin marketplace add go-silex/silex-forge` then `omp plugin install silex-forge@silex-forge`) is the catalog path. Its skills load only if OMP’s `claude-plugins` provider is enabled. `link` is the native package path. Do not point `omp plugin install github:go-silex/silex-forge` at this repo — that installs the engine root, not the plugin.
+Link is user-global; files stay in the checkout. Do not `omp plugin install github:go-silex/silex-forge` — that installs the engine root, not the plugin.
 
 Craft HTML separately: **`silex-craft@silex-plugins`**.
 

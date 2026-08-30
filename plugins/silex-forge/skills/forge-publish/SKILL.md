@@ -29,8 +29,8 @@ Generating HTML = **`silex-craft@silex-plugins`** (`silex-slides` · `silex-onep
 ## Config prerequisites
 
 ```bash
-FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
-if [ -z "$FORGE_ROOT" ]; then
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${OMP_PLUGIN_ROOT:-$HOME/.omp/plugins/node_modules/silex-forge}}}}}"
+if [ ! -d "$FORGE_ROOT/scripts" ]; then
   echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
   exit 1
 fi
@@ -48,8 +48,8 @@ Local config: `~/.config/silex/forge.config.json` (fallback plugin
 ## Usage
 
 ```bash
-FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
-if [ -z "$FORGE_ROOT" ]; then
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${OMP_PLUGIN_ROOT:-$HOME/.omp/plugins/node_modules/silex-forge}}}}}"
+if [ ! -d "$FORGE_ROOT/scripts" ]; then
   echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
   exit 1
 fi

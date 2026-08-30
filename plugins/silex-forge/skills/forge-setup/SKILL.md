@@ -39,8 +39,8 @@ path in the local config.
 ## Step 0 — Doctor
 
 ```bash
-FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
-if [ -z "$FORGE_ROOT" ]; then
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${OMP_PLUGIN_ROOT:-$HOME/.omp/plugins/node_modules/silex-forge}}}}}"
+if [ ! -d "$FORGE_ROOT/scripts" ]; then
   echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
   exit 1
 fi
@@ -80,8 +80,8 @@ If KO → do not write. Explain the vault lives outside the forge repo.
 ## Step 2 — Write local config
 
 ```bash
-FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
-if [ -z "$FORGE_ROOT" ]; then
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${OMP_PLUGIN_ROOT:-$HOME/.omp/plugins/node_modules/silex-forge}}}}}"
+if [ ! -d "$FORGE_ROOT/scripts" ]; then
   echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
   exit 1
 fi
@@ -125,8 +125,8 @@ fi
 ## Step 3 — Artifacts folder
 
 ```bash
-FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
-if [ -z "$FORGE_ROOT" ]; then
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${OMP_PLUGIN_ROOT:-$HOME/.omp/plugins/node_modules/silex-forge}}}}}"
+if [ ! -d "$FORGE_ROOT/scripts" ]; then
   echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
   exit 1
 fi
@@ -149,8 +149,8 @@ fi
 ## Step 4 — Final doctor
 
 ```bash
-FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
-if [ -z "$FORGE_ROOT" ]; then
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${OMP_PLUGIN_ROOT:-$HOME/.omp/plugins/node_modules/silex-forge}}}}}"
+if [ ! -d "$FORGE_ROOT/scripts" ]; then
   echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
   exit 1
 fi
