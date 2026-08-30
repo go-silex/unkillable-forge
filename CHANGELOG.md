@@ -7,6 +7,12 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 **Out of scope for this file:** team HTML artifacts (hub + live deploy). Those are not versioned in git.
 
+## [Unreleased]
+
+### Added
+
+- CI asserts one plugin SemVer across Claude / Grok / OMP / Codex manifests and CHANGELOG; `main` tags `vX.Y.Z` and opens a GitHub Release when that version is new
+
 ## [1.8.1] - 2026-08-30
 
 ### Added
@@ -138,6 +144,7 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 - Cloudflare Pages host for team decks and guides
 - Plugin marketplace manifest (`.claude-plugin/marketplace.json`)
 
+[Unreleased]: https://github.com/go-silex/silex-forge/compare/v1.8.1...HEAD
 [1.8.1]: https://github.com/go-silex/silex-forge/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/go-silex/silex-forge/compare/v1.7.3...v1.8.0
 [1.7.3]: https://github.com/go-silex/silex-forge/compare/v1.7.2...v1.7.3

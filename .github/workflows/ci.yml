@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -17,7 +20,9 @@ jobs:
           python-version: "3.12"
 
       - name: Shell syntax (publish.sh)
-        run: bash -n plugins/silex-forge/scripts/publish.sh
+        run: |
+          bash -n plugins/silex-forge/scripts/publish.sh
+          bash -n scripts/release-plugin.sh
 
       - name: ShellCheck (publish.sh, forge-doctor)
         run: |
@@ -25,11 +30,16 @@ jobs:
           sudo apt-get install -y -qq shellcheck
           shellcheck -e SC1091,SC2086 plugins/silex-forge/scripts/publish.sh
           shellcheck plugins/silex-forge/scripts/forge-doctor.sh
+          shellcheck scripts/release-plugin.sh
 
       - name: Python compile
         run: |
           python3 -m py_compile plugins/silex-forge/scripts/lib/load_config.py
           python3 -m py_compile plugins/silex-forge/scripts/lib/patch_wrangler.py
+          python3 -m py_compile scripts/check_plugin_versions.py
+
+      - name: Plugin versions consistent (Claude/Grok/OMP/Codex + CHANGELOG)
+        run: python3 scripts/check_plugin_versions.py
 
       - name: patch_wrangler smoke (TOML escaping)
         run: |
@@ -126,3 +136,24 @@ jobs:
         run: |
           bash tests/shell/test_publish_contracts.sh
           bash tests/shell/test_forge_doctor.sh
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [check, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tag vX.Y.Z and GitHub Release when plugin version is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/release-plugin.sh
