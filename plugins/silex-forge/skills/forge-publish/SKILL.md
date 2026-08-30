@@ -29,8 +29,26 @@ Generating HTML = **`silex-craft@silex-plugins`** (`silex-slides` · `silex-onep
 ## Config prerequisites
 
 ```bash
-FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${OMP_PLUGIN_ROOT:-$HOME/.omp/plugins/node_modules/silex-forge}}}}}"
-if [ ! -d "$FORGE_ROOT/scripts" ]; then
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  for _c in \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/omp/plugins/node_modules/silex-forge" \
+    "$HOME/.omp/plugins/node_modules/silex-forge"
+  do
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+  done
+fi
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  _d="$PWD"
+  while [ "$_d" != "/" ]; do
+    _c="$_d/.omp/plugins/node_modules/silex-forge"
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+    _d="$(dirname "$_d")"
+  done
+  unset _d
+fi
+unset _c
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
   echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
   exit 1
 fi
@@ -48,8 +66,26 @@ Local config: `~/.config/silex/forge.config.json` (fallback plugin
 ## Usage
 
 ```bash
-FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${OMP_PLUGIN_ROOT:-$HOME/.omp/plugins/node_modules/silex-forge}}}}}"
-if [ ! -d "$FORGE_ROOT/scripts" ]; then
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  for _c in \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/omp/plugins/node_modules/silex-forge" \
+    "$HOME/.omp/plugins/node_modules/silex-forge"
+  do
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+  done
+fi
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  _d="$PWD"
+  while [ "$_d" != "/" ]; do
+    _c="$_d/.omp/plugins/node_modules/silex-forge"
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+    _d="$(dirname "$_d")"
+  done
+  unset _d
+fi
+unset _c
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
   echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
   exit 1
 fi

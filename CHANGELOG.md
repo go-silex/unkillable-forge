@@ -11,14 +11,16 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ### Added
 
-- `.omp-plugin/plugin.json` `$schema` Agent Plugins 1.0.0 — OMP marketplace install loads skills with `claude-plugins` off
-- OMP plugin-root fallback (`~/.omp/plugins/node_modules/silex-forge`) in `forge-publish` / `forge-setup`
+- Root `plugin.json` `$schema` Agent Plugins 1.0.0 — OMP marketplace install loads skills with `claude-plugins` off
+- OMP plugin-root fallback probes XDG, `~/.omp`, and project `.omp` in `forge-publish` / `forge-setup`
 
 ### Changed
 
 - OMP install docs: `omp plugin install silex-forge@silex-forge` is the checkout-free path
+- `forge-setup` drops `disable-model-invocation` (not in the Agent Plugins frontmatter allow-list); Codex still uses `agents/openai.yaml`
 
 ## [1.8.0] - 2026-08-25
+
 ### Added
 
 - Native Grok, OMP, and Codex packaging (catalogs + manifests beside Claude)
