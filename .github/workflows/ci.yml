@@ -3,8 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+  # Default pull_request types omit ready_for_review. check/test skip drafts
+  # (a skipped job reports Success), so a draft-then-ready PR would never re-run.
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
