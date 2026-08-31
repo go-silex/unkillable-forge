@@ -11,6 +11,7 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ### Fixed
 
+- `classify`'s check-run probe only required the `check` job: with no ruleset on this repo, a PR merged with `check` green and `test` red would classify as `pr-merge`, skip both jobs on `main`, and let `release` cut a tag on code `test` had rejected. Both names must now be green.
 - `classify` never matched a processed PR merge: `GET /commits/{sha}/pulls` returns the simple pull request representation, which omits `merged` (measured null), so `select(.merged == true and …)` matched nothing and every push was classified `naked` — the suite was re-run on every merge and the § CI landing rule was a no-op. Matching on `state == "closed"` plus `merge_commit_sha` instead; the bounded retry is kept, now guarding a genuine association lag.
 
 ## [1.8.2] - 2026-08-31
