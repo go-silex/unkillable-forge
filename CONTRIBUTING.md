@@ -53,6 +53,7 @@ You need a valid **silex-hub** path in `~/.config/silex/forge.config.json`. Do n
 .omp-plugin/marketplace.json       # OMP marketplace catalog
 .agents/plugins/marketplace.json   # Codex repo marketplace
 plugins/silex-forge/
+  plugin.json                      # Agent Plugins 1.0.0 (OMP marketplace skills)
   .claude-plugin/plugin.json       # Claude plugin manifest
   .grok-plugin/plugin.json         # Grok plugin manifest
   .omp-plugin/plugin.json          # OMP plugin manifest
@@ -87,19 +88,19 @@ When changing behavior, update **skills** if user-facing workflows change.
 
 If you change the plugin surface (skills, scripts, manifests):
 
-- Bump `version` in all version-bearing manifests:
+- Bump `version` in all version-bearing manifests (canon = root `plugin.json`):
+  - `plugins/silex-forge/plugin.json` (Agent Plugins `$schema` 1.0.0 — OMP marketplace skills with `claude-plugins` off)
   - `plugins/silex-forge/.claude-plugin/plugin.json`
   - `plugins/silex-forge/.grok-plugin/plugin.json`
   - `plugins/silex-forge/.omp-plugin/plugin.json`
   - `plugins/silex-forge/.codex-plugin/plugin.json`
-  - `plugins/silex-forge/plugin.json` (Agent Plugins `$schema` 1.0.0 — OMP marketplace skills with `claude-plugins` off)
   - `plugins/silex-forge/package.json`
   - `.claude-plugin/marketplace.json` (catalog + plugin entry)
   - `.grok-plugin/marketplace.json` (catalog + plugin entry)
   - `.omp-plugin/marketplace.json` (`metadata.version` + plugin entry)
 - Codex `.agents/plugins/marketplace.json` has no version field — version comes from `.codex-plugin/plugin.json`
-- Add a CHANGELOG entry
-- Maintainers tag `vX.Y.Z` on merge when appropriate
+- Add a CHANGELOG `## [X.Y.Z]` section (same SemVer). CI fails if any of the files above drift
+- On merge to `main`, the `release` job tags `silex-forge/vX.Y.Z` and opens a GitHub Release from that CHANGELOG section **only when the tag does not exist**. It never moves a tag. A merge without a version bump is a green no-op. A processed PR merge is classified (`classify`) and does not re-run the test suite — only release effects run.
 
 ## Pull requests
 

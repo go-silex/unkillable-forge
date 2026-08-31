@@ -14,8 +14,8 @@
 - [ ] **No secrets** — no tokens, share keys, account/KV/AUD IDs, or real `forge.env` / `forge.config.json`
 - [ ] **No HTML payloads** — no `site/a/**`, `site/index.html`, `registry/*.json`
 - [ ] Docs/skills updated if user-facing behavior changed
-- [ ] [CHANGELOG.md](CHANGELOG.md) updated (Unreleased or version section)
-- [ ] Plugin version bumped in `.claude-plugin/marketplace.json` and `plugins/silex-forge/.claude-plugin/plugin.json` if plugin surface changed
+- [ ] [CHANGELOG.md](CHANGELOG.md) updated (`[Unreleased]` or `## [X.Y.Z]`)
+- [ ] Plugin version bumped in **all** version-bearing manifests if plugin surface changed (root `plugin.json`, 4 harness `plugin.json`, `package.json`, Claude/Grok/OMP catalogs — see CONTRIBUTING). Codex catalog has no version.
 - [ ] `bash -n plugins/silex-forge/scripts/publish.sh` passes locally
 
 ## Test plan

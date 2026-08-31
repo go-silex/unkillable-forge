@@ -7,6 +7,21 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 **Out of scope for this file:** team HTML artifacts (hub + live deploy). Those are not versioned in git.
 
+## [Unreleased]
+
+## [1.8.2] - 2026-08-31
+
+### Added
+
+- `classify` job — a processed PR merge no longer re-runs the suite (only effects run), with a bounded retry on the commit→PR association
+- Automated tag + GitHub Release on merge to `main` when the plugin version is new
+- One-SemVer lock across Claude/Grok/OMP/Codex manifests + CHANGELOG (`scripts/check_plugin_versions.py`)
+- Hermetic contract test for the release script
+
+### Changed
+
+- Tags now follow Convention A `silex-forge/vX.Y.Z`; the six pre-existing bare `vX.Y.Z` tags are kept as-is and never renamed
+
 ## [1.8.1] - 2026-08-30
 
 ### Added
@@ -138,6 +153,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 - Cloudflare Pages host for team decks and guides
 - Plugin marketplace manifest (`.claude-plugin/marketplace.json`)
 
+[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.8.2...HEAD
+[1.8.2]: https://github.com/go-silex/silex-forge/compare/v1.8.1...silex-forge/v1.8.2
 [1.8.1]: https://github.com/go-silex/silex-forge/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/go-silex/silex-forge/compare/v1.7.3...v1.8.0
 [1.7.3]: https://github.com/go-silex/silex-forge/compare/v1.7.2...v1.7.3
