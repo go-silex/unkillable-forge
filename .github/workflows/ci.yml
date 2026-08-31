@@ -8,9 +8,53 @@ on:
 
 permissions:
   contents: read
+  checks: read
+  pull-requests: read
 
 jobs:
+  # Processed PR merge → skip suite. Naked push → run suite.
+  # ~/projects/ssot/conventions.ssot.md § CI landing
+  classify:
+    name: Classify push
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      path: ${{ steps.out.outputs.path }}
+    steps:
+      - id: out
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          path=naked
+          n=0
+          prs="[]"
+          for i in 1 2 3 4 5; do
+            prs="$(gh api "repos/${REPO}/commits/${SHA}/pulls")"
+            n="$(printf '%s' "$prs" | jq --arg sha "$SHA" '[.[] | select(.merged == true and .merge_commit_sha == $sha)] | length')"
+            if [ "$n" -gt 0 ]; then
+              break
+            fi
+            if [ "$i" -lt 5 ]; then
+              sleep 4
+            fi
+          done
+          if [ "$n" -gt 0 ]; then
+            head="$(printf '%s' "$prs" | jq -r --arg sha "$SHA" '[.[] | select(.merged == true and .merge_commit_sha == $sha)][0].head.sha')"
+            conc="$(gh api --paginate "repos/${REPO}/commits/${head}/check-runs" --jq '[.check_runs[] | select((.name | ascii_downcase) == "check") | .conclusion] | map(select(. == "success")) | if length > 0 then "success" else "missing" end')"
+            if [ "$conc" = "success" ]; then
+              path=pr-merge
+            fi
+          fi
+          echo "path=${path}" >> "$GITHUB_OUTPUT"
+          echo "landing path: ${path}"
+
   check:
+    needs: [classify]
+    if: always() && !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) && (github.event_name != 'push' || needs.classify.outputs.path == 'naked')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +81,12 @@ jobs:
           python3 -m py_compile plugins/silex-forge/scripts/lib/load_config.py
           python3 -m py_compile plugins/silex-forge/scripts/lib/patch_wrangler.py
           python3 -m py_compile scripts/check_plugin_versions.py
+
+      - name: Shell syntax (test_release_plugin.sh)
+        run: bash -n tests/shell/test_release_plugin.sh
+
+      - name: ShellCheck (test_release_plugin.sh)
+        run: shellcheck tests/shell/test_release_plugin.sh
 
       - name: Plugin versions consistent (Claude/Grok/OMP/Codex + CHANGELOG)
         run: python3 scripts/check_plugin_versions.py
@@ -106,8 +156,9 @@ jobs:
           fi
 
   test:
+    needs: [classify, check]
+    if: always() && !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) && (github.event_name != 'push' || needs.classify.outputs.path == 'naked') && (needs.check.result == 'success' || needs.check.result == 'skipped')
     runs-on: ubuntu-latest
-    needs: check
     steps:
       - uses: actions/checkout@v4
 
@@ -137,9 +188,18 @@ jobs:
           bash tests/shell/test_publish_contracts.sh
           bash tests/shell/test_forge_doctor.sh
 
+      - name: Release plugin tests
+        run: bash tests/shell/test_release_plugin.sh
+
+  # On a processed PR merge, check/test are skipped (see classify and
+  # ~/projects/ssot/conventions.ssot.md § CI landing → "do not retest — effects only").
+  # A bare `needs:` would skip release: the tag would NEVER be cut on the
+  # normal landing path.
+  # Fail-closed: classify must have succeeded. If it fails, check/test are
+  # skipped without the suite having run — do not cut a tag in that case.
   release:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [check, test]
+    needs: [classify, check, test]
+    if: always() && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.classify.result == 'success' && (needs.check.result == 'success' || needs.check.result == 'skipped') && (needs.test.result == 'success' || needs.test.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: write

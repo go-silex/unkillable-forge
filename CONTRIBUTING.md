@@ -100,7 +100,7 @@ If you change the plugin surface (skills, scripts, manifests):
   - `.omp-plugin/marketplace.json` (`metadata.version` + plugin entry)
 - Codex `.agents/plugins/marketplace.json` has no version field — version comes from `.codex-plugin/plugin.json`
 - Add a CHANGELOG `## [X.Y.Z]` section (same SemVer). CI fails if any of the files above drift
-- CI on `main` tags `vX.Y.Z` and opens a GitHub Release from that CHANGELOG section **only when the tag does not exist**. It never moves a tag. Docs-only / Functions-only merges without a bump stay on the current version.
+- On merge to `main`, the `release` job tags `silex-forge/vX.Y.Z` and opens a GitHub Release from that CHANGELOG section **only when the tag does not exist**. It never moves a tag. A merge without a version bump is a green no-op. A processed PR merge is classified (`classify`) and does not re-run the test suite — only release effects run.
 
 ## Pull requests
 

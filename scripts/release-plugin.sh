@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Tag vX.Y.Z + GitHub Release when plugins/silex-forge/plugin.json is a new SemVer.
+# Tag silex-forge/vX.Y.Z + GitHub Release when plugins/silex-forge/plugin.json is a new SemVer.
+# Format <component>/vX.Y.Z (Convention A). Prior naked tags from before 2026-07-20
+# remain in place and are not renamed.
 # No-op if the tag already points at this commit or an ancestor. Never moves a tag.
 set -euo pipefail
 
@@ -8,7 +10,8 @@ cd "$ROOT"
 
 CHECK="$ROOT/scripts/check_plugin_versions.py"
 VERSION="$(python3 "$CHECK" --print-version)"
-TAG="v${VERSION}"
+TAG="silex-forge/v${VERSION}"
+TITLE="silex-forge ${TAG#silex-forge/}"
 
 git fetch --tags --force origin
 
@@ -34,11 +37,11 @@ python3 "$CHECK" --print-notes >"$NOTES"
 
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-git tag -a "$TAG" -m "silex-forge ${TAG}"
+git tag -a "$TAG" -m "$TITLE"
 git push origin "refs/tags/${TAG}"
 
 gh release create "$TAG" \
-  --title "silex-forge ${TAG}" \
+  --title "$TITLE" \
   --notes-file "$NOTES" \
   --verify-tag
 
