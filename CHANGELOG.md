@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+### Fixed
+
+- `classify` never matched a processed PR merge: `GET /commits/{sha}/pulls` returns the simple pull request representation, which omits `merged` (measured null), so `select(.merged == true and …)` matched nothing and every push was classified `naked` — the suite was re-run on every merge and the § CI landing rule was a no-op. Matching on `state == "closed"` plus `merge_commit_sha` instead; the bounded retry is kept, now guarding a genuine association lag.
+
 ## [1.8.2] - 2026-08-31
 
 ### Added

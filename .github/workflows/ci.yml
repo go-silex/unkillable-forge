@@ -14,6 +14,14 @@ permissions:
 jobs:
   # Processed PR merge → skip suite. Naked push → run suite.
   # ~/projects/ssot/conventions.ssot.md § CI landing
+  #
+  # The commit→PR endpoint returns the SIMPLE pull request representation, which
+  # carries `state` and `merge_commit_sha` but NOT `merged` (that field only
+  # exists on the full object from GET /pulls/{number}). Measured 2026-08-31:
+  # `merged` comes back null, so a `.merged == true` predicate never matches and
+  # every push is misclassified as naked. Match on `state == "closed"` plus
+  # `merge_commit_sha == $sha` instead: for an open PR that field is an ephemeral
+  # test-merge commit which never lands on a branch, so it cannot collide.
   classify:
     name: Classify push
     if: github.event_name == 'push'
@@ -34,7 +42,7 @@ jobs:
           prs="[]"
           for i in 1 2 3 4 5; do
             prs="$(gh api "repos/${REPO}/commits/${SHA}/pulls")"
-            n="$(printf '%s' "$prs" | jq --arg sha "$SHA" '[.[] | select(.merged == true and .merge_commit_sha == $sha)] | length')"
+            n="$(printf '%s' "$prs" | jq --arg sha "$SHA" '[.[] | select(.state == "closed" and .merge_commit_sha == $sha)] | length')"
             if [ "$n" -gt 0 ]; then
               break
             fi
@@ -43,7 +51,7 @@ jobs:
             fi
           done
           if [ "$n" -gt 0 ]; then
-            head="$(printf '%s' "$prs" | jq -r --arg sha "$SHA" '[.[] | select(.merged == true and .merge_commit_sha == $sha)][0].head.sha')"
+            head="$(printf '%s' "$prs" | jq -r --arg sha "$SHA" '[.[] | select(.state == "closed" and .merge_commit_sha == $sha)][0].head.sha')"
             conc="$(gh api --paginate "repos/${REPO}/commits/${head}/check-runs" --jq '[.check_runs[] | select((.name | ascii_downcase) == "check") | .conclusion] | map(select(. == "success")) | if length > 0 then "success" else "missing" end')"
             if [ "$conc" = "success" ]; then
               path=pr-merge
