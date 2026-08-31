@@ -15,64 +15,8 @@ permissions:
   pull-requests: read
 
 jobs:
-  # Processed PR merge → skip suite. Naked push → run suite.
-  # ~/projects/ssot/conventions.ssot.md § CI landing
-  #
-  # The commit→PR endpoint returns the SIMPLE pull request representation, which
-  # carries `state` and `merge_commit_sha` but NOT `merged` (that field only
-  # exists on the full object from GET /pulls/{number}). Measured 2026-08-31:
-  # `merged` comes back null, so a `.merged == true` predicate never matches and
-  # every push is misclassified as naked. Match on `state == "closed"` plus
-  # `merge_commit_sha == $sha` instead: for an open PR that field is an ephemeral
-  # test-merge commit which never lands on a branch, so it cannot collide.
-  #
-  # The probe must cover EVERY suite job, not just the first one. This repo has
-  # no ruleset, so a PR whose `check` is green and `test` is red can still be
-  # merged: a `check`-only probe would then classify pr-merge, skip both jobs on
-  # main, and let `release` cut a tag on code `test` had rejected. Require both
-  # names green. Adding a suite job means adding it here — keep the count in
-  # sync with the jobs gated on `path == naked`.
-  classify:
-    name: Classify push
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    outputs:
-      path: ${{ steps.out.outputs.path }}
-    steps:
-      - id: out
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          path=naked
-          n=0
-          prs="[]"
-          for i in 1 2 3 4 5; do
-            prs="$(gh api "repos/${REPO}/commits/${SHA}/pulls")"
-            n="$(printf '%s' "$prs" | jq --arg sha "$SHA" '[.[] | select(.state == "closed" and .merge_commit_sha == $sha)] | length')"
-            if [ "$n" -gt 0 ]; then
-              break
-            fi
-            if [ "$i" -lt 5 ]; then
-              sleep 4
-            fi
-          done
-          if [ "$n" -gt 0 ]; then
-            head="$(printf '%s' "$prs" | jq -r --arg sha "$SHA" '[.[] | select(.state == "closed" and .merge_commit_sha == $sha)][0].head.sha')"
-            ok="$(gh api --paginate "repos/${REPO}/commits/${head}/check-runs" --jq '[.check_runs[] | select(.conclusion == "success") | (.name | ascii_downcase) | select(. == "check" or . == "test")] | unique | length')"
-            if [ "$ok" -ge 2 ]; then
-              path=pr-merge
-            fi
-          fi
-          echo "path=${path}" >> "$GITHUB_OUTPUT"
-          echo "landing path: ${path}"
-
   check:
-    needs: [classify]
-    if: always() && !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) && (github.event_name != 'push' || needs.classify.outputs.path == 'naked')
+    if: (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -174,8 +118,8 @@ jobs:
           fi
 
   test:
-    needs: [classify, check]
-    if: always() && !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) && (github.event_name != 'push' || needs.classify.outputs.path == 'naked') && (needs.check.result == 'success' || needs.check.result == 'skipped')
+    needs: [check]
+    if: (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -209,15 +153,10 @@ jobs:
       - name: Release plugin tests
         run: bash tests/shell/test_release_plugin.sh
 
-  # On a processed PR merge, check/test are skipped (see classify and
-  # ~/projects/ssot/conventions.ssot.md § CI landing → "do not retest — effects only").
-  # A bare `needs:` would skip release: the tag would NEVER be cut on the
-  # normal landing path.
-  # Fail-closed: classify must have succeeded. If it fails, check/test are
-  # skipped without the suite having run — do not cut a tag in that case.
+  # Suite runs on every push; release is gated on its conclusion.
   release:
-    needs: [classify, check, test]
-    if: always() && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.classify.result == 'success' && (needs.check.result == 'success' || needs.check.result == 'skipped') && (needs.test.result == 'success' || needs.test.result == 'skipped')
+    needs: [check, test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
