@@ -938,6 +938,8 @@ cmd_publish() {
 }
 
 if [ -n "${FORGE_PUBLISH_LIB_ONLY:-}" ]; then
+  # `return` succeeds when sourced; the `exit` runs only when executed.
+  # shellcheck disable=SC2317  # reachable via the execute path, not statically
   return 0 2>/dev/null || exit 0
 fi
 source_cf_credentials
