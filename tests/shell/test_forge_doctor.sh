@@ -48,8 +48,9 @@ broken_out=$("$DOCTOR_BASH" "$broken/scripts/forge-doctor.sh" 2>&1) || true
 rm -rf "$broken"
 echo "$broken_out" | grep -q 'lib manquante' \
   || fail "missing lib/ must report 'lib manquante', got: ${broken_out:0:120}"
-echo "$broken_out" | grep -qi 'No such file or directory' \
-  && fail "missing lib/ leaked a raw shell error instead of the diagnostic"
+if echo "$broken_out" | grep -qi 'No such file or directory'; then
+  fail "missing lib/ leaked a raw shell error instead of the diagnostic"
+fi
 pass "missing lib/ is reported, not crashed on"
 
 echo "all forge-doctor format checks passed"
