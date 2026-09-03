@@ -9,7 +9,6 @@ Output (in-repo layout, for wrangler pages deploy — not committed):
 
 Usage:
   build-site-from-hub.py --repo-root /path/to/silex-forge
-  build-site-from-hub.py --repo-root … --slug mon-slug   # only one (still full index)
   build-site-from-hub.py --dry-run
 """
 from __future__ import annotations
@@ -93,7 +92,6 @@ def _sanitize_registry(meta: dict, slug: str, prefix: str) -> dict:
 
 def build(
     repo_root: Path,
-    only_slug: str | None = None,
     dry_run: bool = False,
 ) -> int:
     cfg = load_config()
@@ -115,10 +113,7 @@ def build(
         reg_dir.mkdir(parents=True, exist_ok=True)
         # remove stale registry json
         for old in reg_dir.glob("*.json"):
-            if only_slug and old.stem != only_slug:
-                continue
-            if not only_slug:
-                old.unlink()
+            old.unlink()
 
     slugs: list[str] = []
     for child in sorted(art.iterdir()):
@@ -127,17 +122,7 @@ def build(
         if not (child / "index.html").is_file():
             print(f"skip {child.name}: no index.html", file=sys.stderr)
             continue
-        if only_slug and child.name != only_slug:
-            continue
         slugs.append(child.name)
-
-    if only_slug and only_slug not in slugs:
-        # when only_slug: still rebuild full tree from hub (index needs all)
-        # re-scan all if only_slug was for messaging only
-        slugs = []
-        for child in sorted(art.iterdir()):
-            if child.is_dir() and (child / "index.html").is_file():
-                slugs.append(child.name)
 
     if not slugs:
         print(f"✗ no artifacts with index.html under {art}", file=sys.stderr)
@@ -220,7 +205,6 @@ def main(argv: list[str]) -> int:
         default=None,
         help="silex-forge root (default: parents of this script)",
     )
-    ap.add_argument("--slug", default="", help="hint only; full hub rebuild always")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv[1:])
     if args.repo_root:
@@ -231,7 +215,7 @@ def main(argv: list[str]) -> int:
     if not root.is_dir():
         print(f"✗ repo root not a dir: {root}", file=sys.stderr)
         return 1
-    return build(root, only_slug=args.slug or None, dry_run=args.dry_run)
+    return build(root, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

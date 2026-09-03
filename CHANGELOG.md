@@ -13,6 +13,10 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 - README: supported-runtime matrix and dependency table. The POSIX contract (Linux, macOS stock bash 3.2, Windows via WSL — never Git Bash / PowerShell, which lack `python3` on `PATH` and `chmod 600`) existed only in a test-file comment, so a Windows install failed with no stated prerequisite.
 
+### Removed
+
+- `build-site-from-hub.py --slug`. No caller passed it, and it did the opposite of its own help text (`hint only; full hub rebuild always`): it `rmtree`'d `site/<prefix>` and then rebuilt a single artifact, so wiring it into `publish.sh` to "only deploy one slug" would have 404'd every other artifact — a Pages deployment is a complete immutable snapshot.
+
 ## [1.9.1] - 2026-09-03
 
 ### Fixed
