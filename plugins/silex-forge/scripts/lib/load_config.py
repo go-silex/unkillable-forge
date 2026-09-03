@@ -219,8 +219,40 @@ def artifacts_root(cfg: dict[str, Any] | None = None) -> Path | None:
     return (Path(hub) / rel).resolve()
 
 
-def vault_ok(hub: Path) -> bool:
-    return hub.is_dir() and all((hub / m).is_dir() for m in VAULT_MARKERS)
+def resolve_vault_markers(
+    cfg: dict[str, Any] | None = None,
+) -> tuple[tuple[str, ...] | None, str | None]:
+    """Effective vault markers from cfg. Testable without files on disk.
+
+    Absent or null → historical VAULT_MARKERS.
+    [] → empty tuple (hub must only exist as a directory).
+    Wrong type → (None, issue); caller must not apply structure checks.
+    """
+    if cfg is None or "vault_markers" not in cfg or cfg["vault_markers"] is None:
+        return VAULT_MARKERS, None
+    raw = cfg["vault_markers"]
+    if not isinstance(raw, list):
+        return None, (
+            "vault_markers must be a list of folder names "
+            f"(got {type(raw).__name__})"
+        )
+    markers: list[str] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, str):
+            return None, (
+                f"vault_markers[{i}] must be a string "
+                f"(got {type(item).__name__})"
+            )
+        markers.append(item)
+    return tuple(markers), None
+
+
+def vault_ok(
+    hub: Path, markers: list[str] | tuple[str, ...] | None = None
+) -> bool:
+    if markers is None:
+        markers = VAULT_MARKERS
+    return hub.is_dir() and all((hub / m).is_dir() for m in markers)
 
 
 def forge_env_permissions(path: Path | None = None) -> dict[str, Any]:
@@ -534,6 +566,10 @@ def doctor(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
             f"no local config — copy from example to {LOCAL_PATH}"
         )
 
+    markers, markers_issue = resolve_vault_markers(cfg)
+    if markers_issue:
+        issues.append(markers_issue)
+
     hub_s = (cfg.get("hub_root") or "").strip()
     if not hub_s:
         issues.append("hub_root empty (absolute silex-hub path required)")
@@ -542,10 +578,10 @@ def doctor(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         hub = Path(hub_s)
         if not hub.is_dir():
             issues.append(f"hub_root not found: {hub}")
-        elif not vault_ok(hub):
+        elif markers is not None and not vault_ok(hub, markers):
             issues.append(
                 f"hub_root is not a silex-hub vault "
-                f"(markers {', '.join(VAULT_MARKERS)}): {hub}"
+                f"(markers {', '.join(markers)}): {hub}"
             )
 
     art_rel = (cfg.get("artifacts_dir") or "").strip()

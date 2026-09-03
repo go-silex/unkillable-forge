@@ -13,12 +13,15 @@ sys.path.insert(0, str(LIB))
 
 from load_config import (  # noqa: E402
     PagesEnvFetchError,
+    VAULT_MARKERS,
     _verify_api_token,
     doctor,
     fetch_pages_plain_var,
     forge_env_permissions,
     load_config,
     parse_forge_env,
+    resolve_vault_markers,
+    vault_ok,
 )
 
 PAGES_FIXTURE = {
@@ -136,6 +139,86 @@ class LoadConfigTests(unittest.TestCase):
         self.assertIn("user 401", err)
         self.assertIn("account 401", err)
         self.assertEqual(mock_api.call_count, 2)
+
+
+    def _minimal_cfg(self, hub_root: str, **over: object) -> dict:
+        cfg: dict = {
+            "version": 1,
+            "hub_root": hub_root,
+            "artifacts_dir": "artifacts",
+            "public_host": "forge.example.com",
+            "forge_repo": "git@example.com:org/forge.git",
+            "site_dir": "site",
+            "registry_dir": "registry",
+            "internal_prefix": "a",
+        }
+        cfg.update(over)
+        return cfg
+
+    def test_vault_ok_absent_key_keeps_silex_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            hub = Path(td)
+            self.assertFalse(vault_ok(hub))
+            markers, err = resolve_vault_markers(self._minimal_cfg(str(hub)))
+            self.assertIsNone(err)
+            self.assertEqual(markers, VAULT_MARKERS)
+            d = doctor(self._minimal_cfg(str(hub)))
+            vault_issues = [i for i in d["issues"] if "vault" in i or "00_COCKPIT" in i]
+            self.assertTrue(vault_issues)
+            self.assertIn("00_COCKPIT", vault_issues[0])
+            self.assertIn("01_COMPANY", vault_issues[0])
+
+    def test_vault_ok_custom_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            hub = Path(td)
+            (hub / "client_docs").mkdir()
+            (hub / "client_data").mkdir()
+            custom = ["client_docs", "client_data"]
+            self.assertTrue(vault_ok(hub, custom))
+            self.assertFalse(vault_ok(hub, ["client_docs", "missing"]))
+            ok = doctor(self._minimal_cfg(str(hub), vault_markers=custom))
+            self.assertFalse(any("vault" in i for i in ok["issues"]))
+            missing = doctor(
+                self._minimal_cfg(str(hub), vault_markers=["client_docs", "missing"])
+            )
+            vault_issues = [i for i in missing["issues"] if "markers" in i]
+            self.assertEqual(len(vault_issues), 1)
+            self.assertIn("client_docs", vault_issues[0])
+            self.assertIn("missing", vault_issues[0])
+            self.assertNotIn("00_COCKPIT", vault_issues[0])
+            self.assertNotIn("01_COMPANY", vault_issues[0])
+
+    def test_vault_ok_empty_markers_any_existing_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            hub = Path(td)
+            self.assertTrue(vault_ok(hub, []))
+            d = doctor(self._minimal_cfg(str(hub), vault_markers=[]))
+            self.assertFalse(any("vault" in i for i in d["issues"]))
+        missing = Path("/nonexistent/silex-forge-hub-xyz")
+        self.assertFalse(vault_ok(missing, []))
+        d_missing = doctor(self._minimal_cfg(str(missing), vault_markers=[]))
+        found = [i for i in d_missing["issues"] if "hub_root" in i]
+        self.assertTrue(found)
+        self.assertTrue(any("not found" in i for i in found))
+        self.assertFalse(any("vault" in i for i in d_missing["issues"]))
+
+    def test_resolve_vault_markers_null_is_historical(self) -> None:
+        markers, err = resolve_vault_markers({"vault_markers": None})
+        self.assertIsNone(err)
+        self.assertEqual(markers, VAULT_MARKERS)
+
+    def test_vault_markers_wrong_type_no_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            hub = Path(td)
+            for raw in ("00_COCKPIT", 1, {"a": 1}, ["ok", 2]):
+                cfg = self._minimal_cfg(str(hub), vault_markers=raw)
+                markers, err = resolve_vault_markers(cfg)
+                self.assertIsNone(markers)
+                self.assertIsNotNone(err)
+                self.assertIn("vault_markers", err)
+                d = doctor(cfg)
+                self.assertTrue(any("vault_markers" in i for i in d["issues"]))
+                self.assertFalse(any("silex-hub vault" in i for i in d["issues"]))
 
 
 if __name__ == "__main__":
