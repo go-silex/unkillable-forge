@@ -43,6 +43,26 @@ plugins/.../forge.config.example.json # defaults + code fallback
 Doctor: `plugins/silex-forge/scripts/forge-doctor.sh`  
 Setup: `/forge-setup` (user-invoked; first publish if doctor KO). Missing token = warning (generate OK, publish KO).
 
+### `hub_root` validation — `vault_markers`
+
+`forge-doctor` checks that `hub_root` really is the vault, not a stray path.
+Which directories prove that is configurable, because a forge outside Silex
+has no Silex vault.
+
+| `vault_markers` | `hub_root` accepted when |
+|---|---|
+| absent | it contains `00_COCKPIT` **and** `01_COMPANY` (Silex default) |
+| `["A", "B"]` | it contains every named directory |
+| `[]` | it is an existing directory — no structure check |
+| anything else | never: doctor reports a config issue |
+
+A malformed value is an issue rather than a silent fallback: falling back to
+the Silex pair would break a client forge, and falling back to `[]` would skip
+a check the operator believed they had set.
+
+`forge-provision.sh` writes `"vault_markers": []` for a forge provisioned on
+someone else's account.
+
 ## Commands
 
 ```bash
