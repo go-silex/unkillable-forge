@@ -68,9 +68,15 @@ CHROME=""
 for c in google-chrome google-chrome-stable chromium chromium-browser; do
   if command -v "$c" >/dev/null 2>&1; then CHROME="$c"; break; fi
 done
-# Playwright-cached chromium as last resort
+if [ -z "$CHROME" ] && [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
+  CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+fi
+# Playwright-cached chromium as last resort (linux + mac)
 if [ -z "$CHROME" ]; then
-  for bin in "$HOME"/.cache/ms-playwright/chromium-*/chrome-linux*/chrome; do
+  for bin in \
+    "$HOME"/.cache/ms-playwright/chromium-*/chrome-linux*/chrome \
+    "$HOME"/.cache/ms-playwright/chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium
+  do
     if [ -x "$bin" ]; then CHROME="$bin"; break; fi
   done
 fi
@@ -120,7 +126,7 @@ render_one() {
     else
       cat "$html"
     fi
-  } | sed '/<\/head>/I i\
+  } | sed '/<\/head>/i\
 <style id="forge-og-capture">\
   html,body{margin:0!important;padding:0!important;overflow:hidden!important}\
   .edit-toggle,.edit-hotzone,[data-forge-share-bar],[data-forge-toast]{display:none!important}\

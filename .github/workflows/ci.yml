@@ -142,20 +142,50 @@ jobs:
       - name: Vitest (Functions hardening spec)
         run: npm test
 
-      - name: Python unit tests
-        run: python3 -m unittest discover -s tests/python -p 'test_*.py' -v
-
-      - name: Shell contract tests
-        run: |
-          bash tests/shell/test_publish_contracts.sh
-          bash tests/shell/test_forge_doctor.sh
+      - name: Python + shell script tests
+        run: bash tests/shell/run-os-script-tests.sh
 
       - name: Release plugin tests
         run: bash tests/shell/test_release_plugin.sh
 
+  # macOS stock bash is /bin/bash 3.2. GHA PATH often has brew bash 5 first —
+  # env bash would false-green. Windows native is not supported (python3);
+  # Windows = WSL, covered by `test` + `test-bash32`.
+  test-os:
+    name: test-os / macos-bash32
+    needs: [check]
+    if: (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Assert stock /bin/bash is 3.2
+        run: /bin/bash --version | grep -q 'version 3\.2'
+      - name: Python + shell script tests under /bin/bash
+        env:
+          FORGE_REQUIRE_BASH32: "1"
+        run: /bin/bash tests/shell/run-os-script-tests.sh
+
+  # Same 3.2 contract on Linux CI (no macOS VM required for parse/lock).
+  test-bash32:
+    name: test-bash32
+    needs: [check]
+    if: (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash 3.2 syntax + script tests
+        run: |
+          docker run --rm -v "$PWD":/w -w /w bash:3.2 sh -c '
+            apk add --no-cache python3
+            FORGE_REQUIRE_BASH32=1 bash tests/shell/run-os-script-tests.sh
+          '
+
   # Suite runs on every push; release is gated on its conclusion.
   release:
-    needs: [check, test]
+    needs: [check, test, test-os, test-bash32]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

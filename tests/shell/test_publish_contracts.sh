@@ -66,6 +66,37 @@ assert_grep \
   "$PUBLISH" \
   "remove path must tombstone vis:private before destructive KV delete"
 
+# Mac: bash 3.2 cannot do `exec {var}>`; flock is Linux-only
+assert_not_grep \
+  'exec \{PUBLISH_LOCK_FD\}>' \
+  "$PUBLISH" \
+  "publish lock must not use bash 4.1 automatic FD allocation"
+
+assert_grep \
+  'exec 9>' \
+  "$PUBLISH" \
+  "publish lock must use a fixed FD (bash 3.2)"
+
+assert_grep \
+  'command -v flock' \
+  "$PUBLISH" \
+  "publish lock must probe flock rather than requiring it"
+
+assert_grep \
+  'PUBLISH_LOCK_DIR="\$candidate"' \
+  "$PUBLISH" \
+  "mkdir lock global must be set only after successful mkdir"
+
+assert_grep \
+  '\$\{lock_dir\}/\$\{slug\}\.lockdir' \
+  "$PUBLISH" \
+  "mkdir lock path must be slug.lockdir, not the flock slug.lock file"
+
+assert_grep \
+  'FORGE_PUBLISH_LIB_ONLY' \
+  "$PUBLISH" \
+  "publish.sh must be sourceable as a library without running the CLI"
+
 # Isolated fixture: OAuth env cleanup (reference impl mirrors publish.sh contract)
 fixture="$ROOT/tests/shell/fixtures/kv_wrangler_env.sh"
 mock_wrangler="$(mktemp)"

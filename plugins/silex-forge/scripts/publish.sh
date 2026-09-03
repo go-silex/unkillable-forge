@@ -42,11 +42,20 @@ GIT() { git -c core.hooksPath=/dev/null "$@"; }
 
 WORK=""
 PUBLISH_LOCK_FD=""
+PUBLISH_LOCK_DIR=""
 cleanup() {
   if [ -n "${PUBLISH_LOCK_FD:-}" ]; then
-    flock -u "$PUBLISH_LOCK_FD" 2>/dev/null || true
+    if command -v flock >/dev/null 2>&1; then
+      flock -u "$PUBLISH_LOCK_FD" 2>/dev/null || true
+    fi
+    eval "exec ${PUBLISH_LOCK_FD}>&-" 2>/dev/null || true
   fi
-  [ -n "${WORK:-}" ] && rm -rf "$WORK"
+  if [ -n "${PUBLISH_LOCK_DIR:-}" ]; then
+    rmdir "$PUBLISH_LOCK_DIR" 2>/dev/null || true
+  fi
+  if [ -n "${WORK:-}" ]; then
+    rm -rf "$WORK"
+  fi
 }
 trap cleanup EXIT
 
@@ -209,10 +218,26 @@ acquire_publish_lock() {
   [ -n "${ARTIFACTS_ROOT:-}" ] || return 0
   local lock_dir="${ARTIFACTS_ROOT}/.forge-locks"
   mkdir -p "$lock_dir"
-  exec {PUBLISH_LOCK_FD}>"${lock_dir}/${slug}.lock"
-  if ! flock -w 120 "$PUBLISH_LOCK_FD"; then
-    die "publish lock timeout: $slug (another machine/process?)"
+  local lockfile="${lock_dir}/${slug}.lock"
+  if command -v flock >/dev/null 2>&1; then
+    # bash 3.2: fixed FD (not `exec {var}>`, which needs 4.1+)
+    exec 9>"$lockfile" || die "cannot open publish lock: $slug"
+    PUBLISH_LOCK_FD=9
+    if ! flock -w 120 9; then
+      die "publish lock timeout: $slug (another machine/process?)"
+    fi
+    return 0
   fi
+  local waited=0
+  local candidate="${lock_dir}/${slug}.lockdir"
+  while ! mkdir "$candidate" 2>/dev/null; do
+    waited=$((waited + 1))
+    if [ "$waited" -ge 120 ]; then
+      die "publish lock timeout: $slug (another machine/process?) — if none is running, remove $candidate"
+    fi
+    sleep 1
+  done
+  PUBLISH_LOCK_DIR="$candidate"
 }
 
 # Patch cloned wrangler.toml: KV id + plain [vars] from forge.env (+ API fallback)
@@ -912,6 +937,11 @@ cmd_publish() {
   fi
 }
 
+if [ -n "${FORGE_PUBLISH_LIB_ONLY:-}" ]; then
+  # `return` succeeds when sourced; the `exit` runs only when executed.
+  # shellcheck disable=SC2317  # reachable via the execute path, not statically
+  return 0 2>/dev/null || exit 0
+fi
 source_cf_credentials
 
 case "${1-}" in

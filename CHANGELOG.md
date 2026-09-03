@@ -9,10 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-09-03
+
+### Added
+
+- CI script tests: Linux (`test`) + macOS `/bin/bash` 3.2 (`test-os`, brew bash 5 skipped) + `bash:3.2` container. Windows = WSL (same Linux jobs), not Git Bash / `windows-latest`. Lint `test_bash32_lint.sh` greps every `plugins/silex-forge/scripts/*.sh` for bash 4+ / unguarded GNU (`exec {`, `declare -A`, `mapfile`, flock without probe, `stat -c` without `stat -f`).
+
 ### Fixed
 
 - `classify`'s check-run probe only required the `check` job: with no ruleset on this repo, a PR merged with `check` green and `test` red would classify as `pr-merge`, skip both jobs on `main`, and let `release` cut a tag on code `test` had rejected. Both names must now be green.
 - `classify` never matched a processed PR merge: `GET /commits/{sha}/pulls` returns the simple pull request representation, which omits `merged` (measured null), so `select(.merged == true and …)` matched nothing and every push was classified `naked` — the suite was re-run on every merge and the § CI landing rule was a no-op. Matching on `state == "closed"` plus `merge_commit_sha` instead; the bounded retry is kept, now guarding a genuine association lag.
+- Publish preflight rejected Cloudflare account-owned tokens (`cfat_`): it only called `GET /user/tokens/verify`. Fallback is `GET /accounts/{id}/tokens/verify`.
+- `publish.sh` lock used bash 4.1 `{fd}` allocation and Linux `flock`; stock macOS bash 3.2 could not publish. Fixed FD 9 + `mkdir` fallback when `flock` is missing.
 
 ## [1.8.2] - 2026-08-31
 
@@ -158,7 +166,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 - Cloudflare Pages host for team decks and guides
 - Plugin marketplace manifest (`.claude-plugin/marketplace.json`)
 
-[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.8.2...HEAD
+[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.9.0...HEAD
+[1.9.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.8.2...silex-forge/v1.9.0
 [1.8.2]: https://github.com/go-silex/silex-forge/compare/v1.8.1...silex-forge/v1.8.2
 [1.8.1]: https://github.com/go-silex/silex-forge/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/go-silex/silex-forge/compare/v1.7.3...v1.8.0
