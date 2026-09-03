@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+### Added
+
+- CI job `test-py39`. macOS ships Python 3.9 (Xcode CLT) while every other job pins 3.12, so a 3.11+ stdlib import (`tomllib`…) or newer syntax would stay green in CI and break on a teammate's laptop. The unit tests now run on the floor interpreter, and `release` is gated on it. `python3` ≥ 3.9 stated in the README dependency table.
+
+### Changed
+
+- CI ShellCheck loops over `plugins/silex-forge/scripts/*.sh` instead of naming three files, so a new script is covered the day it lands. `publish.sh` keeps its `SC1091,SC2086` exclusions; every other script is checked with none.
+
+### Removed
+
+- Unused `ok()` / `info()` helpers in `gen-og-images.sh` — dead since the script was written, and the reason it had never passed ShellCheck.
+
 ## [1.10.0] - 2026-09-03
 
 ### Added

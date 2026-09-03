@@ -72,7 +72,7 @@ and CI runs the suite on `macos-latest` plus a `bash:3.2` container.
 
 | Dependency | Needed for |
 |---|---|
-| `bash` ≥ 3.2, `python3` (stdlib only), `git`, `curl` | everything |
+| `bash` ≥ 3.2, `python3` ≥ 3.9 (stdlib only), `git`, `curl` | everything |
 | `wrangler` **or** `npx` | `wrangler pages deploy` |
 | `flock` | optional — a portable `mkdir` lock is used when absent |
 | `google-chrome`\|`chromium`, `ffmpeg`, `jq` | OG thumbnails (skipped with a warning if missing) |
