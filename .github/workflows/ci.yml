@@ -30,13 +30,17 @@ jobs:
           bash -n plugins/silex-forge/scripts/publish.sh
           bash -n scripts/release-plugin.sh
 
-      - name: ShellCheck (publish.sh, forge-doctor)
+      - name: ShellCheck (every plugin script)
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          shellcheck -e SC1091,SC2086 plugins/silex-forge/scripts/publish.sh
-          shellcheck plugins/silex-forge/scripts/forge-doctor.sh
-          shellcheck plugins/silex-forge/scripts/forge-discover.sh
+          # Loop, so a new script is covered the day it lands.
+          for f in plugins/silex-forge/scripts/*.sh; do
+            case "$f" in
+              */publish.sh) shellcheck -e SC1091,SC2086 "$f" ;;
+              *) shellcheck "$f" ;;
+            esac
+          done
           shellcheck scripts/release-plugin.sh
 
       - name: Python compile
@@ -184,9 +188,26 @@ jobs:
             FORGE_REQUIRE_BASH32=1 bash tests/shell/run-os-script-tests.sh
           '
 
+  # macOS ships Python 3.9 (Xcode CLT); every other job pins 3.12. Without this
+  # floor, a 3.11+ stdlib import (tomllib…) or newer syntax stays green in CI
+  # and breaks on a teammate's laptop — the exact failure mode this suite exists
+  # to prevent.
+  test-py39:
+    name: test-py39
+    needs: [check]
+    if: (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Python unit tests on the oldest supported interpreter
+        run: python3 -m unittest discover -s tests/python -p 'test_*.py' -v
+
   # Suite runs on every push; release is gated on its conclusion.
   release:
-    needs: [check, test, test-os, test-bash32]
+    needs: [check, test, test-os, test-bash32, test-py39]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

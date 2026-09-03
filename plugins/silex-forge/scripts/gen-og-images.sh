@@ -43,8 +43,6 @@ SLUG_FILTER=""
 
 die()  { echo "✗ $*" >&2; exit 1; }
 warn() { echo "  ⚠ $*" >&2; }
-ok()   { echo "✓ $*"; }
-info() { echo "▸ $*"; }
 
 usage() {
   cat <<EOF
