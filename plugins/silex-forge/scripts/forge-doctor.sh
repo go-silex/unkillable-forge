@@ -11,9 +11,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/lib"
 export PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
-# shellcheck source=/dev/null
-. "$LIB_DIR/forge_common.sh"
-die() { forge_die "$@"; }
+# die stays local on purpose: this script diagnoses a broken install, so it
+# must still be able to report a missing lib/ (see the check below). Sourcing
+# forge_common.sh here would replace that message with a raw bash error.
+die() { echo "✗ $*" >&2; exit 1; }
 
 JSON_ONLY=0
 QUIET=0

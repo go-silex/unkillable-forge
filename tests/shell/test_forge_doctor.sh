@@ -39,4 +39,17 @@ human_out=$("$DOCTOR_BASH" "$DOCTOR" 2>/dev/null) || true
 echo "$human_out" | grep -q 'source' || fail "default mode must include human fields"
 pass "default mode emits human report"
 
+# The doctor diagnoses broken installs, so it must survive one: with lib/
+# absent it has to name the missing directory, not die on an internal source.
+broken="$(mktemp -d)"
+mkdir -p "$broken/scripts"
+cp "$DOCTOR" "$broken/scripts/"
+broken_out=$("$DOCTOR_BASH" "$broken/scripts/forge-doctor.sh" 2>&1) || true
+rm -rf "$broken"
+echo "$broken_out" | grep -q 'lib manquante' \
+  || fail "missing lib/ must report 'lib manquante', got: ${broken_out:0:120}"
+echo "$broken_out" | grep -qi 'No such file or directory' \
+  && fail "missing lib/ leaked a raw shell error instead of the diagnostic"
+pass "missing lib/ is reported, not crashed on"
+
 echo "all forge-doctor format checks passed"
