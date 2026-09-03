@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-09-03
+
+### Fixed
+
+- First publish of a new slug deployed without its OG card. `gen_og_images` writes `og.jpg` under `site/`, then `cmd_publish` called `build_from_hub` again — which rebuilds `site/<prefix>` from the hub SSOT and drops anything the hub does not hold. The card only appeared after someone ran `--rebuild-index` (that path already copied `og.jpg` back). `persist_og_to_hub` now runs between the two, and `--rebuild-index` uses the same helper instead of its own inline loop.
+
 ## [1.9.0] - 2026-09-03
 
 ### Added
@@ -166,7 +172,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 - Cloudflare Pages host for team decks and guides
 - Plugin marketplace manifest (`.claude-plugin/marketplace.json`)
 
-[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.9.0...HEAD
+[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.9.1...HEAD
+[1.9.1]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.9.0...silex-forge/v1.9.1
 [1.9.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.8.2...silex-forge/v1.9.0
 [1.8.2]: https://github.com/go-silex/silex-forge/compare/v1.8.1...silex-forge/v1.8.2
 [1.8.1]: https://github.com/go-silex/silex-forge/compare/v1.8.0...v1.8.1

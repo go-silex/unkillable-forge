@@ -378,6 +378,17 @@ gen_og_images() {
   fi
 }
 
+# gen_og_images writes og.jpg under site/; build_from_hub rebuilds site/<prefix>
+# from the hub and drops anything the hub does not hold. Persist first.
+persist_og_to_hub() {
+  local slug="$1"
+  [ -n "${ARTIFACTS_ROOT:-}" ] || return 0
+  local src="$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/og.jpg"
+  [ -f "$src" ] || return 0
+  [ -d "${ARTIFACTS_ROOT}/${slug}" ] || return 0
+  cp -f "$src" "${ARTIFACTS_ROOT}/${slug}/og.jpg"
+}
+
 inject_og_for_slug() {
   local slug="$1" title="$2" desc="$3" path_url="$4"
   local html="$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/index.html"
@@ -827,18 +838,12 @@ cmd_rebuild_index() {
   clone_engine
   build_from_hub
   gen_og_images
-  # rebuild again to pick og files into hub? og written to site then copy back
-  if [ -n "${ARTIFACTS_ROOT:-}" ]; then
-    local s
-    for s in "$WORK/repo/site/${INTERNAL_PREFIX}"/*/; do
-      [ -d "$s" ] || continue
-      local slug
-      slug=$(basename "$s")
-      if [ -f "${s}og.jpg" ]; then
-        cp -f "${s}og.jpg" "${ARTIFACTS_ROOT}/${slug}/og.jpg"
-      fi
-    done
-  fi
+  # og.jpg is written under site/; persist to the hub before rebuilding
+  local s
+  for s in "$WORK/repo/site/${INTERNAL_PREFIX}"/*/; do
+    [ -d "$s" ] || continue
+    persist_og_to_hub "$(basename "$s")"
+  done
   build_from_hub
   inject_share_bars
   if deploy_pages; then
@@ -916,6 +921,7 @@ cmd_publish() {
   [ -f "$dest/index.html" ] || die "build missing index for $slug"
 
   gen_og_images "$slug"
+  persist_og_to_hub "$slug"
   inject_og_for_slug "$slug" "$title" "$desc" "$path_url"
   python3 "$(SCRIPTS)/inject-share-bar.py" "$dest/index.html" --slug "$slug" || true
   # persist bar into hub
