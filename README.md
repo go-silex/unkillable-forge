@@ -53,6 +53,30 @@ Publishers are trusted team members. Artifact HTML is active same-origin content
 
 ## Quick start
 
+### Supported runtime
+
+| OS | Shell | Status |
+|---|---|---|
+| Linux | any `bash` ≥ 3.2 | supported — CI `test` |
+| macOS | stock `/bin/bash` **3.2** | supported — CI `test-os` on `macos-latest` |
+| Windows | **WSL** | supported (same as Linux) |
+| Windows | Git Bash / PowerShell | **not supported** |
+
+Native Windows fails on requirements the scripts depend on: `python3` on `PATH`
+and `chmod 600` on `~/.config/silex/forge.env` (the token file is refused when
+it is world-readable). Use WSL.
+
+No bash 4 feature and no GNU-only command is allowed in
+`plugins/silex-forge/scripts/` — `tests/shell/test_bash32_lint.sh` enforces it,
+and CI runs the suite on `macos-latest` plus a `bash:3.2` container.
+
+| Dependency | Needed for |
+|---|---|
+| `bash` ≥ 3.2, `python3` (stdlib only), `git`, `curl` | everything |
+| `wrangler` **or** `npx` | `wrangler pages deploy` |
+| `flock` | optional — a portable `mkdir` lock is used when absent |
+| `google-chrome`\|`chromium`, `ffmpeg`, `jq` | OG thumbnails (skipped with a warning if missing) |
+
 ### Install the plugin
 
 One plugin tree (`plugins/silex-forge/`). Pick the harness:
