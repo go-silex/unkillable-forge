@@ -35,7 +35,9 @@ path in the local config.
 ⚠️ recommended external craft plugins (diagram-design, huashu-design, frontend-slides)
 ```
 
-## Step 0 — Doctor
+## Shell setup
+
+Run once at the start of the shell session. Later steps assume `$FORGE_ROOT` is set.
 
 ```bash
 FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
@@ -61,6 +63,12 @@ if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
   echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
   exit 1
 fi
+```
+
+## Step 0 — Doctor
+
+```bash
+: "${FORGE_ROOT:?run § Shell setup first}"
 S="$FORGE_ROOT/scripts/forge-doctor.sh"
 # in-repo:
 # S=plugins/silex-forge/scripts/forge-doctor.sh
@@ -73,53 +81,21 @@ bash "$S" --json   # machine-readable if needed
 
 ## Step 1 — Resolve hub_root
 
-Discovery order (propose, **confirm** with the operator):
-
-1. Existing `~/.config/silex/forge.config.json` → `hub_root`
-2. `~/.config/silex/hub-root` (shared Silex config)
-3. Cwd / walk-up with markers `00_COCKPIT` + `01_COMPANY`
-4. Common paths if they exist:
-   - `$HOME/projects/gosilex/silex-hub`
-   - `$HOME/silex-hub`
-   - `$HOME/projects/silex-hub`
-   - macOS Drive: list `~/Library/CloudStorage/*/` if needed
-5. Otherwise **ask for the absolute vault path** (one question)
-
-**Required** validation before writing:
+Do not invent a path. List candidates (best first); **propose** the first one and **confirm** with the operator before using it.
 
 ```bash
-HUB="<absolute path>"
-test -d "$HUB/00_COCKPIT" && test -d "$HUB/01_COMPANY" && echo "hub OK: $HUB"
+: "${FORGE_ROOT:?run § Shell setup first}"
+python3 "$FORGE_ROOT/scripts/lib/load_config.py" --print-hub-candidates
 ```
 
-If KO → do not write. Explain the vault lives outside the forge repo.
+One line per candidate, format `<origine>\t<chemin>`. Origins: `config`, `env`, `hub-root-file`, `walk-up`, `known-path`. Empty output → no candidate; **ask for the absolute vault path** (one question).
+
+**Required** validation before writing: `hub_root` must satisfy `vault_markers` in the config (a forge outside the Silex vault uses `[]` — the folder must exist; otherwise named marker directories must exist under it). If KO → do not write. Explain the vault lives outside the forge repo.
 
 ## Step 2 — Write local config
 
 ```bash
-FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
-if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
-  for _c in \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/omp/plugins/node_modules/silex-forge" \
-    "$HOME/.omp/plugins/node_modules/silex-forge"
-  do
-    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
-  done
-fi
-if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
-  _d="$PWD"
-  while [ "$_d" != "/" ]; do
-    _c="$_d/.omp/plugins/node_modules/silex-forge"
-    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
-    _d="$(dirname "$_d")"
-  done
-  unset _d
-fi
-unset _c
-if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
-  echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
-  exit 1
-fi
+: "${FORGE_ROOT:?run § Shell setup first}"
 mkdir -p ~/.config/silex
 chmod 700 ~/.config/silex
 
@@ -160,29 +136,7 @@ fi
 ## Step 3 — Artifacts folder
 
 ```bash
-FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
-if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
-  for _c in \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/omp/plugins/node_modules/silex-forge" \
-    "$HOME/.omp/plugins/node_modules/silex-forge"
-  do
-    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
-  done
-fi
-if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
-  _d="$PWD"
-  while [ "$_d" != "/" ]; do
-    _c="$_d/.omp/plugins/node_modules/silex-forge"
-    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
-    _d="$(dirname "$_d")"
-  done
-  unset _d
-fi
-unset _c
-if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
-  echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
-  exit 1
-fi
+: "${FORGE_ROOT:?run § Shell setup first}"
 ART="$(python3 "$FORGE_ROOT/scripts/lib/load_config.py" --print-artifacts)"
 mkdir -p "$ART"
 echo "artifacts: $ART"
@@ -202,29 +156,7 @@ fi
 ## Step 4 — Final doctor
 
 ```bash
-FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
-if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
-  for _c in \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/omp/plugins/node_modules/silex-forge" \
-    "$HOME/.omp/plugins/node_modules/silex-forge"
-  do
-    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
-  done
-fi
-if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
-  _d="$PWD"
-  while [ "$_d" != "/" ]; do
-    _c="$_d/.omp/plugins/node_modules/silex-forge"
-    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
-    _d="$(dirname "$_d")"
-  done
-  unset _d
-fi
-unset _c
-if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
-  echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
-  exit 1
-fi
+: "${FORGE_ROOT:?run § Shell setup first}"
 bash "$FORGE_ROOT/scripts/forge-doctor.sh"
 bash "$FORGE_ROOT/scripts/forge-doctor.sh" --online
 ```
@@ -254,29 +186,7 @@ requires `CLOUDFLARE_API_TOKEN` in `forge.env`. Discovery only fills the other k
 `hub_root` is local (step 1). Cloudflare cannot see it.
 
 ```bash
-FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
-if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
-  for _c in \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/omp/plugins/node_modules/silex-forge" \
-    "$HOME/.omp/plugins/node_modules/silex-forge"
-  do
-    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
-  done
-fi
-if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
-  _d="$PWD"
-  while [ "$_d" != "/" ]; do
-    _c="$_d/.omp/plugins/node_modules/silex-forge"
-    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
-    _d="$(dirname "$_d")"
-  done
-  unset _d
-fi
-unset _c
-if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
-  echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
-  exit 1
-fi
+: "${FORGE_ROOT:?run § Shell setup first}"
 bash "$FORGE_ROOT/scripts/forge-discover.sh" --json
 ```
 
@@ -291,29 +201,7 @@ Do not dump the JSON in chat. Branch on the exit code:
 On exit `0`:
 
 ```bash
-FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
-if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
-  for _c in \
-    "${XDG_DATA_HOME:-$HOME/.local/share}/omp/plugins/node_modules/silex-forge" \
-    "$HOME/.omp/plugins/node_modules/silex-forge"
-  do
-    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
-  done
-fi
-if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
-  _d="$PWD"
-  while [ "$_d" != "/" ]; do
-    _c="$_d/.omp/plugins/node_modules/silex-forge"
-    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
-    _d="$(dirname "$_d")"
-  done
-  unset _d
-fi
-unset _c
-if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
-  echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
-  exit 1
-fi
+: "${FORGE_ROOT:?run § Shell setup first}"
 bash "$FORGE_ROOT/scripts/forge-discover.sh" --write
 ```
 

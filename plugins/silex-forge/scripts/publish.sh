@@ -33,10 +33,15 @@ INTERNAL_PREFIX="${FORGE_INTERNAL_PREFIX:-a}"
 # Export PUBLIC_HOST for forge.env override after load_config
 export PUBLIC_HOST
 
-die()  { echo "✗ $*" >&2; exit 1; }
+# shellcheck source=/dev/null
+. "$LIB_DIR/forge_common.sh"
+die()  { forge_die "$@"; }
+# publish.sh info is ▸ on stdout (tests/callers); lib forge_info is → on stderr.
 info() { echo "▸ $*"; }
-warn() { echo "  ⚠ $*" >&2; }
-ok()   { echo "✓ $*"; }
+warn() { forge_warn "$@"; }
+ok()   { forge_ok "$@"; }
+# test_publish_lock.sh export -f die into lock subshells.
+export -f forge_die
 
 GIT() { git -c core.hooksPath=/dev/null "$@"; }
 
@@ -278,15 +283,10 @@ deploy_pages() {
   [ -f wrangler.toml ] || die "wrangler.toml missing"
   patch_wrangler_for_deploy "$WORK/repo/wrangler.toml"
   info "wrangler pages deploy site → ${project} (${acct:0:8}…)"
-  local -a wr
-  if command -v wrangler >/dev/null 2>&1; then
-    wr=(wrangler)
-  elif command -v npx >/dev/null 2>&1; then
-    wr=(npx --yes wrangler)
-  else
-    die "wrangler / npx missing"
-  fi
-  "${wr[@]}" pages deploy site \
+  local wr_cmd
+  wr_cmd=$(forge_wrangler) || die "wrangler / npx missing"
+  # shellcheck disable=SC2086
+  $wr_cmd pages deploy site \
     --project-name="$project" \
     --branch=main \
     --commit-dirty=true \
@@ -433,13 +433,7 @@ kv_auth_ok() {
 }
 
 wrangler_bin() {
-  if command -v wrangler >/dev/null 2>&1; then
-    printf '%s\n' wrangler
-  elif command -v npx >/dev/null 2>&1; then
-    printf '%s\n' 'npx --yes wrangler'
-  else
-    return 1
-  fi
+  forge_wrangler
 }
 
 kv_curl() {

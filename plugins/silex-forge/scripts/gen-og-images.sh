@@ -41,8 +41,10 @@ QUALITY=5   # ffmpeg -q:v for mjpeg: 2=best, 5≈good, 10=small
 FORCE=0
 SLUG_FILTER=""
 
-die()  { echo "✗ $*" >&2; exit 1; }
-warn() { echo "  ⚠ $*" >&2; }
+# shellcheck source=/dev/null
+. "$LIB_DIR/forge_common.sh"
+die()  { forge_die "$@"; }
+warn() { forge_warn "$@"; }
 
 usage() {
   cat <<EOF

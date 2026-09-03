@@ -18,7 +18,7 @@ Usage as library:
   from load_config import load_config, artifacts_root, doctor
 
 CLI:
-  python3 load_config.py [--json|--doctor|--print-artifacts]
+  python3 load_config.py [--json|--doctor|--print-artifacts|--print-hub-candidates]
 """
 from __future__ import annotations
 
@@ -106,21 +106,157 @@ def config_paths() -> tuple[Path | None, Path]:
     return None, EXAMPLE_PATH
 
 
+def _safe_home() -> Path | None:
+    try:
+        return Path.home()
+    except (RuntimeError, KeyError, OSError):
+        return None
+
+
+def _safe_cwd() -> Path | None:
+    try:
+        return Path.cwd()
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def _safe_resolve(path: Path) -> Path | None:
+    try:
+        resolved = path.expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    try:
+        if not resolved.exists():
+            return None
+    except OSError:
+        return None
+    return resolved
+
+
+def _add_hub_candidate(
+    out: list[tuple[str, str]],
+    seen: set[str],
+    raw: str,
+    origin: str,
+) -> None:
+    raw = (raw or "").strip()
+    if not raw:
+        return
+    resolved = _safe_resolve(Path(raw))
+    if resolved is None:
+        return
+    key = str(resolved)
+    if key in seen:
+        return
+    seen.add(key)
+    out.append((key, origin))
+
+
+def _walk_up_vault(markers: tuple[str, ...]) -> Path | None:
+    cur = _safe_cwd()
+    if cur is None:
+        return None
+    try:
+        cur = cur.resolve()
+    except (OSError, RuntimeError):
+        return None
+    seen: set[str] = set()
+    while True:
+        key = str(cur)
+        if key in seen:
+            return None
+        seen.add(key)
+        try:
+            if vault_ok(cur, markers):
+                return cur
+        except OSError:
+            pass
+        parent = cur.parent
+        if parent == cur:
+            return None
+        cur = parent
+
+
+def hub_root_candidates(
+    cfg: dict[str, Any] | None = None,
+    include_search: bool = False,
+) -> list[tuple[str, str]]:
+    """Ordered (path, origin) hub_root candidates, best first.
+
+    Origins: config, env, hub-root-file, walk-up, known-path.
+    A path is kept only if it exists. Duplicates collapse on
+    expanduser().resolve(), keeping the better (earlier) origin.
+    Never raises: missing HOME or a deleted cwd yields an empty-ish list.
+
+    include_search defaults to False so load_config() does not silently
+    pick a guessed vault. Setup / provisioning pass include_search=True
+    to also consider walk-up and known-path. Does not call load_config()
+    when cfg is provided (avoids recursion through bootstrap).
+    """
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    if cfg is not None:
+        _add_hub_candidate(
+            out, seen, str(cfg.get("hub_root") or ""), "config"
+        )
+
+    _add_hub_candidate(
+        out, seen, os.environ.get("HUB_ROOT", ""), "env"
+    )
+
+    try:
+        home = _safe_home()
+        if home is not None:
+            hub_file = home / ".config/silex/hub-root"
+            if hub_file.is_file():
+                line = hub_file.read_text(encoding="utf-8").strip()
+                _add_hub_candidate(out, seen, line, "hub-root-file")
+    except (OSError, RuntimeError):
+        pass
+
+    if include_search:
+        markers, markers_issue = resolve_vault_markers(cfg)
+        # Empty markers: vault_ok(dir, []) is true for every existing
+        # directory, so walk-up would pick cwd/parent arbitrarily.
+        # Skip walk-up unless markers actually identify a vault.
+        if markers and not markers_issue:
+            walked = _walk_up_vault(markers)
+            if walked is not None:
+                _add_hub_candidate(out, seen, str(walked), "walk-up")
+        home = _safe_home()
+        if home is not None:
+            for rel in (
+                "projects/gosilex/silex-hub",
+                "silex-hub",
+                "projects/silex-hub",
+            ):
+                _add_hub_candidate(
+                    out, seen, str(home / rel), "known-path"
+                )
+    return out
+
+
+def resolve_hub_root(
+    cfg: dict[str, Any] | None = None,
+    include_search: bool = False,
+) -> tuple[str, str]:
+    """First hub_root candidate, or ("", "none")."""
+    cands = hub_root_candidates(cfg, include_search=include_search)
+    if not cands:
+        return "", "none"
+    return cands[0]
+
+
 def _bootstrap_hub_root(current: str) -> str:
-    cur = (current or "").strip()
-    if cur:
-        return str(Path(cur).expanduser())
-    env = os.environ.get("HUB_ROOT", "").strip()
-    if env:
-        return str(Path(env).expanduser())
-    if HUB_ROOT_FILE.is_file():
-        line = HUB_ROOT_FILE.read_text(encoding="utf-8").strip()
-        if line:
-            return str(Path(line).expanduser())
-    return ""
+    """Config / env / hub-root-file only — no walk-up or known-path."""
+    path, _origin = resolve_hub_root(
+        {"hub_root": current}, include_search=False
+    )
+    return path
 
 
-def load_config() -> dict[str, Any]:
+def _merged_config() -> dict[str, Any]:
     if not EXAMPLE_PATH.is_file():
         raise SystemExit(f"missing defaults: {EXAMPLE_PATH}")
     base = _read_json(EXAMPLE_PATH)
@@ -133,15 +269,19 @@ def load_config() -> dict[str, Any]:
         cfg = dict(base)
         cfg["_config_source"] = str(EXAMPLE_PATH.resolve())
         cfg["_config_fallback"] = True
-    cfg["hub_root"] = _bootstrap_hub_root(str(cfg.get("hub_root") or ""))
-    # normalize relative-looking home
-    if cfg["hub_root"]:
-        cfg["hub_root"] = str(Path(cfg["hub_root"]).expanduser().resolve())
     cfg.setdefault("shlink_domain", "s.gosilex.com")
     cfg.setdefault("types", ["deck", "talk", "guide", "diagram", "gallery", "html", "other"])
     cfg.setdefault("pages_project", "silex-forge")
     cfg.setdefault("cloudflare_account_id", "")
     cfg.setdefault("shares_kv_namespace_id", "")
+    return cfg
+
+
+def load_config() -> dict[str, Any]:
+    cfg = _merged_config()
+    cfg["hub_root"] = _bootstrap_hub_root(str(cfg.get("hub_root") or ""))
+    if cfg["hub_root"]:
+        cfg["hub_root"] = str(Path(cfg["hub_root"]).expanduser().resolve())
     return cfg
 
 
@@ -644,7 +784,7 @@ def doctor(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     if not perm["ok"]:
         deploy_blockers.append("forge_env_permissions")
 
-    return {
+    payload = {
         "ok": len(issues) == 0,
         "issues": issues,
         "warnings": warnings,
@@ -664,6 +804,13 @@ def doctor(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         "forge_env_permissions": perm,
         "skill": "forge-setup",
     }
+    if not hub_s:
+        # Suggestions only — never flips ok. Setup uses these to propose a path.
+        payload["hub_root_candidates"] = [
+            [origin, path]
+            for path, origin in hub_root_candidates(cfg, include_search=True)
+        ]
+    return payload
 
 
 def export_env(cfg: dict[str, Any] | None = None) -> str:
@@ -711,6 +858,14 @@ def main(argv: list[str]) -> int:
         d = doctor()
         print(json.dumps(d, ensure_ascii=False, indent=2))
         return 0 if d["ok"] else 1
+    if "--print-hub-candidates" in args:
+        try:
+            cfg = _merged_config()
+        except SystemExit:
+            cfg = None
+        for path, origin in hub_root_candidates(cfg, include_search=True):
+            print(f"{origin}\t{path}")
+        return 0
     if "--print-artifacts" in args:
         art = artifacts_root()
         if not art:

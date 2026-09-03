@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-09-03
+
+### Changed
+
+- `hub_root` had three divergent resolutions: a five-point search order written as **prose** in the `forge-setup` skill, two of those points implemented in `load_config._bootstrap_hub_root()`, and `forge-provision.sh` simply asking for the path. `hub_root_candidates()` / `resolve_hub_root()` are now the single implementation, returning `(path, origin)` with origins `config`, `env`, `hub-root-file`, `walk-up`, `known-path`. The skill calls `load_config.py --print-hub-candidates` and proposes the best candidate instead of improvising the search.
+- `load_config()` deliberately keeps the first three origins only, behind `include_search=False`. Adding `walk-up` and `known-path` to the implicit path would let a machine with no config silently adopt a guessed vault; discovery stays opt-in for setup and provisioning.
+- `walk-up` is skipped when `vault_markers` is empty, because `vault_ok(dir, [])` is vacuously true for every directory — the walk would otherwise retain the current directory, or an arbitrary parent, as "the vault".
+- `lib/forge_common.sh` — `forge_wrangler`, `forge_die`, `forge_warn`, `forge_info`, `forge_ok`. The `wrangler`/`npx` fallback was written four times and the output helpers were redefined across five scripts. Callers keep their local names as thin aliases, so the visible output of `publish.sh` and `forge-doctor.sh` is byte-identical; `publish.sh` keeps its own `info()` (`▸`, stdout) rather than adopting the library's stderr form.
+- `forge-setup` skill: the `FORGE_ROOT` resolution preamble was copied six times, ~138 of 428 lines. One copy now lives in a `Shell setup` section and each block guards with `: "${FORGE_ROOT:?…}"`. 316 lines.
+
 ## [1.11.0] - 2026-09-03
 
 ### Added
@@ -200,7 +210,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 - Cloudflare Pages host for team decks and guides
 - Plugin marketplace manifest (`.claude-plugin/marketplace.json`)
 
-[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.11.0...HEAD
+[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.12.0...HEAD
+[1.12.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.11.0...silex-forge/v1.12.0
 [1.11.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.10.0...silex-forge/v1.11.0
 [1.10.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.9.1...silex-forge/v1.10.0
 [1.9.1]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.9.0...silex-forge/v1.9.1

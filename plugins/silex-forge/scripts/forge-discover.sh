@@ -22,8 +22,10 @@ LIB_DIR="$SCRIPT_DIR/lib"
 MODE="report"
 PROJECT=""
 
-die() { echo "✗ $*" >&2; exit 1; }
-info() { echo "→ $*" >&2; }
+# shellcheck source=/dev/null
+. "$LIB_DIR/forge_common.sh"
+die() { forge_die "$@"; }
+info() { forge_info "$@"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -50,14 +52,7 @@ case "$PROJECT" in
   *[!A-Za-z0-9._-]*) die "invalid project name: $PROJECT" ;;
 esac
 
-if command -v wrangler >/dev/null 2>&1; then
-  WR="wrangler"
-elif command -v npx >/dev/null 2>&1; then
-  WR="npx --yes wrangler"
-else
-  echo "✗ wrangler / npx missing — install wrangler, then \`wrangler login\`" >&2
-  exit 1
-fi
+WR=$(forge_wrangler) || die "wrangler / npx missing — install wrangler, then \`wrangler login\`"
 
 TD="$(mktemp -d)"
 trap 'rm -rf "$TD"' EXIT

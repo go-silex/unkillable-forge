@@ -200,9 +200,16 @@ fail() { printf '  %s✗ %s%s\n' "$RED" "$1" "$RESET" >&2; exit 1; }
 # write_env creates the file with default perms; the token lives here.
 secure_env() { chmod 600 "$ENV_FILE" 2>/dev/null || true; }
 
+# shellcheck source=/dev/null
+. "$LIB_DIR/forge_common.sh"
 wr() {
-  if command -v wrangler >/dev/null 2>&1; then wrangler "$@"
-  else npx --yes wrangler "$@"; fi
+  local wr_cmd
+  wr_cmd=$(forge_wrangler) || return 1
+  case "$wr_cmd" in
+    wrangler) wrangler "$@" ;;
+    "npx --yes wrangler") npx --yes wrangler "$@" ;;
+    *) return 1 ;;
+  esac
 }
 
 banner "silex-forge — provision a forge on your Cloudflare account"
@@ -215,7 +222,7 @@ note "Nothing is created without showing you first. Ctrl-C is always safe."
 for b in python3 curl git; do
   command -v "$b" >/dev/null 2>&1 || fail "$b is required (Windows: use WSL)"
 done
-if ! command -v wrangler >/dev/null 2>&1 && ! command -v npx >/dev/null 2>&1; then
+if ! forge_wrangler >/dev/null 2>&1; then
   fail "wrangler or npx is required — install Node.js, then \`npm i -g wrangler\`"
 fi
 WHOAMI_TMP="$(mktemp)"
