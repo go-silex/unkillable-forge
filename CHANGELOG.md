@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+### Added
+
+- README: supported-runtime matrix and dependency table. The POSIX contract (Linux, macOS stock bash 3.2, Windows via WSL — never Git Bash / PowerShell, which lack `python3` on `PATH` and `chmod 600`) existed only in a test-file comment, so a Windows install failed with no stated prerequisite.
+
 ## [1.9.1] - 2026-09-03
 
 ### Fixed
