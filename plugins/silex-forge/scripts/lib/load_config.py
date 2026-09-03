@@ -303,6 +303,29 @@ def _cf_api(
     return code, data, ""
 
 
+def _cf_err_msg(data: dict[str, Any] | None, err: str) -> str:
+    errors = (data or {}).get("errors") or [{}]
+    first = errors[0] if errors else {}
+    if isinstance(first, dict) and first.get("message"):
+        return str(first["message"])
+    return err or "unknown"
+
+
+def _verify_api_token(token: str, acct: str) -> tuple[str | None, str]:
+    """User tokens: GET /user/tokens/verify. Account-owned (cfat_): /accounts/{id}/tokens/verify."""
+    code, data, err = _cf_api("GET", "/user/tokens/verify", token)
+    if code == 200 and data and data.get("success"):
+        return "user", ""
+    user_code, user_msg = code, _cf_err_msg(data, err)
+    code, data, err = _cf_api("GET", f"/accounts/{acct}/tokens/verify", token)
+    if code == 200 and data and data.get("success"):
+        return "account", ""
+    return None, (
+        f"token verify failed (user {user_code}: {user_msg}; "
+        f"account {code}: {_cf_err_msg(data, err)})"
+    )
+
+
 def fetch_pages_project(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     """Fetch Pages project payload. Returns structured result (never silent empty on API error)."""
     cfg = cfg or load_config()
@@ -431,12 +454,11 @@ def preflight_mutations(
             "require_kv": require_kv,
         }
 
-    code, data, err = _cf_api("GET", "/user/tokens/verify", token)
-    if code == 200 and data and data.get("success"):
-        checks["token"] = "ok"
+    kind, verr = _verify_api_token(token, acct)
+    if kind:
+        checks["token"] = kind
     else:
-        msg = (data or {}).get("errors", [{}])[0].get("message") if data else err
-        errors.append(f"token verify failed ({code}): {msg or 'unknown'}")
+        errors.append(verr)
 
     code, data, err = _cf_api("GET", f"/accounts/{acct}", token)
     if code == 200 and data and data.get("success"):

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ sys.path.insert(0, str(LIB))
 
 from load_config import (  # noqa: E402
     PagesEnvFetchError,
+    _verify_api_token,
     doctor,
     fetch_pages_plain_var,
     forge_env_permissions,
@@ -48,6 +50,7 @@ class LoadConfigTests(unittest.TestCase):
         blob = str(d)
         self.assertNotIn("CLOUDFLARE_API_TOKEN=", blob)
         self.assertNotIn("cfut_", blob)
+        self.assertNotIn("cfat_", blob)
         self.assertNotIn("cfk_", blob)
 
     def test_parse_forge_env_redacts_secrets(self) -> None:
@@ -59,6 +62,7 @@ class LoadConfigTests(unittest.TestCase):
         perm = forge_env_permissions(Path("/nonexistent/forge.env"))
         self.assertTrue(perm["ok"])
 
+    @unittest.skipIf(os.name == "nt", "forge.env mode bits are Unix-only")
     def test_forge_env_permissions_rejects_world_readable(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             env_path = Path(td) / "forge.env"
@@ -92,6 +96,46 @@ class LoadConfigTests(unittest.TestCase):
         with self.assertRaises(PagesEnvFetchError) as ctx:
             fetch_pages_plain_var("SHLINK_API_URL")
         self.assertEqual(ctx.exception.kind, "auth_missing")
+
+    @patch("load_config._cf_api")
+    def test_verify_user_token(self, mock_api: object) -> None:
+        mock_api.return_value = (200, {"success": True}, "")
+        kind, err = _verify_api_token("cfut_x", "acct123")
+        self.assertEqual(kind, "user")
+        self.assertEqual(err, "")
+        mock_api.assert_called_once_with("GET", "/user/tokens/verify", "cfut_x")
+
+    @patch("load_config._cf_api")
+    def test_verify_account_token_fallback(self, mock_api: object) -> None:
+        def side(method: str, path: str, token: str, **_kw: object) -> tuple:
+            if path == "/user/tokens/verify":
+                return (
+                    401,
+                    {"success": False, "errors": [{"message": "Invalid API Token"}]},
+                    "",
+                )
+            if path == "/accounts/acct123/tokens/verify":
+                return 200, {"success": True}, ""
+            raise AssertionError(path)
+
+        mock_api.side_effect = side
+        kind, err = _verify_api_token("cfat_x", "acct123")
+        self.assertEqual(kind, "account")
+        self.assertEqual(err, "")
+
+    @patch("load_config._cf_api")
+    def test_verify_token_both_endpoints_fail(self, mock_api: object) -> None:
+        mock_api.return_value = (
+            401,
+            {"success": False, "errors": [{"message": "Invalid API Token"}]},
+            "",
+        )
+        kind, err = _verify_api_token("bad", "acct123")
+        self.assertIsNone(kind)
+        self.assertIn("token verify failed", err)
+        self.assertIn("user 401", err)
+        self.assertIn("account 401", err)
+        self.assertEqual(mock_api.call_count, 2)
 
 
 if __name__ == "__main__":
