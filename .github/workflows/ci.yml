@@ -36,6 +36,7 @@ jobs:
           sudo apt-get install -y -qq shellcheck
           shellcheck -e SC1091,SC2086 plugins/silex-forge/scripts/publish.sh
           shellcheck plugins/silex-forge/scripts/forge-doctor.sh
+          shellcheck plugins/silex-forge/scripts/forge-discover.sh
           shellcheck scripts/release-plugin.sh
 
       - name: Python compile

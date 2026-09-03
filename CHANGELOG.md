@@ -9,8 +9,11 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-09-03
+
 ### Added
 
+- `forge-discover.sh` — derives `forge.env` from an existing Cloudflare Pages forge, so onboarding a machine no longer means hand-copying identifiers out of the dashboard. `wrangler pages download config` yields `CF_ACCESS_AUD`, `CF_ACCESS_TEAM_DOMAIN`, `PUBLIC_HOST`, `SHLINK_API_URL` and the KV namespace bound to `SHARES`; `wrangler whoami` yields `CLOUDFLARE_ACCOUNT_ID`. All six match the hand-written file byte for byte, and a `forge.env` built purely from discovery plus a token reports `deploy_ready: true`. Runs under `wrangler login` OAuth alone — no `CLOUDFLARE_API_TOKEN` — verified in a scrubbed environment (`env -i`). `--json` for agents, `--write` merges into `~/.config/silex/forge.env` (chmod 600) printing key names only, never values. Exit `2` when no such project exists on the account: a blank account still needs manual creation.
 - README: supported-runtime matrix and dependency table. The POSIX contract (Linux, macOS stock bash 3.2, Windows via WSL — never Git Bash / PowerShell, which lack `python3` on `PATH` and `chmod 600`) existed only in a test-file comment, so a Windows install failed with no stated prerequisite.
 
 ### Removed
@@ -180,7 +183,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 - Cloudflare Pages host for team decks and guides
 - Plugin marketplace manifest (`.claude-plugin/marketplace.json`)
 
-[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.9.1...HEAD
+[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.10.0...HEAD
+[1.10.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.9.1...silex-forge/v1.10.0
 [1.9.1]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.9.0...silex-forge/v1.9.1
 [1.9.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.8.2...silex-forge/v1.9.0
 [1.8.2]: https://github.com/go-silex/silex-forge/compare/v1.8.1...silex-forge/v1.8.2
