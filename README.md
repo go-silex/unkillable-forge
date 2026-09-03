@@ -125,13 +125,36 @@ Craft HTML separately: **`silex-craft@silex-plugins`**.
 
 ### Machine setup
 
-```bash
-# first publish if doctor KO → /forge-setup (manual)
-plugins/silex-forge/scripts/forge-doctor.sh
+Existing forge on this Cloudflare account — discover, do not retype:
 
+```bash
+wrangler login
+plugins/silex-forge/scripts/forge-discover.sh --write
+# fill CLOUDFLARE_API_TOKEN in ~/.config/silex/forge.env
+plugins/silex-forge/scripts/forge-doctor.sh
+```
+
+`--write` merges into `~/.config/silex/forge.env` (`chmod 600`) and prints key names only. Discovery is OAuth-only (`wrangler login`) — no API token. Needed scopes: `pages (write)`, `workers_kv (write)`.
+
+Still fill `CLOUDFLARE_API_TOKEN` (deploy is not OAuth-only; `publish.sh` dies without it) and `hub_root` in `forge.config.json` (local vault path; Cloudflare cannot see it). Doctor KO → `/forge-setup`.
+
+| Value | Source | Why |
+|---|---|---|
+| `CLOUDFLARE_ACCOUNT_ID` | discover | logged-in account |
+| `FORGE_SHARES_KV_ID` | discover | KV bound as `SHARES` |
+| `CF_ACCESS_TEAM_DOMAIN` | discover | Pages env |
+| `CF_ACCESS_AUD` | discover | Pages env |
+| `PUBLIC_HOST` | discover | Pages env |
+| `SHLINK_API_URL` | discover | Pages env |
+| `CLOUDFLARE_API_TOKEN` | **manual** | deploy still requires a token |
+| `hub_root` | **manual** | per-person vault; not on Cloudflare |
+
+No Pages project on this account → exit `2`. Create Pages + KV + Access by hand, then:
+
+```bash
 cp .env.example ~/.config/silex/forge.env
 chmod 600 ~/.config/silex/forge.env
-# fill CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, FORGE_SHARES_KV_ID
+# fill remaining keys — see table
 ```
 
 | File | Role |

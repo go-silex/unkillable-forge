@@ -1,6 +1,6 @@
 {
   "name": "silex-forge",
-  "version": "1.9.1",
+  "version": "1.10.0",
   "description": "Team HTML artifact host on Cloudflare Pages — forge-publish and forge-setup. Craft HTML = silex-craft@silex-plugins.",
   "owner": {
     "name": "Silex",
@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "silex-forge",
-      "version": "1.9.1",
+      "version": "1.10.0",
       "description": "Cloudflare Pages upload for forge hosts — publish + setup/doctor. Craft HTML = silex-craft@silex-plugins.",
       "source": "./plugins/silex-forge",
       "category": "productivity"

@@ -29,9 +29,9 @@ path in the local config.
 ✅ ~/.config/silex/forge.config.json (merged from example)
 ✅ hub_root = valid vault (00_COCKPIT + 01_COMPANY)
 ✅ $hub_root/$artifacts_dir exists
-✅ ~/.config/silex/forge.env (Pages token + account + KV id, chmod 600)
+✅ ~/.config/silex/forge.env (discover --write fills account + KV + Access; token still required, chmod 600)
 ✅ forge-doctor exit 0 (missing token = warning, not hub KO)
-⚠️ optional Shlink shortlinks — Pages SHLINK_* + local CLI (step 5b)
+⚠️ optional Shlink shortlinks — Pages SHLINK_* + local CLI (step 6b)
 ⚠️ recommended external craft plugins (diagram-design, huashu-design, frontend-slides)
 ```
 
@@ -68,7 +68,7 @@ bash "$S"
 bash "$S" --json   # machine-readable if needed
 ```
 
-- **OK** → print hub + artifacts. Still cover token + **step 6** (craft plugins) if missing. Stop unless override requested.
+- **OK** → print hub + artifacts. Still cover discovery + token + **step 7** (craft plugins) if missing. Stop unless override requested.
 - **KO** → continue setup (do not invent a path).
 
 ## Step 1 — Resolve hub_root
@@ -245,11 +245,97 @@ Report:
 - Generic craft: external plugins below
 ```
 
-## Step 5 — Cloudflare token (publish)
+## Step 5 — Discover existing forge
+
+Probe the logged-in Cloudflare account. OAuth (`wrangler login`) is enough — no
+API token. This does **not** make deploy work without a token: `publish.sh` still
+requires `CLOUDFLARE_API_TOKEN` in `forge.env`. Discovery only fills the other keys.
+
+`hub_root` is local (step 1). Cloudflare cannot see it.
+
+```bash
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  for _c in \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/omp/plugins/node_modules/silex-forge" \
+    "$HOME/.omp/plugins/node_modules/silex-forge"
+  do
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+  done
+fi
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  _d="$PWD"
+  while [ "$_d" != "/" ]; do
+    _c="$_d/.omp/plugins/node_modules/silex-forge"
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+    _d="$(dirname "$_d")"
+  done
+  unset _d
+fi
+unset _c
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
+  exit 1
+fi
+bash "$FORGE_ROOT/scripts/forge-discover.sh" --json
+```
+
+Do not dump the JSON in chat. Branch on the exit code:
+
+| Exit | Meaning | Next |
+|---|---|---|
+| `0` | Forge found, values discovered | `--write` below, then step 6 for the token only |
+| `1` | wrangler missing or not logged in | `wrangler login`, retry this step |
+| `2` | No Pages project on this account | creation stays manual (Pages project + KV namespace + Access). See `docs/cloudflare-pages.md` and `docs/cloudflare-access.md`. Fill `forge.env` by hand in step 6. |
+
+On exit `0`:
+
+```bash
+FORGE_ROOT="${SILEX_FORGE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  for _c in \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/omp/plugins/node_modules/silex-forge" \
+    "$HOME/.omp/plugins/node_modules/silex-forge"
+  do
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+  done
+fi
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  _d="$PWD"
+  while [ "$_d" != "/" ]; do
+    _c="$_d/.omp/plugins/node_modules/silex-forge"
+    [ -d "$_c/scripts" ] && FORGE_ROOT="$_c" && break
+    _d="$(dirname "$_d")"
+  done
+  unset _d
+fi
+unset _c
+if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
+  echo "silex-forge: plugin root is unavailable; reinstall or link the plugin for this harness" >&2
+  exit 1
+fi
+bash "$FORGE_ROOT/scripts/forge-discover.sh" --write
+```
+
+Merges into `~/.config/silex/forge.env` (chmod 600). Prints **key names only**.
+
+## Step 6 — Cloudflare token (publish)
 
 Without a token you can **write** the hub / generate a deck. You cannot go live.
+`publish.sh` requires `CLOUDFLARE_API_TOKEN` even after a successful discovery.
 
-File **never** in git / never dumped by doctor — copy from repo `.env.example`:
+File **never** in git / never dumped by doctor.
+
+**Discovery succeeded (step 5 exit 0)** — add only the token to `forge.env`:
+
+```bash
+# ~/.config/silex/forge.env (chmod 600)
+#   CLOUDFLARE_API_TOKEN=
+```
+
+Do not re-ask `CLOUDFLARE_ACCOUNT_ID` or `FORGE_SHARES_KV_ID`.
+
+**Discovery failed** — copy from repo `.env.example` and fill by hand:
 
 ```bash
 cp /path/to/silex-forge/.env.example ~/.config/silex/forge.env
@@ -270,7 +356,7 @@ Scopes: Pages Write + Read, Account Settings Read, Workers KV Storage Write (CLI
 
 **KV fallback:** if the token lacks KV scope (or REST is rejected), `publish.sh` retries with `wrangler login` OAuth (`wrangler kv … --remote`, `CLOUDFLARE_API_TOKEN` unset for that call). Deploy still requires a valid token in `forge.env`.
 
-## Step 5b — Shlink shortlinks (optional)
+## Step 6b — Shlink shortlinks (optional)
 
 Best-effort: without Shlink, share = long `/s/<slug>/<key>/` URL (silent fail OK).
 
@@ -301,7 +387,7 @@ npx wrangler pages secret list --project-name=silex-forge
 Without the CLI → warning → long URL.  
 Laptop does not use `SHLINK_API_URL`; Pages Functions use Pages env only.
 
-## Step 6 — Recommended craft plugins (external)
+## Step 7 — Recommended craft plugins (external)
 
 Not part of `silex-forge`. **Install** (user scope) — hub doctor stays OK without them, but Halo slides need `silex-craft` + `frontend-slides`.
 
