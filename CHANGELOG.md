@@ -9,8 +9,13 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-09-03
+
 ### Added
 
+- `forge-provision.sh` — an interactive wizard that stands up a forge on **someone else's** Cloudflare account: Pages project, KV namespace bound as `SHARES`, API token, custom domain, Zero Trust team and the three Access applications. Twelve stages, each resumable; values already saved are offered as defaults on a re-run. Generated from the `wizard` skill template, whose library is kept byte-identical.
+- The wizard enforces the ordering hazard documented in `docs/cloudflare-access.md`: the fail-closed Functions are deployed and their `x-forge-acl` header verified **before** any Bypass policy is created. Creating Bypass first would publish every artifact on the account.
+- `vault_markers` in `forge.config.json` — `hub_root` was validated against the hard-coded Silex vault layout (`00_COCKPIT`, `01_COMPANY`), so a client's own artifact folder failed `forge-doctor` outright. Absent key keeps the historical behaviour; a list names the directories to require; `[]` checks only that the folder exists. A malformed value is a doctor issue rather than a silent fallback, since either fallback would apply a policy the operator did not choose.
 - CI job `test-py39`. macOS ships Python 3.9 (Xcode CLT) while every other job pins 3.12, so a 3.11+ stdlib import (`tomllib`…) or newer syntax would stay green in CI and break on a teammate's laptop. The unit tests now run on the floor interpreter, and `release` is gated on it. `python3` ≥ 3.9 stated in the README dependency table.
 
 ### Changed
@@ -195,7 +200,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 - Cloudflare Pages host for team decks and guides
 - Plugin marketplace manifest (`.claude-plugin/marketplace.json`)
 
-[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.10.0...HEAD
+[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.11.0...HEAD
+[1.11.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.10.0...silex-forge/v1.11.0
 [1.10.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.9.1...silex-forge/v1.10.0
 [1.9.1]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.9.0...silex-forge/v1.9.1
 [1.9.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.8.2...silex-forge/v1.9.0

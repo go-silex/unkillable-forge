@@ -1,6 +1,7 @@
 {
   "version": 1,
   "hub_root": "",
+  "vault_markers": ["00_COCKPIT", "01_COMPANY"],
   "artifacts_dir": "00_COCKPIT/Forge/artifacts",
   "public_host": "forge.gosilex.com",
   "forge_repo": "git@github.com:go-silex/silex-forge.git",

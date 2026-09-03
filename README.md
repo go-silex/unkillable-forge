@@ -123,6 +123,23 @@ Link is user-global; files stay in the checkout. Do not `omp plugin install gith
 
 Craft HTML separately: **`silex-craft@silex-plugins`**.
 
+### No forge yet on this account
+
+```bash
+plugins/silex-forge/scripts/forge-provision.sh
+```
+
+An interactive wizard: Pages project, KV namespace, API token, custom domain,
+Zero Trust team and the three Access applications. Twelve stages, resumable —
+re-run it and already-saved values come back as defaults.
+
+It deploys the fail-closed Functions and verifies them **before** creating any
+Access Bypass policy. That order is not cosmetic: Bypass first would publish
+every artifact. See [cloudflare-access.md](docs/cloudflare-access.md).
+
+A forge outside the Silex vault sets `"vault_markers": []` in
+`forge.config.json`; the wizard writes that for you.
+
 ### Machine setup
 
 Existing forge on this Cloudflare account — discover, do not retype:
