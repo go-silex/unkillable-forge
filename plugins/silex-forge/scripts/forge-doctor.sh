@@ -11,7 +11,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/lib"
 export PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
-die() { echo "✗ $*" >&2; exit 1; }
+# shellcheck source=/dev/null
+. "$LIB_DIR/forge_common.sh"
+die() { forge_die "$@"; }
 
 JSON_ONLY=0
 QUIET=0

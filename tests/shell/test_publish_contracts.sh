@@ -121,4 +121,64 @@ pass "kv_wrangler dry-run strips REST credentials"
 PYTHONPATH="$LIB" python3 -c 'from load_config import fetch_pages_plain_var; assert callable(fetch_pages_plain_var)'
 pass "load_config.fetch_pages_plain_var importable from publish lib path"
 
+assert_grep \
+  'forge_common\.sh' \
+  "$PUBLISH" \
+  "publish.sh must source lib/forge_common.sh"
+
+COMMON="$LIB/forge_common.sh"
+[ -f "$COMMON" ] || fail "missing $COMMON"
+
+side_dir=$(mktemp -d)
+(
+  cd "$side_dir" || exit 1
+  # shellcheck source=/dev/null
+  . "$COMMON"
+  [ "$(pwd)" = "$side_dir" ] || exit 2
+) >"$side_dir/stdout" 2>"$side_dir/stderr" || fail "sourcing forge_common.sh failed (status $?)"
+[ ! -s "$side_dir/stdout" ] || fail "sourcing forge_common.sh wrote stdout"
+[ ! -s "$side_dir/stderr" ] || fail "sourcing forge_common.sh wrote stderr"
+pass "forge_common.sh sources with no output or cwd change"
+
+empty_bin=$(mktemp -d)
+if (
+  # shellcheck source=/dev/null
+  . "$COMMON"
+  PATH="$empty_bin"
+  export PATH
+  forge_wrangler
+) >"$side_dir/wrout" 2>"$side_dir/wrerr"; then
+  fail "forge_wrangler must fail when wrangler and npx are missing"
+fi
+[ ! -s "$side_dir/wrout" ] || fail "forge_wrangler printed a command despite missing binaries"
+pass "forge_wrangler fails closed without wrangler or npx"
+
+fake_bin=$(mktemp -d)
+printf '#!/bin/sh\n' >"$fake_bin/wrangler"
+chmod +x "$fake_bin/wrangler"
+got=$(
+  # shellcheck source=/dev/null
+  . "$COMMON"
+  PATH="$fake_bin"
+  export PATH
+  forge_wrangler
+) || fail "forge_wrangler should succeed when wrangler is on PATH"
+[ "$got" = wrangler ] || fail "forge_wrangler printed '$got', expected wrangler"
+pass "forge_wrangler prints wrangler when it is on PATH"
+
+printf '#!/bin/sh\n' >"$fake_bin/npx"
+chmod +x "$fake_bin/npx"
+rm -f "$fake_bin/wrangler"
+got=$(
+  # shellcheck source=/dev/null
+  . "$COMMON"
+  PATH="$fake_bin"
+  export PATH
+  forge_wrangler
+) || fail "forge_wrangler should succeed when npx is on PATH"
+[ "$got" = "npx --yes wrangler" ] || fail "forge_wrangler printed '$got', expected npx --yes wrangler"
+pass "forge_wrangler falls back to npx --yes wrangler"
+
+rm -rf "$side_dir" "$empty_bin" "$fake_bin"
+
 echo "all shell contract checks passed"
