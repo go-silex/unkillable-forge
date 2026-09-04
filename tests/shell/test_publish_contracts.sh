@@ -220,9 +220,6 @@ assert_not_grep \
 rm -f "$cmd_publish_body"
 pass "cmd_publish does not GIT clone"
 
-command -v git >/dev/null 2>&1 \
-  || fail "git required for materialize_engine archive tests (CI: apk add git)"
-
 # Behavioral: local engine via git archive HEAD (real git, no stub)
 engine=$(mktemp -d)
 mkdir -p "$engine/site/a" "$engine/functions" "$engine/plugins/silex-forge/scripts"
