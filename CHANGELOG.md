@@ -11,7 +11,7 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ### Changed
 
-- Default `forge_repo` is HTTPS (`git@github.com:go-silex/silex-forge.git` is rewritten); a local engine is opt-in via an existing `forge_repo` path or `FORGE_REPO`, materialized with `git archive HEAD`. `forge-discover.sh` exit 2 lists other Pages projects and points at `--project` / `forge-provision.sh`. `infer_hub_layout` keeps setup from mkdir'ing a parallel Silex artifacts tree beside a client hub. `forge-provision.sh` defaults the Pages name to `silex-forge`, reuses it when it already exists, and asks `[y/N]` before creating a second project on an account that already has Pages projects.
+- Default `forge_repo` is HTTPS (`git@github.com:go-silex/silex-forge.git` is rewritten); a local engine is opt-in via an existing `forge_repo` path or `FORGE_REPO`, materialized with `git archive HEAD`. `forge-discover.sh` exit 2 lists other Pages projects and points at `--project` / `forge-provision.sh`. `infer_hub_layout` keeps setup from mkdir'ing a parallel Silex artifacts tree beside a client hub. `forge-provision.sh` reuses the chosen Pages name when it already exists and asks `[y/N]` before creating a second project on an account that already has Pages projects.
 
 ## [1.12.0] - 2026-09-03
 

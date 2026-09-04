@@ -159,10 +159,10 @@ plugins/silex-forge/scripts/forge-provision.sh
 
 An interactive wizard: Pages project, KV namespace, API token, custom domain,
 Zero Trust team and the three Access applications. Twelve stages, resumable —
-re-run it and already-saved values come back as defaults. Default Pages name is
-`silex-forge`. If the account already has other Pages projects, the wizard lists
-them and asks `[y/N]` before creating a second one; `N` points at
-`forge-discover.sh --project NAME`. Unreadable wrangler output refuses to create.
+re-run it and already-saved values come back as defaults. If the account already
+has other Pages projects, the wizard lists them and asks `[y/N]` before creating
+a second one; `N` points at `forge-discover.sh --project NAME`. Unreadable
+wrangler output warns and requires an explicit confirm.
 
 It deploys the fail-closed Functions and verifies them **before** creating any
 Access Bypass policy. That order is not cosmetic: Bypass first would publish

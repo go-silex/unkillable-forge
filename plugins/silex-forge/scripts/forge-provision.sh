@@ -253,8 +253,8 @@ case "$PUBLIC_HOST" in
   *.*) ;;
   *) fail "that does not look like a hostname: $PUBLIC_HOST" ;;
 esac
-ask FORGE_PAGES_PROJECT "Cloudflare Pages project name [silex-forge]:"
-[ -n "$FORGE_PAGES_PROJECT" ] || FORGE_PAGES_PROJECT="silex-forge"
+ask FORGE_PAGES_PROJECT "Cloudflare Pages project name [forge]:"
+[ -n "$FORGE_PAGES_PROJECT" ] || FORGE_PAGES_PROJECT="forge"
 case "$FORGE_PAGES_PROJECT" in *[!a-z0-9-]*) fail "Pages names allow lowercase letters, digits and dashes only" ;; esac
 write_env PUBLIC_HOST "$PUBLIC_HOST"
 write_env FORGE_PAGES_PROJECT "$FORGE_PAGES_PROJECT"
@@ -302,7 +302,10 @@ case "$_kind" in
       || fail "could not create the Pages project"
     ;;
   unparsed)
-    fail "could not parse Pages project list — not creating a new forge"
+    warn "could not parse Pages project list — not sure if a forge already exists."
+    confirm "Create Pages project '$FORGE_PAGES_PROJECT' anyway?" || fail "aborted"
+    wr pages project create "$FORGE_PAGES_PROJECT" --production-branch=main \
+      || fail "could not create the Pages project"
     ;;
   *) fail "unexpected Pages list classify: ${_kind:-empty}" ;;
 esac
