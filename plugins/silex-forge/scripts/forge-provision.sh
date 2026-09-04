@@ -253,8 +253,8 @@ case "$PUBLIC_HOST" in
   *.*) ;;
   *) fail "that does not look like a hostname: $PUBLIC_HOST" ;;
 esac
-ask FORGE_PAGES_PROJECT "Cloudflare Pages project name [forge]:"
-[ -n "$FORGE_PAGES_PROJECT" ] || FORGE_PAGES_PROJECT="forge"
+ask FORGE_PAGES_PROJECT "Cloudflare Pages project name [silex-forge]:"
+[ -n "$FORGE_PAGES_PROJECT" ] || FORGE_PAGES_PROJECT="silex-forge"
 case "$FORGE_PAGES_PROJECT" in *[!a-z0-9-]*) fail "Pages names allow lowercase letters, digits and dashes only" ;; esac
 write_env PUBLIC_HOST "$PUBLIC_HOST"
 write_env FORGE_PAGES_PROJECT "$FORGE_PAGES_PROJECT"
@@ -262,14 +262,50 @@ secure_env
 
 # ── 3 ─────────────────────────────────────────────────────────────────────
 stage "Create the Pages project"
-if wr pages project list 2>/dev/null | grep -qE "(^|[^A-Za-z0-9._-])${FORGE_PAGES_PROJECT}([^A-Za-z0-9._-]|$)"; then
-  say "Project '$FORGE_PAGES_PROJECT' already exists — reusing it."
-else
-  say "Creating Pages project '$FORGE_PAGES_PROJECT' (Direct Upload, production branch main)."
-  confirm "Create it now?" || fail "aborted"
-  wr pages project create "$FORGE_PAGES_PROJECT" --production-branch=main \
-    || fail "could not create the Pages project"
+_list="$(mktemp)"
+_lerr="$(mktemp)"
+if ! wr pages project list >"$_list" 2>"$_lerr"; then
+  rm -f "$_list" "$_lerr"
+  fail "could not list Pages projects — run \`wrangler login\` (needs pages scope)"
 fi
+_cls="$(
+  PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
+import sys
+from discover import classify_pages_projects
+kind, others = classify_pages_projects(sys.stdin.read(), sys.argv[1])
+print(kind)
+for name in others:
+    print(name)
+' "$FORGE_PAGES_PROJECT" < "$_list"
+)" || { rm -f "$_list" "$_lerr"; fail "could not parse Pages project list"; }
+rm -f "$_list" "$_lerr"
+_kind=$(printf '%s\n' "$_cls" | sed -n '1p')
+_others=$(printf '%s\n' "$_cls" | sed '1d')
+case "$_kind" in
+  hit)
+    say "Project '$FORGE_PAGES_PROJECT' already exists — reusing it."
+    ;;
+  others)
+    say "This account already has Pages projects:"
+    printf '%s\n' "$_others" | sed 's/^/    /'
+    warn "Creating '$FORGE_PAGES_PROJECT' would add a second project."
+    note "Attach an existing forge: forge-discover.sh --project NAME"
+    confirm "Create an additional Pages project '$FORGE_PAGES_PROJECT'?" \
+      || fail "aborted — use forge-discover.sh --project NAME"
+    wr pages project create "$FORGE_PAGES_PROJECT" --production-branch=main \
+      || fail "could not create the Pages project"
+    ;;
+  empty)
+    say "Creating Pages project '$FORGE_PAGES_PROJECT' (Direct Upload, production branch main)."
+    confirm "Create it now?" || fail "aborted"
+    wr pages project create "$FORGE_PAGES_PROJECT" --production-branch=main \
+      || fail "could not create the Pages project"
+    ;;
+  unparsed)
+    fail "could not parse Pages project list — not creating a new forge"
+    ;;
+  *) fail "unexpected Pages list classify: ${_kind:-empty}" ;;
+esac
 pause "Done. Press Enter."
 
 # ── 4 ─────────────────────────────────────────────────────────────────────

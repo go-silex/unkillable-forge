@@ -27,7 +27,7 @@ path in the local config.
 
 ```
 ✅ ~/.config/silex/forge.config.json (merged from example)
-✅ hub_root = valid vault (00_COCKPIT + 01_COMPANY)
+✅ hub_root = valid vault per vault_markers
 ✅ $hub_root/$artifacts_dir exists
 ✅ ~/.config/silex/forge.env (discover --write fills account + KV + Access; token still required, chmod 600)
 ✅ forge-doctor exit 0 (missing token = warning, not hub KO)
@@ -104,26 +104,42 @@ EXAMPLE="$FORGE_ROOT/forge.config.example.json"
 LOCAL=~/.config/silex/forge.config.json
 python3 - <<PY
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, "$FORGE_ROOT/scripts/lib")
+from load_config import pick_forge_repo, infer_hub_layout
 
 example = Path("$EXAMPLE")
 local = Path("$LOCAL")
 hub = Path("$HUB").expanduser().resolve()
 
 base = json.loads(example.read_text(encoding="utf-8"))
+over = {}
 if local.is_file():
     over = json.loads(local.read_text(encoding="utf-8"))
     base.update({k: v for k, v in over.items() if v not in ("", None)})
 base["hub_root"] = str(hub)
-base.setdefault("artifacts_dir", "00_COCKPIT/Forge/artifacts")
+local_artifacts = "artifacts_dir" in over and over.get("artifacts_dir") not in ("", None)
+local_markers = "vault_markers" in over
+if not local_artifacts or not local_markers:
+    artifacts_dir, vault_markers = infer_hub_layout(hub)
+    if not local_artifacts:
+        base["artifacts_dir"] = artifacts_dir
+    if not local_markers:
+        base["vault_markers"] = vault_markers
+base["forge_repo"] = pick_forge_repo(base.get("forge_repo") or "")
 local.write_text(json.dumps(base, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 print(f"wrote {local}")
 print(f"hub_root={base['hub_root']}")
 print(f"artifacts_dir={base['artifacts_dir']}")
+print(f"forge_repo={base['forge_repo']}")
 PY
 ```
 
 Never commit `forge.config.json` into silex-forge.
+
+`forge_repo` defaults to HTTPS. A local engine is used only when `forge_repo` is already a path or `FORGE_REPO` is set.
 
 Optional: sync Silex `hub-root` if absent:
 
@@ -196,7 +212,7 @@ Do not dump the JSON in chat. Branch on the exit code:
 |---|---|---|
 | `0` | Forge found, values discovered | `--write` below, then step 6 for the token only |
 | `1` | wrangler missing or not logged in | `wrangler login`, retry this step |
-| `2` | No Pages project on this account | creation stays manual (Pages project + KV namespace + Access). See `docs/cloudflare-pages.md` and `docs/cloudflare-access.md`. Fill `forge.env` by hand in step 6. |
+| `2` | Named project missing on this account | Other Pages names listed → one question `--project NAME`, retry discover. Empty list → run `forge-provision.sh`. Unparsed list → `--project`, do not provision. Provision itself lists existing Pages names and asks `[y/N]` before creating a second project. |
 
 On exit `0`:
 
@@ -223,16 +239,7 @@ File **never** in git / never dumped by doctor.
 
 Do not re-ask `CLOUDFLARE_ACCOUNT_ID` or `FORGE_SHARES_KV_ID`.
 
-**Discovery failed** — copy from repo `.env.example` and fill by hand:
-
-```bash
-cp /path/to/silex-forge/.env.example ~/.config/silex/forge.env
-chmod 600 ~/.config/silex/forge.env
-# fill:
-#   CLOUDFLARE_ACCOUNT_ID=
-#   CLOUDFLARE_API_TOKEN=
-#   FORGE_SHARES_KV_ID=
-```
+**Discovery failed (step 5 exit 1)** — `wrangler login` and retry step 5. Exit `2` is handled there (`--project` or `forge-provision.sh`), not by copying `.env.example`.
 
 Order:
 

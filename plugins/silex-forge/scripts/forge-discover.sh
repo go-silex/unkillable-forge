@@ -8,7 +8,7 @@
 #
 # Exit: 0 forge found and values discovered
 #       1 wrangler missing, or not logged in
-#       2 project not found on this account (fresh account → manual creation)
+#       2 named project missing (other names → --project; empty → provision; unparsed → no provision)
 #
 # Never discoverable: hub_root (local vault path) and CLOUDFLARE_API_TOKEN
 # (a secret; publish.sh still requires one to deploy).
@@ -69,12 +69,42 @@ if ! $WR pages project list >"$TD/projects.txt" 2>"$TD/projects.err"; then
   exit 1
 fi
 
-if ! grep -qE "(^|[^A-Za-z0-9._-])${PROJECT}([^A-Za-z0-9._-]|$)" "$TD/projects.txt"; then
-  echo "✗ no Pages project '${PROJECT}' on this account" >&2
-  echo "  a forge must be created first (Pages project + KV namespace + Access)" >&2
-  echo "  see docs/cloudflare-pages.md and docs/cloudflare-access.md" >&2
-  exit 2
-fi
+cls_out="$(
+  PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
+import sys
+from discover import classify_pages_projects
+kind, others = classify_pages_projects(sys.stdin.read(), sys.argv[1])
+print(kind)
+for name in others:
+    print(name)
+' "$PROJECT" < "$TD/projects.txt"
+)" || die "discovery parse failed"
+kind=$(printf '%s\n' "$cls_out" | sed -n '1p')
+others=$(printf '%s\n' "$cls_out" | sed '1d')
+case "$kind" in
+  hit) ;;
+  others)
+    echo "✗ no Pages project '${PROJECT}' on this account" >&2
+    if [ -n "$others" ]; then
+      printf '%s\n' "$others" | sed 's/^/  /' >&2
+    fi
+    echo "retry: forge-discover.sh --project NAME" >&2
+    echo "none of these is a forge → ${SCRIPT_DIR}/forge-provision.sh" >&2
+    exit 2
+    ;;
+  empty)
+    echo "✗ no Pages project '${PROJECT}' on this account" >&2
+    echo "none of these is a forge → ${SCRIPT_DIR}/forge-provision.sh" >&2
+    exit 2
+    ;;
+  unparsed)
+    echo "✗ no Pages project '${PROJECT}' on this account" >&2
+    echo "  could not parse Pages project list — not creating a new forge" >&2
+    echo "retry: forge-discover.sh --project NAME" >&2
+    exit 2
+    ;;
+  *) die "discovery classify: unexpected ${kind:-empty}" ;;
+esac
 
 # `pages download config` writes ./wrangler.toml in the working directory.
 if ! (cd "$TD" && $WR pages download config "$PROJECT" >download.log 2>&1); then

@@ -18,7 +18,7 @@ Usage as library:
   from load_config import load_config, artifacts_root, doctor
 
 CLI:
-  python3 load_config.py [--json|--doctor|--print-artifacts|--print-hub-candidates]
+  python3 load_config.py [--json|--doctor|--print-artifacts|--print-hub-candidates|--print-engine-root]
 """
 from __future__ import annotations
 
@@ -37,6 +37,9 @@ EXAMPLE_PATH = PLUGIN_ROOT / "forge.config.example.json"
 LOCAL_PATH = Path.home() / ".config/silex/forge.config.json"
 HUB_ROOT_FILE = Path.home() / ".config/silex/hub-root"
 FORGE_ENV_PATH = Path.home() / ".config/silex/forge.env"
+FORGE_REPO_HTTPS = "https://github.com/go-silex/silex-forge.git"
+FORGE_REPO_SSH_LEGACY = "git@github.com:go-silex/silex-forge.git"
+
 
 REQUIRED_KEYS = (
     "version",
@@ -131,6 +134,38 @@ def _safe_resolve(path: Path) -> Path | None:
     except OSError:
         return None
     return resolved
+
+
+def engine_root_from_plugin(plugin_root: Path | str | None = PLUGIN_ROOT) -> str:
+    """Local engine when this plugin lives at <engine>/plugins/silex-forge."""
+    if plugin_root is None:
+        plugin_root = PLUGIN_ROOT
+    root = Path(plugin_root)
+    try:
+        root = root.expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    if root.name != "silex-forge" or root.parent.name != "plugins":
+        return ""
+    engine = root.parent.parent
+    if not (engine / "site" / "404.html").is_file():
+        return ""
+    try:
+        return str(engine.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return ""
+
+
+def pick_forge_repo(current: str) -> str:
+    """Normalize forge_repo: empty or SSH-legacy URL → HTTPS; else unchanged.
+
+    Does not auto-pin a local engine checkout. Local engine is opt-in
+    (forge_repo already a path, or FORGE_REPO env).
+    """
+    current = (current or "").strip()
+    if current in ("", FORGE_REPO_SSH_LEGACY):
+        return FORGE_REPO_HTTPS
+    return current
 
 
 def _add_hub_candidate(
@@ -393,6 +428,42 @@ def vault_ok(
     if markers is None:
         markers = VAULT_MARKERS
     return hub.is_dir() and all((hub / m).is_dir() for m in markers)
+
+
+def _has_artifact_slugs(root: Path) -> bool:
+    """True if root has a subdirectory containing index.html. Missing dir → False."""
+    try:
+        if not root.is_dir():
+            return False
+        for child in root.iterdir():
+            try:
+                if child.is_dir() and (child / "index.html").is_file():
+                    return True
+            except OSError:
+                continue
+    except OSError:
+        return False
+    return False
+
+
+def infer_hub_layout(hub: Path | str) -> tuple[str, list[str]]:
+    """Infer (artifacts_dir, vault_markers) from hub layout. Never raises on missing dirs.
+
+    Slug = subdirectory containing index.html.
+    1. hub/artifacts has slugs AND Silex artifacts has none → client layout
+       (markers present do not override a populated client tree)
+    2. Else Silex markers or Silex slugs → Silex layout (cockpit SSOT)
+    3. Else client layout (do not mkdir 00_COCKPIT beside a client hub)
+    """
+    hub_path = Path(hub)
+    silex_dir = "00_COCKPIT/Forge/artifacts"
+    client_slugs = _has_artifact_slugs(hub_path / "artifacts")
+    silex_slugs = _has_artifact_slugs(hub_path / silex_dir)
+    if client_slugs and not silex_slugs:
+        return "artifacts", []
+    if vault_ok(hub_path, VAULT_MARKERS) or silex_slugs:
+        return silex_dir, list(VAULT_MARKERS)
+    return "artifacts", []
 
 
 def forge_env_permissions(path: Path | None = None) -> dict[str, Any]:
@@ -865,6 +936,11 @@ def main(argv: list[str]) -> int:
             cfg = None
         for path, origin in hub_root_candidates(cfg, include_search=True):
             print(f"{origin}\t{path}")
+        return 0
+    if "--print-engine-root" in args:
+        root = engine_root_from_plugin()
+        if root:
+            print(root)
         return 0
     if "--print-artifacts" in args:
         art = artifacts_root()

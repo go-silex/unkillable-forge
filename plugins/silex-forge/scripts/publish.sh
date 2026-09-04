@@ -25,7 +25,7 @@ if [ -f "$LIB_DIR/load_config.py" ] && command -v python3 >/dev/null 2>&1; then
   eval "$(PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c 'from load_config import export_env; print(export_env())')"
 fi
 
-FORGE_REPO="${_ENV_FORGE_REPO:-${FORGE_REPO:-git@github.com:go-silex/silex-forge.git}}"
+FORGE_REPO="${_ENV_FORGE_REPO:-${FORGE_REPO:-https://github.com/go-silex/silex-forge.git}}"
 PUBLIC_HOST="${_ENV_PUBLIC_HOST:-${FORGE_PUBLIC_HOST:-${PUBLIC_HOST:-forge.gosilex.com}}}"
 SHLINK_DOMAIN="${_ENV_SHLINK_DOMAIN:-${FORGE_SHLINK_DOMAIN:-${SHLINK_DOMAIN:-s.gosilex.com}}}"
 ARTIFACTS_ROOT="${FORGE_ARTIFACTS_ROOT:-}"
@@ -107,13 +107,28 @@ validate_slug() {
 
 whoami_id() { git config user.email 2>/dev/null || echo "${USER:-unknown}@$(hostname)"; }
 
-clone_engine() {
-  WORK="$(mktemp -d)"
-  info "clone engine $FORGE_REPO (main)"
-  GIT clone --depth 1 --branch main --quiet "$FORGE_REPO" "$WORK/repo" \
-    || die "clone impossible — branche main ? accès GitHub ?"
+materialize_engine() {
+  [ -n "${WORK:-}" ] || die "materialize_engine: WORK unset"
+  if [ -d "$FORGE_REPO" ] && [ -f "$FORGE_REPO/site/404.html" ]; then
+    [ "$(GIT -C "$FORGE_REPO" rev-parse --is-inside-work-tree 2>/dev/null)" = true ] \
+      || die "FORGE_REPO is not a git work tree — use the HTTPS URL or a git checkout"
+    mkdir -p "$WORK/repo"
+    GIT -C "$FORGE_REPO" archive HEAD | tar -x -C "$WORK/repo" \
+      || die "git archive HEAD failed for $FORGE_REPO"
+    rm -rf "$WORK/repo/site/a" "$WORK/repo/registry"
+    info "engine local $FORGE_REPO (HEAD)"
+  else
+    info "clone engine $FORGE_REPO (main)"
+    GIT clone --depth 1 --branch main --quiet "$FORGE_REPO" "$WORK/repo" \
+      || die "clone impossible — branche main ? accès GitHub ?"
+  fi
   [ -d "$WORK/repo/site" ] || die "repo sans site/ skeleton"
   [ -f "$WORK/repo/site/404.html" ] || die "site/404.html missing"
+}
+
+clone_engine() {
+  WORK="$(mktemp -d)"
+  materialize_engine
 }
 
 SCRIPTS() {
@@ -894,18 +909,8 @@ cmd_publish() {
   export OUT="${ARTIFACTS_ROOT}/${slug}/meta.json"
   write_hub_meta
 
-  # clone engine + build full site from hub
-  # (re-clone into same WORK: move src aside)
-  local src_keep="$WORK/src-keep"
-  mkdir -p "$src_keep"
-  # WORK reused: clone_engine overwrites WORK assignment — fix by not resetting WORK
-  local saved_work="$WORK"
-  # clone into subdir without wiping WORK
-  info "clone engine $FORGE_REPO (main)"
-  GIT clone --depth 1 --branch main --quiet "$FORGE_REPO" "$saved_work/repo" \
-    || die "clone impossible"
-  WORK="$saved_work"
-  [ -f "$WORK/repo/site/404.html" ] || die "site/404.html missing"
+  # WORK already set; do not call clone_engine (it would reset WORK)
+  materialize_engine
 
   build_from_hub
 
