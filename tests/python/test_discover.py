@@ -16,8 +16,10 @@ sys.path.insert(0, str(LIB))
 
 from discover import (  # noqa: E402
     account_id_from_whoami,
+    classify_pages_projects,
     discovered_env,
     merge_env,
+    pages_project_names,
     parse_pages_config,
     render_env,
 )
@@ -165,6 +167,74 @@ class RenderAndMergeTests(unittest.TestCase):
         values = {"PUBLIC_HOST": "forge.example.com"}
         once = merge_env("PUBLIC_HOST=forge.example.com\n", values)
         self.assertEqual(once, merge_env(once, values))
+
+
+PAGES_TABLE = """
+┌──────────────┬────────────┐
+│ Project Name │ Created    │
+├──────────────┼────────────┤
+│ silex-forge  │ 2024-01-01 │
+│ client-site  │ 2024-02-02 │
+└──────────────┴────────────┘
+"""
+
+PAGES_JSON_LIST = '[{"name": "silex-forge"}, {"name": "client-site"}]'
+
+
+class PagesProjectNamesTests(unittest.TestCase):
+    def test_reads_two_names_from_unicode_table(self) -> None:
+        self.assertEqual(
+            pages_project_names(PAGES_TABLE),
+            ["silex-forge", "client-site"],
+        )
+
+    def test_reads_two_names_from_json_list(self) -> None:
+        self.assertEqual(
+            pages_project_names(PAGES_JSON_LIST),
+            ["silex-forge", "client-site"],
+        )
+
+    def test_reads_name_from_json_object(self) -> None:
+        self.assertEqual(
+            pages_project_names('{"name": "only-one"}'),
+            ["only-one"],
+        )
+
+    def test_skips_headers_and_account_ids(self) -> None:
+        text = f"""
+│ Project │ Account ID │
+│ Name    │ {ACCT} │
+│ other-site │ {ACCT} │
+"""
+        self.assertEqual(pages_project_names(text), ["other-site"])
+
+    def test_unique_file_order(self) -> None:
+        text = "│ alpha │\n│ beta │\n│ alpha │\n"
+        self.assertEqual(pages_project_names(text), ["alpha", "beta"])
+
+    def test_classify_hit_and_others(self) -> None:
+        self.assertEqual(
+            classify_pages_projects(PAGES_TABLE, "silex-forge"),
+            ("hit", ["client-site"]),
+        )
+        self.assertEqual(
+            classify_pages_projects(PAGES_TABLE, "missing"),
+            ("others", ["silex-forge", "client-site"]),
+        )
+
+    def test_classify_empty_vs_unparsed(self) -> None:
+        self.assertEqual(classify_pages_projects("", "silex-forge"), ("empty", []))
+        self.assertEqual(classify_pages_projects("  \n\n", "x"), ("empty", []))
+        header_only = """
+┌──────────────┐
+│ Project Name │
+└──────────────┘
+"""
+        self.assertEqual(
+            classify_pages_projects(header_only, "silex-forge"),
+            ("unparsed", []),
+        )
+
 
 
 if __name__ == "__main__":

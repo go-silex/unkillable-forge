@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -12,16 +13,22 @@ LIB = Path(__file__).resolve().parents[2] / "plugins" / "silex-forge" / "scripts
 sys.path.insert(0, str(LIB))
 
 from load_config import (  # noqa: E402
+    EXAMPLE_PATH,
+    FORGE_REPO_HTTPS,
+    FORGE_REPO_SSH_LEGACY,
     PagesEnvFetchError,
     VAULT_MARKERS,
     _verify_api_token,
     doctor,
+    engine_root_from_plugin,
     fetch_pages_plain_var,
     forge_env_permissions,
+    infer_hub_layout,
     hub_root_candidates,
     load_config,
     main,
     parse_forge_env,
+    pick_forge_repo,
     resolve_hub_root,
     resolve_vault_markers,
     vault_ok,
@@ -398,6 +405,110 @@ class HubRootCandidatesTests(unittest.TestCase):
         filled["hub_root"] = str(vault)
         d_ok_hub = doctor(filled)
         self.assertNotIn("hub_root_candidates", d_ok_hub)
+
+
+class ForgeRepoTests(unittest.TestCase):
+    def test_example_forge_repo_is_https(self) -> None:
+        data = json.loads(EXAMPLE_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(data["forge_repo"], FORGE_REPO_HTTPS)
+
+    def test_engine_root_from_plugin_plugins_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            engine = Path(td) / "engine"
+            plugin = engine / "plugins" / "silex-forge"
+            plugin.mkdir(parents=True)
+            html = engine / "site" / "404.html"
+            html.parent.mkdir(parents=True)
+            html.write_text("ok", encoding="utf-8")
+            self.assertEqual(
+                engine_root_from_plugin(plugin_root=plugin),
+                str(engine.resolve()),
+            )
+
+    def test_engine_root_from_plugin_node_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            engine = Path(td) / "engine"
+            plugin = engine / "node_modules" / "silex-forge"
+            plugin.mkdir(parents=True)
+            html = engine / "site" / "404.html"
+            html.parent.mkdir(parents=True)
+            html.write_text("ok", encoding="utf-8")
+            self.assertEqual(engine_root_from_plugin(plugin_root=plugin), "")
+
+    def test_engine_root_from_plugin_missing_404(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            engine = Path(td) / "engine"
+            plugin = engine / "plugins" / "silex-forge"
+            plugin.mkdir(parents=True)
+            self.assertEqual(engine_root_from_plugin(plugin_root=plugin), "")
+
+    def test_pick_forge_repo_matrix(self) -> None:
+        self.assertEqual(pick_forge_repo(""), FORGE_REPO_HTTPS)
+        self.assertEqual(pick_forge_repo(FORGE_REPO_SSH_LEGACY), FORGE_REPO_HTTPS)
+        ssh_fork = "git@github.com:acme/forge.git"
+        https_fork = "https://github.com/acme/forge.git"
+        self.assertEqual(pick_forge_repo(ssh_fork), ssh_fork)
+        self.assertEqual(pick_forge_repo(https_fork), https_fork)
+        with tempfile.TemporaryDirectory() as td:
+            engine = Path(td) / "engine"
+            html = engine / "site" / "404.html"
+            html.parent.mkdir(parents=True)
+            html.write_text("ok", encoding="utf-8")
+            # one-arg: HTTPS stays HTTPS even when a local engine exists
+            self.assertEqual(pick_forge_repo(FORGE_REPO_HTTPS), FORGE_REPO_HTTPS)
+            already = Path(td) / "already-local"
+            already.mkdir()
+            self.assertEqual(pick_forge_repo(str(already)), str(already))
+
+
+class InferHubLayoutTests(unittest.TestCase):
+    def test_client_slugs_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            hub = Path(td)
+            slug = hub / "artifacts" / "deck"
+            slug.mkdir(parents=True)
+            (slug / "index.html").write_text("ok", encoding="utf-8")
+            self.assertEqual(infer_hub_layout(hub), ("artifacts", []))
+
+    def test_silex_markers_no_slugs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            hub = Path(td)
+            (hub / "00_COCKPIT").mkdir()
+            (hub / "01_COMPANY").mkdir()
+            self.assertEqual(
+                infer_hub_layout(hub),
+                ("00_COCKPIT/Forge/artifacts", list(VAULT_MARKERS)),
+            )
+
+    def test_silex_markers_and_silex_slugs_empty_client_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            hub = Path(td)
+            (hub / "00_COCKPIT").mkdir()
+            (hub / "01_COMPANY").mkdir()
+            slug = hub / "00_COCKPIT" / "Forge" / "artifacts" / "deck"
+            slug.mkdir(parents=True)
+            (slug / "index.html").write_text("ok", encoding="utf-8")
+            (hub / "artifacts").mkdir()
+            self.assertEqual(
+                infer_hub_layout(hub),
+                ("00_COCKPIT/Forge/artifacts", list(VAULT_MARKERS)),
+            )
+
+    def test_silex_markers_but_only_client_slugs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            hub = Path(td)
+            (hub / "00_COCKPIT").mkdir()
+            (hub / "01_COMPANY").mkdir()
+            (hub / "00_COCKPIT" / "Forge" / "artifacts").mkdir(parents=True)
+            slug = hub / "artifacts" / "deck"
+            slug.mkdir(parents=True)
+            (slug / "index.html").write_text("ok", encoding="utf-8")
+            self.assertEqual(infer_hub_layout(hub), ("artifacts", []))
+
+    def test_empty_hub_no_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            hub = Path(td)
+            self.assertEqual(infer_hub_layout(hub), ("artifacts", []))
 
 
 if __name__ == "__main__":

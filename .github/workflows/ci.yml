@@ -184,7 +184,7 @@ jobs:
       - name: bash 3.2 syntax + script tests
         run: |
           docker run --rm -v "$PWD":/w -w /w bash:3.2 sh -c '
-            apk add --no-cache python3
+            apk add --no-cache python3 git
             FORGE_REQUIRE_BASH32=1 bash tests/shell/run-os-script-tests.sh
           '
 

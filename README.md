@@ -123,35 +123,14 @@ Link is user-global; files stay in the checkout. Do not `omp plugin install gith
 
 Craft HTML separately: **`silex-craft@silex-plugins`**.
 
-### No forge yet on this account
-
-```bash
-plugins/silex-forge/scripts/forge-provision.sh
-```
-
-An interactive wizard: Pages project, KV namespace, API token, custom domain,
-Zero Trust team and the three Access applications. Twelve stages, resumable —
-re-run it and already-saved values come back as defaults.
-
-It deploys the fail-closed Functions and verifies them **before** creating any
-Access Bypass policy. That order is not cosmetic: Bypass first would publish
-every artifact. See [cloudflare-access.md](docs/cloudflare-access.md).
-
-A forge outside the Silex vault sets `"vault_markers": []` in
-`forge.config.json`; the wizard writes that for you.
-
 ### Machine setup
-
-Existing forge on this Cloudflare account — discover, do not retype:
 
 ```bash
 wrangler login
 plugins/silex-forge/scripts/forge-discover.sh --write
-# fill CLOUDFLARE_API_TOKEN in ~/.config/silex/forge.env
-plugins/silex-forge/scripts/forge-doctor.sh
 ```
 
-`--write` merges into `~/.config/silex/forge.env` (`chmod 600`) and prints key names only. Discovery is OAuth-only (`wrangler login`) — no API token. Needed scopes: `pages (write)`, `workers_kv (write)`.
+Default project is `silex-forge`. `--write` merges into `~/.config/silex/forge.env` (`chmod 600`) and prints key names only. Discovery is OAuth-only (`wrangler login`) — no API token. Needed scopes: `pages (write)`, `workers_kv (write)`.
 
 Still fill `CLOUDFLARE_API_TOKEN` (deploy is not OAuth-only; `publish.sh` dies without it) and `hub_root` in `forge.config.json` (local vault path; Cloudflare cannot see it). Doctor KO → `/forge-setup`.
 
@@ -166,13 +145,32 @@ Still fill `CLOUDFLARE_API_TOKEN` (deploy is not OAuth-only; `publish.sh` dies w
 | `CLOUDFLARE_API_TOKEN` | **manual** | deploy still requires a token |
 | `hub_root` | **manual** | per-person vault; not on Cloudflare |
 
-No Pages project on this account → exit `2`. Create Pages + KV + Access by hand, then:
+Named project missing (exit `2`) and the account already has Pages projects → retry with one of the listed names:
 
 ```bash
-cp .env.example ~/.config/silex/forge.env
-chmod 600 ~/.config/silex/forge.env
-# fill remaining keys — see table
+plugins/silex-forge/scripts/forge-discover.sh --write --project NAME
 ```
+
+No Pages project on this account → provision:
+
+```bash
+plugins/silex-forge/scripts/forge-provision.sh
+```
+
+An interactive wizard: Pages project, KV namespace, API token, custom domain,
+Zero Trust team and the three Access applications. Twelve stages, resumable —
+re-run it and already-saved values come back as defaults. If the account already
+has other Pages projects, the wizard lists them and asks `[y/N]` before creating
+a second one; `N` points at `forge-discover.sh --project NAME`. Unreadable
+wrangler output warns and requires an explicit confirm.
+
+It deploys the fail-closed Functions and verifies them **before** creating any
+Access Bypass policy. That order is not cosmetic: Bypass first would publish
+every artifact. See [cloudflare-access.md](docs/cloudflare-access.md).
+
+A forge outside the Silex vault sets `"vault_markers": []` in
+`forge.config.json`; the wizard writes that for you.
+
 
 | File | Role |
 |---|---|

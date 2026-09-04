@@ -181,4 +181,135 @@ pass "forge_wrangler falls back to npx --yes wrangler"
 
 rm -rf "$side_dir" "$empty_bin" "$fake_bin"
 
+assert_not_grep \
+  'git@github.com:go-silex/silex-forge.git' \
+  "$PUBLISH" \
+  "publish.sh must not contain the legacy SSH default"
+
+assert_grep \
+  'https://github.com/go-silex/silex-forge.git' \
+  "$PUBLISH" \
+  "publish.sh default FORGE_REPO must be HTTPS"
+
+assert_grep \
+  'materialize_engine' \
+  "$PUBLISH" \
+  "publish.sh must define materialize_engine"
+
+assert_grep \
+  'GIT -C "\$FORGE_REPO" archive HEAD' \
+  "$PUBLISH" \
+  "materialize_engine must git archive HEAD from a local checkout"
+
+assert_not_grep \
+  'cp -R "\$FORGE_REPO/site"' \
+  "$PUBLISH" \
+  "materialize_engine must not cp -R site/"
+
+cmd_publish_body=$(mktemp)
+awk '
+  /^cmd_publish\(\)/ {p=1}
+  p {print}
+  p && /^}/ {exit}
+' "$PUBLISH" > "$cmd_publish_body"
+[ -s "$cmd_publish_body" ] || fail "failed to extract cmd_publish body"
+assert_not_grep \
+  'GIT[[:space:]]+clone' \
+  "$cmd_publish_body" \
+  "cmd_publish must not contain a raw GIT clone"
+rm -f "$cmd_publish_body"
+pass "cmd_publish does not GIT clone"
+
+# Behavioral: local engine via git archive HEAD (real git, no stub)
+engine=$(mktemp -d)
+mkdir -p "$engine/site/a" "$engine/functions" "$engine/plugins/silex-forge/scripts"
+printf '404\n' > "$engine/site/404.html"
+printf 'generated\n' > "$engine/site/a/index.html"
+printf 'name = "forge"\n' > "$engine/wrangler.toml"
+printf 'export default {}\n' > "$engine/functions/hello.js"
+printf '#!/bin/sh\n' > "$engine/plugins/silex-forge/scripts/x.sh"
+git -C "$engine" init -q
+git -C "$engine" config user.email "forge-test@example.com"
+git -C "$engine" config user.name "Forge Test"
+git -C "$engine" add \
+  site/404.html wrangler.toml functions/hello.js \
+  plugins/silex-forge/scripts/x.sh site/a/index.html
+git -C "$engine" -c commit.gpgsign=false commit -q -m "engine"
+printf 'dirty\n' > "$engine/site/dirty.html"
+
+work=$(mktemp -d)
+if ! (
+  FORGE_PUBLISH_LIB_ONLY=1
+  export FORGE_PUBLISH_LIB_ONLY
+  # shellcheck source=/dev/null
+  . "$PUBLISH"
+  FORGE_REPO="$engine"
+  WORK="$work"
+  export FORGE_REPO WORK
+  materialize_engine
+  [ -f "$WORK/repo/site/404.html" ] || { echo "missing site/404.html" >&2; exit 1; }
+  [ -f "$WORK/repo/wrangler.toml" ] || { echo "missing wrangler.toml" >&2; exit 1; }
+  [ -f "$WORK/repo/functions/hello.js" ] || { echo "missing functions/hello.js" >&2; exit 1; }
+  [ -f "$WORK/repo/plugins/silex-forge/scripts/x.sh" ] || { echo "missing plugins scripts" >&2; exit 1; }
+  [ ! -e "$WORK/repo/site/a" ] || { echo "site/a should be absent after archive" >&2; exit 1; }
+  [ ! -e "$WORK/repo/site/dirty.html" ] || { echo "untracked dirty.html must be absent" >&2; exit 1; }
+  [ ! -e "$WORK/repo/.git" ] || { echo ".git must not be in dest" >&2; exit 1; }
+  WORK=""
+  trap - EXIT
+); then
+  fail "materialize_engine local git archive failed"
+fi
+pass "materialize_engine archives local git HEAD"
+
+nongit=$(mktemp -d)
+mkdir -p "$nongit/site"
+printf '404\n' > "$nongit/site/404.html"
+nongit_work=$(mktemp -d)
+if (
+  FORGE_PUBLISH_LIB_ONLY=1
+  export FORGE_PUBLISH_LIB_ONLY
+  # shellcheck source=/dev/null
+  . "$PUBLISH"
+  FORGE_REPO="$nongit"
+  WORK="$nongit_work"
+  export FORGE_REPO WORK
+  materialize_engine
+); then
+  fail "materialize_engine must die when FORGE_REPO is not a git work tree"
+fi
+pass "materialize_engine fails closed without git metadata"
+
+if (
+  FORGE_PUBLISH_LIB_ONLY=1
+  export FORGE_PUBLISH_LIB_ONLY
+  # shellcheck source=/dev/null
+  . "$PUBLISH"
+  unset WORK
+  materialize_engine
+); then
+  fail "materialize_engine must die when WORK is unset"
+fi
+pass "materialize_engine fails closed without WORK"
+
+git_stub=$(mktemp -d)
+printf '#!/bin/sh\necho "git invoked: $*" >&2\nexit 1\n' > "$git_stub/git"
+chmod +x "$git_stub/git"
+
+if (
+  FORGE_PUBLISH_LIB_ONLY=1
+  export FORGE_PUBLISH_LIB_ONLY
+  # shellcheck source=/dev/null
+  . "$PUBLISH"
+  FORGE_REPO="https://github.com/go-silex/silex-forge.git"
+  WORK="$(mktemp -d)"
+  PATH="$git_stub:$PATH"
+  export FORGE_REPO WORK PATH
+  materialize_engine
+); then
+  fail "URL-like FORGE_REPO must not take the local-engine branch"
+fi
+pass "URL-like FORGE_REPO does not take local branch"
+
+rm -rf "$engine" "$work" "$nongit" "$nongit_work" "$git_stub"
+
 echo "all shell contract checks passed"

@@ -31,6 +31,26 @@ VAR_KEYS = (
 # Binding name of the KV namespace backing /s/<slug>/<key>/ share links.
 SHARES_BINDING = "SHARES"
 ACCOUNT_ID_RE = re.compile(r"\b[0-9a-f]{32}\b")
+_HEADER_WORDS = frozenset(
+    {
+        "account",
+        "account id",
+        "account name",
+        "created",
+        "created on",
+        "domains",
+        "id",
+        "last",
+        "last modified",
+        "modified",
+        "name",
+        "project",
+        "project name",
+    }
+)
+_BOX_LINE = re.compile(r"^[\s┌┐└┘├┤┬┴┼─│┃━┏┓┗┛┣┫┳┻╋]+$")
+_CELL_SPLIT = re.compile(r"[│|]")
+_PROJECT_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _unquote(raw: str) -> str:
@@ -122,6 +142,100 @@ def account_id_from_whoami(text: str) -> str:
             return m.group(0)
     m = ACCOUNT_ID_RE.search(text)
     return m.group(0) if m else ""
+
+
+def _looks_like_project_name(cell: str) -> bool:
+    cell = cell.strip()
+    if not cell or not _PROJECT_NAME.fullmatch(cell):
+        return False
+    if cell.lower() in _HEADER_WORDS:
+        return False
+    if ACCOUNT_ID_RE.fullmatch(cell):
+        return False
+    return True
+
+
+def _unique_names(names: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def _names_from_json(data: Any) -> list[str]:
+    out: list[str] = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, str):
+                if _looks_like_project_name(item):
+                    out.append(item.strip())
+            elif isinstance(item, dict):
+                name = item.get("name")
+                if isinstance(name, str) and _looks_like_project_name(name):
+                    out.append(name.strip())
+    elif isinstance(data, dict):
+        name = data.get("name")
+        if isinstance(name, str) and _looks_like_project_name(name):
+            out.append(name.strip())
+    return out
+
+
+def _names_from_table(text: str) -> list[str]:
+    out: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or _BOX_LINE.fullmatch(stripped):
+            continue
+        if "│" not in line and "|" not in line:
+            if _looks_like_project_name(stripped):
+                out.append(stripped)
+            continue
+        cells = [cell.strip() for cell in _CELL_SPLIT.split(line)]
+        names = [cell for cell in cells if _looks_like_project_name(cell)]
+        if names:
+            out.append(names[0])
+    return out
+
+
+def pages_project_names(text: str) -> list[str]:
+    """Project names from `wrangler pages project list` (table or JSON).
+
+    Skips box-drawing, header words (Project, Name, Account, Created, …)
+    and 32-hex account ids. Unique, file order.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return []
+    if stripped[0] in "{[":
+        try:
+            return _unique_names(_names_from_json(json.loads(stripped)))
+        except json.JSONDecodeError:
+            pass
+    return _unique_names(_names_from_table(text))
+
+
+def classify_pages_projects(text: str, want: str) -> tuple[str, list[str]]:
+    """Classify `wrangler pages project list` vs the name we looked up.
+
+    Returns (kind, other_names):
+      hit       — want is on the account
+      others    — parsed names, want missing
+      empty     — no non-empty lines (fresh account)
+      unparsed  — output present but no names (do not provision)
+    """
+    names = pages_project_names(text)
+    others = [n for n in names if n != want]
+    if want in names:
+        return "hit", others
+    if names:
+        return "others", others
+    if any(line.strip() for line in text.splitlines()):
+        return "unparsed", []
+    return "empty", []
+
 
 
 def discovered_env(

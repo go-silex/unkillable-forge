@@ -4,7 +4,7 @@
   "vault_markers": ["00_COCKPIT", "01_COMPANY"],
   "artifacts_dir": "00_COCKPIT/Forge/artifacts",
   "public_host": "forge.gosilex.com",
-  "forge_repo": "git@github.com:go-silex/silex-forge.git",
+  "forge_repo": "https://github.com/go-silex/silex-forge.git",
   "shlink_domain": "s.gosilex.com",
   "site_dir": "site",
   "registry_dir": "registry",
