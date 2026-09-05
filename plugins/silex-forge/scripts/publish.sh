@@ -325,7 +325,12 @@ acquire_publish_lock() {
   local lock_dir="${ARTIFACTS_ROOT}/.forge-locks"
   mkdir -p "$lock_dir"
   local lockfile="${lock_dir}/${slug}.lock"
-  if command -v flock >/dev/null 2>&1; then
+  # util-linux/BSD flock accepts -w (wait timeout). BusyBox flock does not —
+  # `command -v flock` is true on Alpine, then `flock -w 120` errors as
+  # "unrecognized option" and we mis-report a lock timeout. Probe first;
+  # fall through to the mkdir lockdir if -w is missing.
+  if command -v flock >/dev/null 2>&1 \
+     && flock -w 0 /dev/null true >/dev/null 2>&1; then
     # bash 3.2: fixed FD (not `exec {var}>`, which needs 4.1+)
     exec 9>"$lockfile" || die "cannot open publish lock: $slug"
     PUBLISH_LOCK_FD=9

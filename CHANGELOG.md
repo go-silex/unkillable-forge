@@ -14,6 +14,7 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 - Two operator-facing strings in `plugins/silex-forge/scripts/` were still French. `publish.sh` died with `ARTIFACTS_ROOT vide` — untranslated and hintless, where its sibling `die` calls name the fix; it now reads `ARTIFACTS_ROOT is empty` and points at `artifacts_dir` in `forge.config.json` plus `forge-doctor.sh`. The `inject-share-bar.py` module docstring is English on both of its French lines.
 - A third French string, `die "usage: --share <slug> ou ..."` in the CLI dispatch, is now `or`. No noun in the language lint's word list could see it, so the list gained the French connectives (`ou`, `avec`, `dans`, `puis`, `selon`, `voir`); `pour` and `sans` stay excluded because `pour` is an English verb and `\bsans\b` matches a CSS `sans-serif` declaration.
 - `tests/shell/test_og_persist.sh` leaked one temp directory per run: sourcing `publish.sh` installs its own `trap cleanup EXIT`, which replaced the test's cleanup trap. The trap is re-installed after the source.
+- `acquire_publish_lock` treated BusyBox `flock` (present, no `-w` wait timeout) as a lock timeout. Alpine CI (`test-bash32`) is that environment. The function now probes `flock -w 0 /dev/null true` and falls through to the mkdir lockdir when `-w` is missing — the same path macOS already took because it has no `flock` at all.
 
 ### Added
 
