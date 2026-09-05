@@ -36,6 +36,9 @@ export FORGE_CONFIG="$TD/cfg.json"
 export FORGE_PUBLISH_LIB_ONLY=1
 # shellcheck source=/dev/null
 . "$PUBLISH"
+# publish.sh installs its own `trap cleanup EXIT`, which replaces the trap set
+# at the top of this file and leaks $TD. Re-install it after sourcing.
+trap 'rm -rf "$TD"' EXIT
 
 WORK="$TD/work"
 ARTIFACTS_ROOT="$TD/hub/artifacts"
