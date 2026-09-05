@@ -60,11 +60,23 @@ cat > "$TD/hub/artifacts/old-deck/meta.json" <<'EOF'
 }
 EOF
 
-# ------------------------------------------------------------- fixture: engine
-# materialize_engine does `git archive HEAD` from a local checkout. gen-og-images.sh
-# is dropped so gen_og_images is a silent no-op: no chrome, no ffmpeg, no delay.
-mkdir -p "$TD/engine"
-git -C "$ROOT" archive HEAD | tar -x -C "$TD/engine"
+# materialize_engine requires a git work tree with site/404.html. Copy only
+# the plugin scripts the dry-run chain actually runs (build-site-from-hub,
+# hub-index, inject-share-bar, patch_wrangler) rather than `git archive` of
+# $ROOT: that fails in the CI docker job (`detected dubious ownership`) and
+# pulls in the whole repo for no benefit. Drop gen-og-images.sh so
+# gen_og_images is a silent no-op: no chrome, no ffmpeg, no delay.
+mkdir -p "$TD/engine/site" "$TD/engine/plugins/silex-forge"
+printf '404\n' > "$TD/engine/site/404.html"
+# Real wrangler.toml: patch_wrangler_for_deploy dies if the SHARES kv binding
+# is missing, which a one-line stub would trip.
+cp "$ROOT/wrangler.toml" "$TD/engine/wrangler.toml" \
+  || fail "engine fixture: cannot copy wrangler.toml"
+cp -a "$ROOT/plugins/silex-forge/scripts" "$TD/engine/plugins/silex-forge/scripts" \
+  || fail "engine fixture: cannot copy plugin scripts"
+cp "$ROOT/plugins/silex-forge/forge.config.example.json" \
+  "$TD/engine/plugins/silex-forge/forge.config.example.json" \
+  || fail "engine fixture: cannot copy forge.config.example.json"
 rm -f "$TD/engine/plugins/silex-forge/scripts/gen-og-images.sh"
 git -C "$TD/engine" init -q >/dev/null 2>&1 || fail "engine fixture: git init failed"
 git -C "$TD/engine" config user.email "forge-test@example.com"
@@ -190,8 +202,10 @@ export FORGE_PUBLISH_LIB_ONLY=1
 # surface the captured log of whatever run died (a die() inside a sourced
 # function exits this shell directly).
 on_exit() {
-  local st=$?
-  if [ "$st" -ne 0 ] && [ -n "$DUMP_ON_EXIT" ] && [ -f "$DUMP_ON_EXIT" ]; then
+  # `local st=$?` is the bash gotcha: `local` itself succeeds and zeros $?,
+  # so the dump never fired. Assign first, then local is unnecessary.
+  st=$?
+  if [ "$st" -ne 0 ] && [ -n "${DUMP_ON_EXIT:-}" ] && [ -f "$DUMP_ON_EXIT" ]; then
     echo "--- captured output ($DUMP_ON_EXIT) ---" >&2
     cat "$DUMP_ON_EXIT" >&2
   fi
@@ -201,8 +215,13 @@ on_exit() {
 trap on_exit EXIT
 
 REAL_ART="$ARTIFACTS_ROOT"
+# load_config resolves hub_root via Path.resolve(), which on macOS turns
+# /var/folders/... into /private/var/folders/... . mktemp returns the
+# uncanonical form. Accept both so this isolation check is the same assertion
+# on Linux and on the CI macos-bash32 job.
+TD_REAL="$("$PY_REAL" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$TD")"
 case "$REAL_ART" in
-  "$TD/hub/artifacts") ;;
+  "$TD/hub/artifacts"|"$TD_REAL/hub/artifacts") ;;
   *) fail "fixture leak: ARTIFACTS_ROOT is '$REAL_ART', expected $TD/hub/artifacts" ;;
 esac
 [ "$PAGES_PROJECT" = "dryrun-test-project" ] || fail "fixture leak: PAGES_PROJECT=$PAGES_PROJECT"
@@ -232,9 +251,21 @@ snapshot_tree "$TD/hub" > "$TD/snap.before"
 reset_fixture_env
 out="$TD/publish.out"
 DUMP_ON_EXIT="$out"
-cmd_publish dry-deck "$TD/src/deck.html" > "$out" 2>&1 \
-  || { cat "$out" >&2; fail "dry-run publish exited non-zero"; }
-SANDBOX_ROOT="$WORK/hub-root"
+# die() is `exit 1`. Under `cmd > log 2>&1` the EXIT trap inherits that
+# redirect and then deletes $TD, swallowing the failure. A subshell with
+# `trap - EXIT` turns die into a non-zero return — same pattern as the
+# empty-token gate below. WORK is recovered from the sandbox notice
+# because the subshell cannot export it.
+if ! (
+  trap - EXIT
+  cmd_publish dry-deck "$TD/src/deck.html"
+) > "$out" 2>&1; then
+  cat "$out" >&2
+  fail "dry-run publish exited non-zero"
+fi
+SANDBOX_ROOT=$(sed -n 's/^▸ dry run — hub sandboxed at \(.*\) (real hub untouched)$/\1/p' "$out" | sed -n '$p')
+[ -n "$SANDBOX_ROOT" ] || fail "no sandbox notice in dry-run output"
+WORK=$(dirname "$SANDBOX_ROOT")
 SANDBOX_ART="$SANDBOX_ROOT/artifacts"
 
 # 1. the real hub is untouched
@@ -243,8 +274,10 @@ pass "dry-run publish leaves the real hub byte-identical"
 
 # 2. the sandbox received the writes — the chain ran, nothing was skipped
 [ -d "$SANDBOX_ROOT" ] || fail "no hub sandbox at $SANDBOX_ROOT"
-grep -q "dry run — hub sandboxed at $SANDBOX_ROOT" "$out" \
-  || fail "sandbox notice missing or points elsewhere than $SANDBOX_ROOT"
+case "$SANDBOX_ROOT" in
+  "$TD/hub"|"$TD/hub"/*|"$TD_REAL/hub"|"$TD_REAL/hub"/*)
+    fail "sandbox notice points at the real fixture hub: $SANDBOX_ROOT" ;;
+esac
 [ -f "$SANDBOX_ART/dry-deck/index.html" ] \
   || fail "sandbox hub has no dry-deck/index.html — the hub write chain was skipped"
 grep -q 'DRYRUN-BODY-MARKER' "$SANDBOX_ART/dry-deck/index.html" \
@@ -305,8 +338,13 @@ pass "empty CLOUDFLARE_API_TOKEN makes the dry run exit non-zero"
 reset_fixture_env
 share_out="$TD/share.out"
 DUMP_ON_EXIT="$share_out"
-cmd_publish share-deck "$TD/src/deck.html" --share > "$share_out" 2>&1 \
-  || { cat "$share_out" >&2; fail "dry-run publish --share exited non-zero"; }
+if ! (
+  trap - EXIT
+  cmd_publish share-deck "$TD/src/deck.html" --share
+) > "$share_out" 2>&1; then
+  cat "$share_out" >&2
+  fail "dry-run publish --share exited non-zero"
+fi
 [ ! -s "$REC" ] \
   || fail "dry-run --share mutated something: $(tr '\n' ';' < "$REC")"
 grep -q 'dry run' "$share_out" || fail "dry-run --share printed no dry-run line"
