@@ -56,9 +56,8 @@ PUBLISH_LOCK_FD=""
 PUBLISH_LOCK_DIR=""
 cleanup() {
   if [ -n "${PUBLISH_LOCK_FD:-}" ]; then
-    if command -v flock >/dev/null 2>&1; then
-      flock -u "$PUBLISH_LOCK_FD" 2>/dev/null || true
-    fi
+    # Only GNU flock was used to take this FD (see acquire_publish_lock).
+    flock -u "$PUBLISH_LOCK_FD" 2>/dev/null || true
     eval "exec ${PUBLISH_LOCK_FD}>&-" 2>/dev/null || true
   fi
   if [ -n "${PUBLISH_LOCK_DIR:-}" ]; then

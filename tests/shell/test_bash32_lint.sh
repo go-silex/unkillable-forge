@@ -77,6 +77,12 @@ for f in "$SCRIPTS"/*.sh; do
     grep -qE 'command[[:space:]]+-v[[:space:]]+flock' "$f" \
       || fail "$rel: flock used without command -v flock probe"
   fi
+  # BusyBox flock (Alpine CI image) is on PATH but rejects -w. A timeout
+  # without a zero-wait probe is treated as "lock held" and dies.
+  if grep -qE 'flock[[:space:]]+-w[[:space:]]+[1-9]' "$f"; then
+    grep -qE 'flock[[:space:]]+-w[[:space:]]+0' "$f" \
+      || fail "$rel: flock -w <timeout> without a flock -w 0 capability probe (BusyBox flock has no -w)"
+  fi
 
   pass "$rel"
 done

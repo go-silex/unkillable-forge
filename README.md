@@ -74,7 +74,7 @@ and CI runs the suite on `macos-latest` plus a `bash:3.2` container.
 |---|---|
 | `bash` ≥ 3.2, `python3` ≥ 3.9 (stdlib only), `git`, `curl` | everything |
 | `wrangler` **or** `npx` | `wrangler pages deploy` |
-| `flock` | optional — a portable `mkdir` lock is used when absent |
+| `flock` | optional — a portable `mkdir` lock is used when absent, or when `flock` has no `-w` (BusyBox) |
 | `google-chrome`\|`chromium`, `ffmpeg`, `jq` | OG thumbnails (skipped with a warning if missing) |
 
 ### Install the plugin
