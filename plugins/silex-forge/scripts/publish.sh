@@ -54,6 +54,12 @@ WORK=""
 DRY_RUN=false
 PUBLISH_LOCK_FD=""
 PUBLISH_LOCK_DIR=""
+# Removals this command performs by design (space-separated slugs). cmd_remove
+# declares its slug; every other command declares nothing, so any slug the live
+# snapshot holds and the local hub does not is unexpected drift.
+EXPECTED_REMOVALS=""
+ALLOW_REMOVALS=false
+SNAPSHOT_KV_KEY="snapshot:live"
 cleanup() {
   if [ -n "${PUBLISH_LOCK_FD:-}" ]; then
     # Only GNU flock was used to take this FD (see acquire_publish_lock).
@@ -105,6 +111,11 @@ Usage:
   --dry-run : accepted anywhere in argv, for every command — builds and
               validates everything (engine, hub snapshot, wrangler.toml)
               without deploying and without mutating KV.
+
+  --allow-removals : proceed even when the deploy would delete artifacts that
+              are live but absent from the local hub. Without it, that case
+              refuses — a hub copy behind the shared Drive vault would
+              otherwise silently remove other people's artifacts.
 
   SSOT   : \$ARTIFACTS_ROOT/<slug>/  (hub, forge.config)
   Deploy : wrangler pages deploy (token ~/.config/silex/forge.env)
@@ -207,6 +218,17 @@ SCRIPTS() {
   else
     echo "$SCRIPT_DIR"
   fi
+}
+
+# Single resolution point for the share-bar pair (inject-share-bar.py reads its
+# sibling share-bar.js). share-bar.js is inlined into every artifact, so two
+# callers resolving it differently flip the content hash of the whole catalogue.
+share_bar_script() {
+  local p
+  p="$(SCRIPTS)/inject-share-bar.py"
+  [ -f "$p" ] || p="$SCRIPT_DIR/inject-share-bar.py"
+  [ -f "$p" ] || die "inject-share-bar.py missing — reinstall the silex-forge plugin, then forge-doctor.sh"
+  echo "$p"
 }
 
 # Build site/a + registry from hub into the engine clone
@@ -316,6 +338,108 @@ if blockers:
 preflight_before_live() {
   source_cf_credentials
   preflight_cf_mutations
+  snapshot_guard
+}
+
+# Hub drift guard.
+#
+# Every deploy is a FULL snapshot of the Pages project built from the LOCAL
+# hub, and the hub is a Google Drive copy shared across the team. A local copy
+# that is behind therefore publishes a snapshot which silently DELETES the
+# artifacts other people added — the live site has no other source of truth.
+#
+# This runs in the preflight, not in deploy_pages, because the preflight is the
+# one point every command reaches BEFORE any mutation: cmd_remove clears KV and
+# rm -rf's the hub artifact well before it reaches deploy_pages, so a guard
+# sitting there would abort after the destruction it was meant to prevent.
+#
+# Degradation is deliberate. No record, unreadable KV or a failing compare all
+# warn and proceed: that is exactly today's behaviour, and turning a token
+# scope problem into a publish outage would be worse than the drift it guards.
+# Only a *proven* unexpected removal refuses.
+snapshot_guard() {
+  local snap="$LIB_DIR/snapshot.py"
+  [ -f "$snap" ] || { warn "snapshot.py missing — hub drift unverified"; return 0; }
+  [ -n "${ARTIFACTS_ROOT:-}" ] || return 0
+
+  local record
+  record=$(kv_get_key "$SNAPSHOT_KV_KEY" 2>/dev/null) || record=""
+  if [ -z "$record" ]; then
+    warn "no snapshot record in KV — hub drift unverified (first run, or this token cannot read KV)"
+    return 0
+  fi
+
+  local live live_id
+  live=$(PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 "$snap" live-deployment 2>/dev/null) || live=""
+  live_id=$(printf '%s' "$live" | python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+sys.stdout.write(str(d.get("deployment_id") or ""))' 2>/dev/null) || live_id=""
+
+  local rc=0
+  printf '%s' "$record" | PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 "$snap" compare \
+      --record - \
+      --live-deployment-id "$live_id" \
+      --expected-removals "$EXPECTED_REMOVALS" >/dev/null || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    3)
+      if $ALLOW_REMOVALS; then
+        warn "hub drift: removing live artifacts because --allow-removals was passed"
+        return 0
+      fi
+      die "hub drift — this deploy would remove artifacts that are live. Pull the hub (rclone) and retry, or pass --allow-removals to delete them on purpose"
+      ;;
+    *)
+      warn "snapshot compare failed (exit $rc) — hub drift unverified"
+      return 0
+      ;;
+  esac
+}
+
+# Record the snapshot AFTER a successful deploy, keyed on the deployment the
+# live site is actually serving — that anchor is what lets the next run tell a
+# trustworthy record from one describing a rollback or a dashboard deploy.
+# Best-effort: the deploy already succeeded, so a failed record write is a
+# stale-bookkeeping warning, never a rollback.
+snapshot_record() {
+  local snap="$LIB_DIR/snapshot.py"
+  [ -f "$snap" ] || return 0
+  [ -n "${ARTIFACTS_ROOT:-}" ] || return 0
+  local live dep engine payload
+  live=$(PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 "$snap" live-deployment 2>/dev/null) || {
+    warn "snapshot record skipped — live deployment id unreadable"
+    return 0
+  }
+  dep=$(printf '%s' "$live" | python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+sys.stdout.write(str(d.get("deployment_id") or ""))' 2>/dev/null) || dep=""
+  engine=$(printf '%s' "$live" | python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+sys.stdout.write(str(d.get("engine_commit") or ""))' 2>/dev/null) || engine=""
+  if [ -z "$dep" ]; then
+    warn "snapshot record skipped — live deployment id unreadable"
+    return 0
+  fi
+  payload=$(PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 "$snap" record \
+    --deployment-id "$dep" \
+    --engine-commit "$engine" \
+    --by "$(whoami_id)" 2>/dev/null) || {
+    warn "snapshot record skipped — fingerprint failed"
+    return 0
+  }
+  [ -n "$payload" ] || { warn "snapshot record skipped — empty payload"; return 0; }
+  kv_put_value "$SNAPSHOT_KV_KEY" "$payload" \
+    || warn "snapshot record not written to KV — the next publish cannot verify hub drift"
 }
 
 acquire_publish_lock() {
@@ -438,6 +562,7 @@ deploy_pages() {
     --commit-dirty=true \
     || die "wrangler pages deploy failed"
   ok "live https://${PUBLIC_HOST}/"
+  snapshot_record
 }
 
 write_hub_meta() {
@@ -554,12 +679,45 @@ inject_og_for_slug() {
     --url "https://${PUBLIC_HOST}${path_url}" \
     ${img_args[@]+"${img_args[@]}"} \
     || die "inject-og failed"
-  # write enhanced HTML back to hub SSOT
+  # Write the OG-enhanced HTML back to the hub SSOT, bar stripped. The share
+  # bar belongs to the deploy tree only: persisting it turned it into craft
+  # input for the next build, and since strip+inject was not an exact inverse
+  # the artifact changed content hash on every republish and Cloudflare
+  # re-uploaded a page whose craft content had not moved. og.jpg is already
+  # persisted by persist_og_to_hub — copying it again here would bump the hub
+  # mtime for nothing and make gen-og-images treat the thumbnail as stale.
+  #
+  # The strip MUST come from the same script that injected the bar, so an
+  # engine clone predating --strip cannot be substituted with the local
+  # plugin: a mismatched inverse is the very cross-version drift this change
+  # removes. When the clone cannot strip, skip the write-back — the hub keeps
+  # its previous content and inject-og re-runs next publish (one file of
+  # churn). Never die, and never write a barred HTML into the hub.
   if [ -n "${ARTIFACTS_ROOT:-}" ] && [ -d "${ARTIFACTS_ROOT}/${slug}" ]; then
-    cp -f "$html" "${ARTIFACTS_ROOT}/${slug}/index.html"
-    if [ -f "$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/og.jpg" ]; then
-      cp -f "$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/og.jpg" "${ARTIFACTS_ROOT}/${slug}/og.jpg"
+    local hub_html="$WORK/hub-writeback-${slug}.html" inj strip_out strip_rc=0
+    # Resolve the path BEFORE the strip, like every other call site: die() inside
+    # a $(...) only exits the subshell, so an inline `python3 "$(share_bar_script)"`
+    # would run `python3 ""` when the script is missing — and python3 exits 2 on
+    # "can't open file", the very code reserved below for an old engine. A
+    # missing script would then be reported as a stale clone.
+    inj="$(share_bar_script)"
+    if ! cp -f "$html" "$hub_html" 2>/dev/null; then
+      warn "hub write-back skipped for $slug — cannot stage $hub_html"
+      return 0
     fi
+    strip_out=$(python3 "$inj" "$hub_html" --strip 2>&1) || strip_rc=$?
+    if [ "$strip_rc" -eq 0 ]; then
+      cp -f "$hub_html" "${ARTIFACTS_ROOT}/${slug}/index.html" \
+        || warn "hub write-back failed for $slug — OG meta re-injected next publish"
+    elif [ "$strip_rc" -eq 2 ]; then
+      # argparse rejects an unknown flag with 2: this engine really predates
+      # --strip. Every other code is a different fault and must not send the
+      # operator to update a clone that is already current.
+      warn "engine clone predates inject-share-bar --strip — hub write-back skipped for $slug (update main, or point forge_repo at a current checkout)"
+    else
+      warn "share-bar strip failed for $slug (exit $strip_rc): ${strip_out##*$'\n'}"
+    fi
+    rm -f "$hub_html"
   fi
 }
 
@@ -911,6 +1069,8 @@ cmd_remove() {
   validate_slug "$slug"
   require_forge_config
   [ -n "${ARTIFACTS_ROOT:-}" ] || die "ARTIFACTS_ROOT missing"
+  # The one command whose snapshot is regressive by design.
+  EXPECTED_REMOVALS="$slug"
   acquire_publish_lock "$slug"
   source_cf_credentials
   preflight_before_live
@@ -950,12 +1110,11 @@ cmd_unshare() {
   clone_engine
   enter_dry_run_sandbox
   build_from_hub
-  local html="$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/index.html"
+  local html inj
+  html="$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/index.html"
   if [ -f "$html" ]; then
-    python3 "$(SCRIPTS)/inject-share-bar.py" "$html" --slug "$slug" || true
-    if [ -n "${ARTIFACTS_ROOT:-}" ]; then
-      cp -f "$html" "${ARTIFACTS_ROOT}/${slug}/index.html"
-    fi
+    inj="$(share_bar_script)"
+    python3 "$inj" "$html" --slug "$slug" || true
   fi
   deploy_pages || die "deploy failed after unshare"
   ok "share revoked for $slug"
@@ -976,10 +1135,11 @@ cmd_share_only() {
   clone_engine
   enter_dry_run_sandbox
   build_from_hub
-  local html="$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/index.html"
+  local html inj
+  html="$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/index.html"
   if [ -f "$html" ]; then
-    python3 "$(SCRIPTS)/inject-share-bar.py" "$html" --slug "$slug" || true
-    cp -f "$html" "${ARTIFACTS_ROOT}/${slug}/index.html" || true
+    inj="$(share_bar_script)"
+    python3 "$inj" "$html" --slug "$slug" || true
   fi
   deploy_pages || die "deploy failed — share not activated"
   local url
@@ -991,10 +1151,14 @@ cmd_share_only() {
 
 inject_share_bars() {
   # Overlay on the deploy tree only (hub stays craft SSOT).
-  # SCRIPT_DIR = this file — clone of origin/main may not have the inject yet.
-  local inj="$SCRIPT_DIR/inject-share-bar.py"
-  [ -f "$inj" ] || inj="$(SCRIPTS)/inject-share-bar.py"
-  [ -f "$inj" ] || die "inject-share-bar.py missing"
+  # Clone first, installed plugin as fallback — the same resolution order as
+  # build_from_hub (SCRIPTS() tests the directory, not the file, so a clone
+  # whose main lacks the script still needs the fallback). Preferring
+  # SCRIPT_DIR here made --rebuild-index inject a different share-bar.js from
+  # the one publish injects, flipping the hash of every artifact between the
+  # two commands.
+  local inj
+  inj="$(share_bar_script)"
   local s slug html missing=0
   for s in "$WORK/repo/site/${INTERNAL_PREFIX}"/*/; do
     [ -d "$s" ] || continue
@@ -1102,9 +1266,11 @@ cmd_publish() {
   gen_og_images "$slug"
   persist_og_to_hub "$slug"
   inject_og_for_slug "$slug" "$title" "$desc" "$path_url"
-  python3 "$(SCRIPTS)/inject-share-bar.py" "$dest/index.html" --slug "$slug" || true
-  # persist bar into hub
-  cp -f "$dest/index.html" "${ARTIFACTS_ROOT}/${slug}/index.html" || true
+  # Second chance for the published slug: build-site-from-hub only warns when
+  # its own inject fails, so this is the one call that must land.
+  local publish_inj
+  publish_inj="$(share_bar_script)"
+  python3 "$publish_inj" "$dest/index.html" --slug "$slug" || true
   # rebuild registry/index after og inject (og.jpg may be new)
   build_from_hub
 
@@ -1129,12 +1295,14 @@ if [ -n "${FORGE_PUBLISH_LIB_ONLY:-}" ]; then
 fi
 source_cf_credentials
 
-# --dry-run is global: accepted anywhere in argv, for every command. Strip it
-# here, before the dispatch, so no per-command parser ever sees it.
+# --dry-run and --allow-removals are global: accepted anywhere in argv, for
+# every command. Strip them here, before the dispatch, so no per-command parser
+# ever sees them.
 _dry_run_args=()
 for _arg in "$@"; do
   case "$_arg" in
     --dry-run) DRY_RUN=true ;;
+    --allow-removals) ALLOW_REMOVALS=true ;;
     *) _dry_run_args+=("$_arg") ;;
   esac
 done

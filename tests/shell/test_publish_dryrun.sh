@@ -85,11 +85,19 @@ git -C "$TD/engine" add -A
 git -C "$TD/engine" -c commit.gpgsign=false commit -q -m "engine fixture"
 
 # --------------------------------------------------------- fixture: PATH stubs
-# One recording file for every mutating boundary a dry run must not cross.
+# One recording file for every mutating boundary a dry run must not cross, and a
+# second one for read-only crossings. The distinction is load-bearing: a dry run
+# is a gate, not a preview, so it legitimately *reads* live state — the hub drift
+# guard fetches the KV snapshot record with a curl GET in order to report what
+# the deploy would remove. What it must never do is WRITE: no KV put/delete, no
+# wrangler deploy, no shortlink mint. Recording every curl into one file would
+# conflate the two and force the guard to go blind on dry runs.
 REC="$TD/invocations.log"
+REC_READ="$TD/reads.log"
 : > "$REC"
+: > "$REC_READ"
 mkdir -p "$TD/bin"
-for tool in wrangler curl shlink; do
+for tool in wrangler shlink; do
   cat > "$TD/bin/$tool" <<EOS
 #!/usr/bin/env bash
 printf '%s %s\n' "$tool" "\$*" >> "$REC"
@@ -97,6 +105,24 @@ exit 0
 EOS
   chmod +x "$TD/bin/$tool"
 done
+
+# curl: classify by HTTP method. Anything that can change remote state lands in
+# $REC; a plain GET lands in $REC_READ and returns an empty body, which the
+# guard reads as "no snapshot record" (warn, proceed).
+cat > "$TD/bin/curl" <<EOS
+#!/usr/bin/env bash
+_args="\$*"
+case "\$_args" in
+  *"-X PUT"*|*"-X DELETE"*|*"-X POST"*|*"--data"*|*"--upload-file"*)
+    printf 'curl %s\n' "\$_args" >> "$REC"
+    ;;
+  *)
+    printf 'curl %s\n' "\$_args" >> "$REC_READ"
+    ;;
+esac
+exit 0
+EOS
+chmod +x "$TD/bin/curl"
 
 cat > "$TD/bin/python3" <<EOS
 #!/usr/bin/env bash
@@ -297,9 +323,23 @@ grep -q 'DRYRUN-BODY-MARKER' "$SANDBOX_ART/dry-deck/index.html" \
   || fail "the deploy tree was never built for dry-deck"
 pass "the whole hub write chain ran, into the sandbox"
 
-# 3. no wrangler, no curl, no shlink
+# 3. no wrangler, no shlink, no state-changing curl
 [ ! -s "$REC" ] || fail "a mutating CLI ran during the dry run: $(tr '\n' ';' < "$REC")"
-pass "dry-run publish invokes no wrangler / curl / shlink"
+pass "dry-run publish invokes no wrangler / shlink / mutating curl"
+
+# 3b. read-only crossings are allowed, but only those: every recorded curl must
+# be a KV *values* GET, never a namespace write or another endpoint.
+if [ -s "$REC_READ" ]; then
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    case "$_line" in
+      *"/storage/kv/namespaces/"*"/values/"*) ;;
+      *) fail "dry run made a non-KV-read curl call: $_line" ;;
+    esac
+  done < "$REC_READ"
+  pass "dry-run read-only curl calls are KV snapshot reads only ($(wc -l < "$REC_READ" | tr -d '[:space:]'))"
+else
+  pass "dry-run publish made no curl call at all"
+fi
 
 # 4. the plan carries the config's project and host
 grep -q '^  project : dryrun-test-project$' "$out" \

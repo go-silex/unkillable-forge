@@ -16,8 +16,27 @@ BLOCK_END = "<!-- forge-og:end -->"
 
 
 def strip_old_block(content: str) -> str:
+    """Exact inverse of the two placements `inject` uses.
+
+    `inject` adds either `"\\n" + block` (after `<head>`) or `block + "\\n"`
+    (no `<head>`), so removing only BLOCK_START..BLOCK_END left one orphan
+    newline behind per pass. The file then grew a byte on every publish, its
+    content hash changed, and Cloudflare re-uploaded an artifact whose craft
+    content was identical. The two placements put the newline on opposite
+    sides, hence two anchored patterns rather than one `\\n?` on each side:
+    a blind trailing `\\n?` would eat the document's own newline after
+    `<head>`.
+    """
+    # No <head>: the block sits at position 0 and owns the newline after it.
+    content = re.sub(
+        r"\A" + re.escape(BLOCK_START) + r".*?" + re.escape(BLOCK_END) + r"\n?",
+        "",
+        content,
+        flags=re.DOTALL,
+    )
+    # After <head>: the block owns the newline before it.
     return re.sub(
-        re.escape(BLOCK_START) + r".*?" + re.escape(BLOCK_END),
+        r"\n?" + re.escape(BLOCK_START) + r".*?" + re.escape(BLOCK_END),
         "",
         content,
         flags=re.DOTALL,
