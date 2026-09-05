@@ -10,9 +10,12 @@ Inputs are the raw outputs of, respectively:
 
 Both work under `wrangler login` OAuth alone; no CLOUDFLARE_API_TOKEN.
 
-Not discoverable, by nature:
+Not written to forge.env, by design:
   hub_root              local silex-hub vault path, invisible to Cloudflare
   CLOUDFLARE_API_TOKEN  a secret; publish.sh still requires one to deploy
+  PUBLIC_HOST           forge.config.json owns public_host, and publish.sh
+                        pushes it *to* Pages at deploy — reading it back would
+                        let a Pages var out-rank the config
 """
 from __future__ import annotations
 
@@ -21,11 +24,12 @@ import re
 import sys
 from typing import Any
 
-# forge.env keys sourced from the Pages project's plain vars.
+# forge.env keys sourced from the Pages project's plain vars. The host is
+# absent on purpose: forge.env holds credentials plus the Access/Shlink vars,
+# never the values forge.config.json owns.
 VAR_KEYS = (
     "CF_ACCESS_TEAM_DOMAIN",
     "CF_ACCESS_AUD",
-    "PUBLIC_HOST",
     "SHLINK_API_URL",
 )
 # Binding name of the KV namespace backing /s/<slug>/<key>/ share links.

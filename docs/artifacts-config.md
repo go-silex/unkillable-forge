@@ -29,19 +29,46 @@ forge.gosilex.com
 ```
 
 One Cloudflare account (via `forge.env`) + one hub + one host.  
-Publish = doctor OK (hub) + Pages token in `forge.env`.
+Publish = doctor exit `0` (hub config sound **and** deploy credentials present).
 
 ## Machine config
 
 ```
-~/.config/silex/forge.config.json     # hub_root (+ optional account/kv ids)
-~/.config/silex/forge.env             # CLOUDFLARE_* + FORGE_SHARES_KV_ID (chmod 600)
-.env.example                          # placeholders (committed)
+~/.config/silex/forge.config.json     # hub_root, pages_project, public_host, vault_markers
+~/.config/silex/forge.env             # credentials + CF_ACCESS_* + SHLINK_API_URL (chmod 600)
+.env.example                          # schema reference (committed) — never cp'd onto forge.env
 plugins/.../forge.config.example.json # defaults + code fallback
 ```
 
+`pages_project` and `public_host` live **only** in `forge.config.json`.
+`forge.env` holds credentials plus the Access/Shlink values that ship to Pages
+as plain `[vars]`; it is not read for the host or the project name. The
+direction of truth is config → `wrangler.toml` → Pages (`patch_wrangler.py` at
+deploy), never Pages → config: a `forge.env` that disagreed with the config
+used to decide which Pages project a deploy landed in.
+
+Fill `forge.env` from Cloudflare, never from the example:
+
+```bash
+wrangler login
+plugins/silex-forge/scripts/forge-discover.sh --write   # existing forge
+plugins/silex-forge/scripts/forge-provision.sh          # your own account, no forge yet
+```
+
 Doctor: `plugins/silex-forge/scripts/forge-doctor.sh`  
-Setup: `/forge-setup` (user-invoked; first publish if doctor KO). Missing token = warning (generate OK, publish KO).
+Setup: `/forge-setup` (user-invoked; owns creating `forge.config.json`).
+
+| Doctor exit | Meaning | Next |
+|---|---|---|
+| `0` | ready | publish |
+| `1` | hub / local config KO | `/forge-setup` |
+| `2` | hub OK, deploy blocked | fix the named blockers |
+
+A missing `CLOUDFLARE_API_TOKEN` is still not a *hub* problem — generating an
+artifact works, deploying does not. It is now exit `2` with an explicit blocker
+line, instead of the silent `0` that let a token-less laptop look healthy.
+`publish.sh` hard-stops on exit `1` and names `/forge-setup`; it no longer falls
+back to the example config.
 
 ### `hub_root` validation — `vault_markers`
 
@@ -60,15 +87,38 @@ A malformed value is an issue rather than a silent fallback: falling back to
 the Silex pair would break a client forge, and falling back to `[]` would skip
 a check the operator believed they had set.
 
-`forge-provision.sh` writes `"vault_markers": []` for a forge provisioned on
-someone else's account.
+## A forge on your own Cloudflare account
+
+This is the home for the client-owned / non-Silex case. The two Cloudflare docs
+([cloudflare-pages.md](./cloudflare-pages.md),
+[cloudflare-access.md](./cloudflare-access.md)) describe the **Silex team-prod**
+instance — reproducing their values would configure *our* host, not yours.
+
+```bash
+plugins/silex-forge/scripts/forge-provision.sh
+```
+
+The wizard creates your Pages project (prompt default `forge`, not
+`silex-forge`), the `SHARES` KV namespace, the API token, the custom domain, the
+Zero Trust team and the three Access applications — and writes
+`"vault_markers": []` into `forge.config.json` when that key is not already set,
+so `hub_root` is checked only for existence. A re-run never overwrites an
+existing `vault_markers`, `artifacts_dir` or `forge_repo`; it refreshes
+`hub_root`, `public_host` and `pages_project` only.
+
+Already have a forge (yours or Silex's) and just need to attach a machine →
+`forge-discover.sh --write`, not the wizard.
 
 ## Commands
 
 ```bash
-plugins/silex-forge/scripts/publish.sh --rebuild-index
 plugins/silex-forge/scripts/publish.sh my-slug --title "…" --type deck
+plugins/silex-forge/scripts/publish.sh my-slug ./file.html --title "…" --type deck
+plugins/silex-forge/scripts/publish.sh --share my-slug
+plugins/silex-forge/scripts/publish.sh --unshare my-slug
 plugins/silex-forge/scripts/publish.sh --list
+plugins/silex-forge/scripts/publish.sh --remove my-slug
+plugins/silex-forge/scripts/publish.sh --rebuild-index
 ```
 
 ## `main` must not contain

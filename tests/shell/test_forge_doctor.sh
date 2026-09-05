@@ -1,56 +1,295 @@
 #!/usr/bin/env bash
-# forge-doctor output format contracts (--json / --quiet must not mix formats).
+# Behavioral: forge-doctor.sh three-way exit contract (0 ready / 1 config KO /
+# 2 deploy blocked), the next-action command each blocker names, mode
+# separation, and secret hygiene.
+#
+# Every case runs against a temp HOME + FORGE_CONFIG + FORGE_ENV: the doctor's
+# verdict must come from the fixture, never from the operator's machine.
+# Exit codes are asserted, never swallowed — the skill, publish.sh and CI
+# dispatch on them.
+# bash 3.2-safe, no GNU-only flags, no network.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOCTOR="$ROOT/plugins/silex-forge/scripts/forge-doctor.sh"
-DOCTOR_BASH="${FORGE_BASH:-bash}"
+SH="${FORGE_BASH:-bash}"
 
 pass() { echo "  ok  $*"; }
 fail() { echo "  FAIL $*" >&2; exit 1; }
 
-echo "forge-doctor format tests"
+echo "forge-doctor behavioral tests"
 
-json_out=""
-json_out=$("$DOCTOR_BASH" "$DOCTOR" --json 2>/dev/null) || true
-[ -n "$json_out" ] || fail "--json must emit stdout even when config incomplete"
-python3 -c 'import json,sys; json.load(sys.stdin)' <<<"$json_out" \
-  || fail "--json stdout is not valid JSON"
-[[ "$json_out" != silex-forge* ]] || fail "--json must not emit human banner"
-echo "$json_out" | grep -q '"config_source"' \
-  || fail "--json must include doctor payload keys"
-pass "--json emits JSON only"
+TD="$(mktemp -d)"
+trap 'rm -rf "$TD"' EXIT
 
-quiet_out=""
-quiet_out=$("$DOCTOR_BASH" "$DOCTOR" --quiet 2>/dev/null) || true
-[ -z "$quiet_out" ] || fail "--quiet must not print to stdout (got: ${quiet_out:0:80})"
-pass "--quiet emits no stdout"
+# Ambient credentials/hub would decide the verdict instead of the fixture.
+unset CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_EMAIL || true
+unset FORGE_SHARES_KV_ID CF_ACCESS_AUD CF_ACCESS_TEAM_DOMAIN || true
+unset FORGE_PAGES_PROJECT FORGE_CONFIG FORGE_ENV HUB_ROOT || true
 
-combo_out=""
-combo_out=$("$DOCTOR_BASH" "$DOCTOR" --json --quiet 2>/dev/null) || true
-python3 -c 'import json,sys; json.load(sys.stdin)' <<<"$combo_out" \
-  || fail "--json --quiet must still emit JSON only"
-[[ "$combo_out" != silex-forge* ]] || fail "--json --quiet must not mix human output"
-pass "--json --quiet prefers JSON (no human lines)"
+ACCT="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+KV_ID="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+AUD="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+# Only ever written to the fixture forge.env: no doctor mode may echo it.
+SECRET="cf-token-sentinel-7b3e9f1c02"
 
-human_out=""
-human_out=$("$DOCTOR_BASH" "$DOCTOR" 2>/dev/null) || true
-[[ "$human_out" == silex-forge* ]] || fail "default mode must emit human banner"
-echo "$human_out" | grep -q 'source' || fail "default mode must include human fields"
-pass "default mode emits human report"
+export HOME="$TD/home"
+mkdir -p "$HOME/.config/silex" "$TD/blank"
+mkdir -p "$TD/hub/00_COCKPIT/Forge/artifacts" "$TD/hub/01_COMPANY"
 
-# The doctor diagnoses broken installs, so it must survive one: with lib/
-# absent it has to name the missing directory, not die on an internal source.
-broken="$(mktemp -d)"
-mkdir -p "$broken/scripts"
-cp "$DOCTOR" "$broken/scripts/"
-broken_out=$("$DOCTOR_BASH" "$broken/scripts/forge-doctor.sh" 2>&1) || true
-rm -rf "$broken"
-echo "$broken_out" | grep -q 'lib manquante' \
-  || fail "missing lib/ must report 'lib manquante', got: ${broken_out:0:120}"
-if echo "$broken_out" | grep -qi 'No such file or directory'; then
-  fail "missing lib/ leaked a raw shell error instead of the diagnostic"
+CFG="$TD/home/.config/silex/forge.config.json"
+cat > "$CFG" <<EOF
+{
+  "version": 1,
+  "hub_root": "$TD/hub",
+  "artifacts_dir": "00_COCKPIT/Forge/artifacts",
+  "public_host": "forge.example.com",
+  "forge_repo": "https://github.com/go-silex/silex-forge.git",
+  "site_dir": "site",
+  "registry_dir": "registry",
+  "internal_prefix": "a",
+  "pages_project": "silex-forge"
+}
+EOF
+
+ENVF="$TD/home/.config/silex/forge.env"
+cat > "$ENVF" <<EOF
+CLOUDFLARE_API_TOKEN=${SECRET}
+CLOUDFLARE_ACCOUNT_ID=${ACCT}
+FORGE_SHARES_KV_ID=${KV_ID}
+CF_ACCESS_TEAM_DOMAIN=example.cloudflareaccess.com
+CF_ACCESS_AUD=${AUD}
+EOF
+chmod 600 "$ENVF"
+
+# run <args...> → RC, OUT (stdout), ERR (stderr). Never aborts the test.
+run() {
+  set +e
+  OUT="$("$SH" "$DOCTOR" "$@" 2>"$TD/err")"
+  RC=$?
+  set -e
+  ERR="$(cat "$TD/err")"
+  ERR_LINES="$(wc -l < "$TD/err" | tr -d ' ')"
+}
+
+is_json() { printf '%s' "$1" | python3 -c 'import json,sys; json.load(sys.stdin)'; }
+
+# ── exit 0 · installed, credentialed, deploy-ready ─────────────────────────────
+export FORGE_CONFIG="$CFG"
+export FORGE_ENV="$ENVF"
+
+run
+[ "$RC" -eq 0 ] || fail "healthy install must exit 0, got $RC: $OUT $ERR"
+HEALTHY_HUMAN="$OUT$ERR"
+# Offline exit 0 proves the values are present, not that they work: the report
+# must hand the operator the live check.
+echo "$OUT" | grep -q -- '--online' \
+  || fail "the exit-0 report must point at the live check (--online), got: $OUT"
+pass "healthy fixture → exit 0, report names the --online live check"
+
+run --json
+[ "$RC" -eq 0 ] || fail "healthy install must exit 0 in --json too, got $RC"
+is_json "$OUT" || fail "--json stdout is not valid JSON: ${OUT}"
+case "$OUT" in
+  '{'*) ;;
+  *) fail "--json must emit the payload alone, got: ${OUT}" ;;
+esac
+echo "$OUT" | grep -q '"deploy_blockers"' \
+  || fail "--json must expose deploy_blockers (setup/publish read it)"
+echo "$OUT" | grep -q '"config_source"' \
+  || fail "--json must expose config_source"
+HEALTHY_JSON="$OUT$ERR"
+pass "--json emits the payload alone and keeps exit 0"
+
+run --quiet
+[ "$RC" -eq 0 ] || fail "--quiet must exit 0 on a healthy install, got $RC"
+[ -z "$OUT" ] || fail "--quiet must not print to stdout, got: $OUT"
+[ -z "$ERR" ] || fail "--quiet must stay silent when everything is OK, got: $ERR"
+HEALTHY_QUIET="$OUT$ERR"
+pass "--quiet is silent and exits 0 when ready"
+
+for blob in "$HEALTHY_HUMAN" "$HEALTHY_JSON" "$HEALTHY_QUIET"; do
+  case "$blob" in
+    *"$SECRET"*) fail "a doctor output mode echoed the API token" ;;
+  esac
+done
+pass "no output mode leaks the token value"
+
+run --json --quiet
+[ "$RC" -eq 0 ] || fail "--json --quiet must exit 0 on a healthy install, got $RC"
+is_json "$OUT" || fail "--json --quiet must still emit JSON only: ${OUT}"
+pass "--json --quiet prefers JSON"
+
+# ── exit 2 · config fine, credentials missing → deploy blocked ─────────────────
+export FORGE_ENV="$TD/absent.env"
+[ ! -f "$TD/absent.env" ] || fail "fixture error: absent.env exists"
+
+run --json
+[ "$RC" -eq 2 ] || fail "missing credentials must exit 2 in --json, got $RC"
+BLOCKERS="$(printf '%s' "$OUT" | python3 -c \
+  'import json,sys; print("\n".join(json.load(sys.stdin)["deploy_blockers"]))')"
+NB="$(printf '%s\n' "$BLOCKERS" | grep -c . || true)"
+[ "$NB" -ge 3 ] || fail "fixture must block deploy on several codes, got: $BLOCKERS"
+pass "--json exits 2 when hub is OK but deploy is blocked"
+
+run
+[ "$RC" -eq 2 ] || fail "missing credentials must exit 2, got $RC: $OUT"
+ARROWS="$(printf '%s\n' "$OUT" | grep -c '→' || true)"
+[ "$ARROWS" -ge "$NB" ] \
+  || fail "each of the $NB blockers needs a → next-action line, got $ARROWS: $OUT"
+echo "$OUT" | grep -q 'CLOUDFLARE_API_TOKEN' \
+  || fail "missing token must be named by key, got: $OUT"
+echo "$OUT" | grep -q 'chmod 600' \
+  || fail "the token fix must name chmod 600, got: $OUT"
+echo "$OUT" | grep -q 'forge-discover.sh --write' \
+  || fail "the KV/Access fixes must name forge-discover.sh --write, got: $OUT"
+pass "exit 2 report names a fixing command per blocker"
+
+run --quiet
+[ "$RC" -eq 2 ] || fail "--quiet must exit 2 when deploy is blocked, got $RC"
+[ -z "$OUT" ] || fail "--quiet must not print to stdout, got: $OUT"
+[ "$ERR_LINES" -eq 1 ] \
+  || fail "--quiet must emit exactly one stderr line on failure, got $ERR_LINES: $ERR"
+echo "$ERR" | grep -q 'deploy blocked' \
+  || fail "--quiet stderr must say deploy is blocked, got: $ERR"
+echo "$ERR" | grep -q 'forge-doctor.sh' \
+  || fail "--quiet stderr must name the command that details the fix, got: $ERR"
+case "$ERR" in
+  *"$SECRET"*) fail "--quiet leaked the token value" ;;
+esac
+pass "--quiet: exit 2, one stderr line naming the next action"
+
+# ── exit 1 · never installed (no local config) ─────────────────────────────────
+export HOME="$TD/blank"
+unset FORGE_CONFIG FORGE_ENV
+
+run
+[ "$RC" -eq 1 ] || fail "no local config must exit 1, got $RC: $OUT"
+echo "$OUT" | grep -q 'forge-setup' \
+  || fail "no local config must name the forge-setup skill, got: $OUT"
+pass "never-installed → exit 1 naming forge-setup"
+
+run --json
+[ "$RC" -eq 1 ] || fail "no local config must exit 1 in --json, got $RC"
+is_json "$OUT" || fail "--json must stay valid JSON on a broken install: ${OUT}"
+pass "--json exits 1 on a broken config and still emits JSON"
+
+run --quiet
+[ "$RC" -eq 1 ] || fail "--quiet must exit 1 on a broken config, got $RC"
+[ -z "$OUT" ] || fail "--quiet must not print to stdout, got: $OUT"
+[ "$ERR_LINES" -eq 1 ] \
+  || fail "--quiet must emit exactly one stderr line on failure, got $ERR_LINES: $ERR"
+echo "$ERR" | grep -q 'config KO' \
+  || fail "--quiet stderr must say the config is KO, got: $ERR"
+echo "$ERR" | grep -q 'forge-setup' \
+  || fail "--quiet stderr must name forge-setup, got: $ERR"
+pass "--quiet: exit 1, one stderr line naming forge-setup"
+
+# ── exit 1 · the doctor must survive the broken install it diagnoses ───────────
+mkdir -p "$TD/broken/scripts"
+cp "$DOCTOR" "$TD/broken/scripts/"
+run_broken() {
+  set +e
+  OUT="$("$SH" "$TD/broken/scripts/forge-doctor.sh" 2>&1)"
+  RC=$?
+  set -e
+}
+run_broken
+[ "$RC" -eq 1 ] || fail "missing lib/ must exit 1, got $RC: $OUT"
+echo "$OUT" | grep -q 'lib' \
+  || fail "missing lib/ must name the missing directory, got: $OUT"
+if echo "$OUT" | grep -q 'No such file or directory'; then
+  fail "missing lib/ leaked a raw shell error instead of the diagnostic: $OUT"
 fi
-pass "missing lib/ is reported, not crashed on"
+pass "missing lib/ → exit 1 with a diagnostic, not a crash"
 
-echo "all forge-doctor format checks passed"
+# ── crash safety · a raising load_config must never become a traceback ─────────
+# doctor() reads the config and imports the lib: on a broken install it raises.
+# Every mode is dispatched on (skill, publish.sh, CI), so --json must keep
+# stdout a parseable document, --quiet must keep stderr one line, and no mode
+# may claim ready.
+CRASH="$TD/crash/scripts"
+mkdir -p "$CRASH/lib"
+cp "$DOCTOR" "$CRASH/"
+
+# run_at <script> <args...> → RC, OUT, ERR, ERR_LINES (never aborts).
+run_at() {
+  _script="$1"
+  shift
+  set +e
+  OUT="$("$SH" "$_script" "$@" 2>"$TD/err")"
+  RC=$?
+  set -e
+  ERR="$(cat "$TD/err")"
+  ERR_LINES="$(wc -l < "$TD/err" | tr -d ' ')"
+}
+
+cat > "$CRASH/lib/load_config.py" <<'EOF'
+def doctor():
+    raise RuntimeError("stub: load_config is broken")
+
+
+def doctor_online():
+    raise RuntimeError("stub: load_config is broken")
+EOF
+
+run_at "$CRASH/forge-doctor.sh" --json
+[ "$RC" -eq 1 ] || fail "a raising load_config must exit 1 in --json, got $RC: $OUT $ERR"
+is_json "$OUT" || fail "--json must stay parseable when doctor raises, got: ${OUT}"
+printf '%s' "$OUT" | python3 -c \
+  'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") is False else 1)' \
+  || fail "--json crash document must carry ok:false, got: $OUT"
+echo "$OUT" | grep -q 'load_config.py' \
+  || fail "--json crash document must name load_config.py, got: $OUT"
+case "$OUT" in
+  *Traceback*) fail "--json leaked a traceback on stdout: $OUT" ;;
+esac
+pass "--json: raising load_config → exit 1, parseable ok:false document"
+
+run_at "$CRASH/forge-doctor.sh" --quiet
+[ "$RC" -eq 1 ] || fail "a raising load_config must exit 1 in --quiet, got $RC: $ERR"
+[ -z "$OUT" ] || fail "--quiet must not print to stdout, got: $OUT"
+[ "$ERR_LINES" -eq 1 ] \
+  || fail "--quiet must stay one stderr line when doctor raises, got $ERR_LINES: $ERR"
+echo "$ERR" | grep -q 'load_config.py' \
+  || fail "--quiet crash line must name load_config.py, got: $ERR"
+case "$ERR" in
+  *Traceback*) fail "--quiet leaked a traceback: $ERR" ;;
+esac
+pass "--quiet: raising load_config → exit 1, one stderr line naming load_config.py"
+
+run_at "$CRASH/forge-doctor.sh"
+[ "$RC" -eq 1 ] || fail "a raising load_config must exit 1 in the human report, got $RC"
+printf '%s\n%s\n' "$OUT" "$ERR" | grep -q 'load_config.py' \
+  || fail "the human crash diagnostic must name load_config.py, got: $OUT $ERR"
+pass "human report: raising load_config → exit 1 naming load_config.py"
+
+# An unimportable lib/ (not just a raising call) takes the same path.
+printf 'def doctor(:\n' > "$CRASH/lib/load_config.py"
+run_at "$CRASH/forge-doctor.sh" --json
+[ "$RC" -eq 1 ] || fail "an unimportable lib/ must exit 1 in --json, got $RC: $OUT $ERR"
+is_json "$OUT" || fail "--json must stay parseable on an unimportable lib/, got: ${OUT}"
+pass "--json survives a lib/ that cannot be imported"
+
+run_at "$CRASH/forge-doctor.sh" --quiet
+[ "$RC" -eq 1 ] || fail "an unimportable lib/ must exit 1 in --quiet, got $RC: $ERR"
+[ "$ERR_LINES" -eq 1 ] \
+  || fail "--quiet must stay one stderr line on an unimportable lib/, got $ERR_LINES: $ERR"
+pass "--quiet survives a lib/ that cannot be imported"
+
+# A payload missing deploy_ready must degrade to blocked, never to a silent 0.
+cat > "$CRASH/lib/load_config.py" <<'EOF'
+def doctor():
+    return {"ok": True}
+
+
+def doctor_online():
+    return {"ok": True}
+EOF
+run_at "$CRASH/forge-doctor.sh"
+[ "$RC" -eq 2 ] || fail "a payload without deploy_ready must exit 2, got $RC: $OUT"
+run_at "$CRASH/forge-doctor.sh" --quiet
+[ "$RC" -eq 2 ] || fail "--quiet must exit 2 on a payload without deploy_ready, got $RC"
+pass "a truncated payload degrades to deploy-blocked, never a silent 0"
+
+echo "all forge-doctor behavioral checks passed"

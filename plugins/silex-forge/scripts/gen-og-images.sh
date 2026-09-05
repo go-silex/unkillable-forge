@@ -59,7 +59,7 @@ while [ $# -gt 0 ]; do
     --force)   FORCE=1; shift ;;
     --quality) QUALITY="${2-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
-    *) die "option inconnue: $1" ;;
+    *) die "unknown option: $1 — see gen-og-images.sh --help" ;;
   esac
 done
 

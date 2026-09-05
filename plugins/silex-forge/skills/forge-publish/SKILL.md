@@ -55,13 +55,28 @@ fi
 bash "$FORGE_ROOT/scripts/forge-doctor.sh"
 ```
 
-If **KO** → stop. Ask the operator to run **forge-setup** themselves (`/forge-setup`; Codex `$forge-setup`; OMP `/skill:forge-setup`). Do not invent `hub_root`. Do not invoke forge-setup.
+`forge-doctor.sh` exit codes (product surface; `load_config.py --doctor` stays 0/1):
 
-Publish also needs `~/.config/silex/forge.env` (Pages token + account + KV id).  
-Doctor warns if absent. See repo `.env.example`.
+| Exit | Meaning | Next |
+|---|---|---|
+| `0` | ready (`ok && deploy_ready`) — offline: the values are present, not proven live | Continue. If the deploy then fails on auth or a missing project, run `forge-doctor.sh --online` to name the broken live check (rotated token · deleted Pages project · wrong KV id), then stop and name **/forge-setup**. |
+| `1` | hub/config KO | **Stop.** Ask the operator to run **forge-setup** themselves (`/forge-setup`; Codex `$forge-setup`; OMP `/skill:forge-setup`). Do not invent `hub_root`. Do not invoke forge-setup. |
+| `2` | hub OK, deploy blocked | **Stop.** Doctor already printed a `→` line per blocker. Ask the operator to run **forge-setup** (it will skip hub steps and go to discover/token). Do not invent `hub_root`. Do not invoke forge-setup. Do not publish. |
+
+Any non-zero doctor exit → stop. Name `/forge-setup`.
+
+`publish.sh` **hard-stops** when hub/config is broken (`doctor()["ok"]` is
+false): it prints `issues[]` and names `/forge-setup`. There is no
+`ARTIFACTS_ROOT` escape hatch — a partial machine cannot deploy to
+`forge.gosilex.com` using the example fallback.
+
+Publish also needs `~/.config/silex/forge.env` (Pages token + account + KV id
++ Access). A missing token is doctor exit 2, not a warning. See repo
+`.env.example` (placeholders only).
 
 Local config: `~/.config/silex/forge.config.json` (fallback plugin
-`forge.config.example.json`).
+`forge.config.example.json`). `pages_project` / `public_host` live in that
+file, not in `forge.env`.
 
 ## Usage
 
@@ -138,5 +153,9 @@ Optional shortlink (`s.gosilex.com/f-<slug>`): Pages `SHLINK_*` and/or local `sh
 | Source | Keys |
 |---|---|
 | `~/.config/silex/forge.config.json` | `hub_root`, `artifacts_dir`, `public_host`, `pages_project`… |
-| `~/.config/silex/forge.env` | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `FORGE_SHARES_KV_ID` |
-| Env override | `FORGE_REPO`, `PUBLIC_HOST`, `FORGE_CONFIG`, `FORGE_ENV` |
+| `~/.config/silex/forge.env` | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `FORGE_SHARES_KV_ID`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`, `SHLINK_API_URL` |
+| Env override | `FORGE_REPO`, `FORGE_CONFIG`, `FORGE_ENV` |
+
+`public_host` and `pages_project` are read from `forge.config.json` only — no
+`PUBLIC_HOST` / `FORGE_PAGES_PROJECT` environment override. Point `publish.sh`
+at another forge with `FORGE_CONFIG=<path>`.

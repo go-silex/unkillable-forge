@@ -125,14 +125,47 @@ Craft HTML separately: **`silex-craft@silex-plugins`**.
 
 ### Machine setup
 
+Two paths. **Attach** to a forge that already exists (a Silex teammate's machine,
+or a second laptop) — or **provision** one on your own Cloudflare account.
+
+#### Attach to an existing forge
+
 ```bash
 wrangler login
 plugins/silex-forge/scripts/forge-discover.sh --write
+plugins/silex-forge/scripts/forge-doctor.sh
 ```
 
-Default project is `silex-forge`. `--write` merges into `~/.config/silex/forge.env` (`chmod 600`) and prints key names only. Discovery is OAuth-only (`wrangler login`) — no API token. Needed scopes: `pages (write)`, `workers_kv (write)`.
+`--write` merges the discovered keys into `~/.config/silex/forge.env` (`chmod 600`,
+directory `700`) printing **key names only**, and persists the confirmed
+`pages_project` into an **existing** `~/.config/silex/forge.config.json` — so
+`--project` is needed at most once. It never creates that config file: the
+`/forge-setup` skill owns creation, and until it runs the project name is not
+remembered between calls.
 
-Still fill `CLOUDFLARE_API_TOKEN` (deploy is not OAuth-only; `publish.sh` dies without it) and `hub_root` in `forge.config.json` (local vault path; Cloudflare cannot see it). Doctor KO → `/forge-setup`.
+Do **not** `cp .env.example ~/.config/silex/forge.env`. The example is a schema
+reference (key names + comments); copying it over a discovered file wipes real
+values.
+
+Two Pages-project defaults, both deliberate:
+
+| Command | Default project | Why |
+|---|---|---|
+| `forge-discover.sh` | `silex-forge` | attaches to the Silex team forge — override with `--project NAME` |
+| `forge-provision.sh` | `forge` | your own account; the wizard must not brand your project with ours |
+
+`forge-discover.sh` reads `pages_project` from `forge.config.json` first, so once
+it is persisted that value wins over both defaults.
+
+Two different Cloudflare credentials — do not mint one from the other's list:
+
+| Credential | Used by | Needs |
+|---|---|---|
+| `wrangler login` **OAuth** | `forge-discover.sh`, `forge-provision.sh`, `--share` KV fallback | scopes `pages (write)`, `workers_kv (write)` |
+| `CLOUDFLARE_API_TOKEN` in `forge.env` | `publish.sh` — every deploy | permissions Account · Cloudflare Pages · **Edit** · Account · Workers KV Storage · **Edit** · Account · Account Settings · **Read** |
+
+Discovery is OAuth-only and never sees a token; deploy is token-only and
+`publish.sh` dies without one.
 
 | Value | Source | Why |
 |---|---|---|
@@ -142,41 +175,81 @@ Still fill `CLOUDFLARE_API_TOKEN` (deploy is not OAuth-only; `publish.sh` dies w
 | `CF_ACCESS_AUD` | discover | Pages env |
 | `PUBLIC_HOST` | discover | Pages env |
 | `SHLINK_API_URL` | discover | Pages env |
-| `CLOUDFLARE_API_TOKEN` | **manual** | deploy still requires a token |
-| `hub_root` | **manual** | per-person vault; not on Cloudflare |
+| `CLOUDFLARE_API_TOKEN` | **manual** | a secret — deploy still requires a token |
+| `hub_root` | **manual** | per-person vault path; Cloudflare cannot see it |
 
-Named project missing (exit `2`) and the account already has Pages projects → retry with one of the listed names:
+Discover exits `0` even when the project is missing some of those keys; it then
+prints a follow-up command per missing key. `forge-doctor.sh` is the
+machine-readable "can this laptop deploy?" answer.
 
-```bash
-plugins/silex-forge/scripts/forge-discover.sh --write --project NAME
-```
+#### Discover exit codes
 
-No Pages project on this account → provision:
+| Exit | Meaning | Next |
+|---|---|---|
+| `0` | forge found | `--write`, then add the API token |
+| `1` | `wrangler`/`npx` missing, or not logged in | `wrangler login`, retry |
+| `2` | no Pages project by that name | three branches below |
+
+Exit `2` is not one situation:
+
+| Account state | What discover prints | Do |
+|---|---|---|
+| **other** Pages projects exist | the list of names | `forge-discover.sh --write --project NAME` |
+| **no** Pages project at all | nothing to attach to | `forge-provision.sh` |
+| project list **unparsable** | "could not parse `wrangler pages project list` output — not creating a new forge" | **never provision** — run that command yourself; if it prints your projects, relink the plugin (wrangler version mismatch) |
+
+The third branch matters: a forge may already exist on an account whose project
+list you cannot read, and a second Pages project would split artifacts across
+two origins. Discover refuses to suggest `--project` there (the same unreadable
+list would be re-parsed) and the wizard fails closed on the same signal.
+
+#### Provision your own forge
 
 ```bash
 plugins/silex-forge/scripts/forge-provision.sh
 ```
 
-An interactive wizard: Pages project, KV namespace, API token, custom domain,
-Zero Trust team and the three Access applications. Twelve stages, resumable —
-re-run it and already-saved values come back as defaults. If the account already
-has other Pages projects, the wizard lists them and asks `[y/N]` before creating
-a second one; `N` points at `forge-discover.sh --project NAME`. Unreadable
-wrangler output warns and requires an explicit confirm.
+An interactive wizard (it aborts on a non-TTY): Pages project, KV namespace, API
+token, custom domain, Zero Trust team and the three Access applications. Twelve
+stages, resumable — re-run it and already-saved values come back as defaults. It
+will not overwrite a healthy `forge.config.json`. If the account already has
+other Pages projects, the wizard lists them and asks `[y/N]` before creating a
+second one; `N` points at `forge-discover.sh --project NAME`. If it cannot read
+the project list, it aborts instead of asking.
 
-It deploys the fail-closed Functions and verifies them **before** creating any
-Access Bypass policy. That order is not cosmetic: Bypass first would publish
-every artifact. See [cloudflare-access.md](docs/cloudflare-access.md).
+It deploys the fail-closed Functions and verifies the live `x-forge-acl: vis-v4`
+header **before** the Access Bypass stage — and stops there if the header is
+absent. There is no "continue anyway": Bypass first would publish every
+artifact. See [cloudflare-access.md](docs/cloudflare-access.md).
 
-A forge outside the Silex vault sets `"vault_markers": []` in
-`forge.config.json`; the wizard writes that for you.
+A forge outside the Silex vault needs `"vault_markers": []` in
+`forge.config.json`; the wizard writes it when the key is absent and never
+overwrites an existing value — see
+[artifacts-config.md](docs/artifacts-config.md).
 
+#### Doctor exit codes
+
+```bash
+plugins/silex-forge/scripts/forge-doctor.sh            # human report
+plugins/silex-forge/scripts/forge-doctor.sh --json     # payload for agents
+plugins/silex-forge/scripts/forge-doctor.sh --quiet    # one stderr line if not ready
+plugins/silex-forge/scripts/forge-doctor.sh --online   # + live Cloudflare checks
+```
+
+| Exit | Meaning | Next |
+|---|---|---|
+| `0` | ready — hub config sound **and** deploy credentials complete | publish |
+| `1` | hub / local config KO (`hub_root`, missing keys, no `python3`) | run `/forge-setup` |
+| `2` | hub OK, **deploy blocked** | fix each blocker doctor names (token, account id, KV id, Access vars, `forge.env` permissions) |
+
+Exit `2` is the case a token-less laptop used to report as `OK`. Each blocker is
+printed with the command that clears it.
 
 | File | Role |
 |---|---|
-| `~/.config/silex/forge.config.json` | `hub_root`, … (local, not git) |
-| `~/.config/silex/forge.env` | CF credentials · `chmod 600` |
-| `.env.example` | committed placeholders |
+| `~/.config/silex/forge.config.json` | `hub_root`, `pages_project`, `public_host`, `vault_markers` (local, not git) |
+| `~/.config/silex/forge.env` | CF credentials + the Pages plain vars injected at deploy · `chmod 600` |
+| `.env.example` | committed **schema reference** — placeholders, never copied over a real file |
 | `plugins/…/forge.config.example.json` | defaults / fallback |
 
 ### Publish
@@ -184,11 +257,20 @@ A forge outside the Silex vault sets `"vault_markers": []` in
 ```bash
 S=plugins/silex-forge/scripts/publish.sh
 
-"$S" my-deck --title "My deck" --type deck
+"$S" my-deck --title "My deck" --type deck          # source = hub SSOT
 "$S" my-deck ./deck.html --title "My deck" --type deck
-"$S" --share my-deck
+"$S" my-deck ./deck.html --share --title "My deck"  # publish + mint a share link
+"$S" --share my-deck                                # mint a share link only
+"$S" --unshare my-deck
+"$S" --list
+"$S" --remove my-deck
 "$S" --rebuild-index
 ```
+
+`publish.sh` refuses to run while the local config is broken: it prints the
+doctor issues and names `/forge-setup` rather than deploying with example
+defaults. `--share <slug>` checks the artifact exists in the hub before it
+deploys anything.
 
 Team URL: `https://forge.gosilex.com/a/<slug>/`  
 Share URL: `https://forge.gosilex.com/s/<slug>/<key>/`
@@ -210,7 +292,7 @@ Best-effort. Failures are silent — you still get the long `/s/…` URL.
 
 | Zone | Control |
 |---|---|
-| `/` + `/a/*` | Access after Functions deploy · Bypass only once Functions are live |
+| `/` + `/a/*` | Access after Functions deploy · Bypass only once the live host answers `x-forge-acl: vis-v4` |
 | `/s/*` | Access Bypass + KV key check |
 | `/login` | Access Allow team |
 | `*.pages.dev` | Access + middleware 403 on every path |
@@ -223,7 +305,7 @@ Never put secrets in `site/`. Never list share keys in the catalogue.
 ## Repo layout
 
 ```
-.env.example                  # forge.env placeholders
+.env.example                  # forge.env schema reference (placeholders only)
 plugins/silex-forge/          # multi-harness plugin (publish + setup)
 functions/                    # Access middleware, /api/*, /s/*
 site/                         # skeleton only — no artifact HTML
@@ -237,10 +319,10 @@ wrangler.toml                 # placeholder KV id (patched at deploy)
 
 | Doc | Topic |
 |---|---|
-| [docs/cloudflare-access.md](docs/cloudflare-access.md) | Access + Bypass |
-| [docs/cloudflare-pages.md](docs/cloudflare-pages.md) | Deploy + Pages env |
+| [docs/cloudflare-access.md](docs/cloudflare-access.md) | Access + Bypass — **Silex team-prod instance** |
+| [docs/cloudflare-pages.md](docs/cloudflare-pages.md) | Deploy + Pages env — **Silex team-prod instance** |
 | [docs/share-model.md](docs/share-model.md) | Share / key / Shlink |
-| [docs/artifacts-config.md](docs/artifacts-config.md) | Hub SSOT |
+| [docs/artifacts-config.md](docs/artifacts-config.md) | Hub SSOT · `vault_markers` · forge on your own account |
 | [docs/public-release.md](docs/public-release.md) | Going public + history purge |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute (engine only) |
 | [CHANGELOG.md](CHANGELOG.md) | Plugin / engine releases |

@@ -60,6 +60,19 @@ for f in "$SCRIPTS"/*.sh; do
       || fail "$rel: stat -c (GNU) without stat -f (BSD) fallback"
   fi
 
+  # bash 3.2 + set -u: expanding "${arr[@]}" on an *empty* array is a fatal
+  # "unbound variable" error, not an empty list — it aborts mid-script with a
+  # zero exit status further up if the caller swallows it. Only
+  # ${arr[@]+"${arr[@]}"} is safe. ${#arr[@]} and "$@" are unaffected; the
+  # first sed drops comments, the second drops the safe form so its inner
+  # "${arr[@]}" is not mistaken for a bare one.
+  if grep -qE 'set[[:space:]]+-[a-z]*u|set[[:space:]]+-o[[:space:]]+nounset' "$f"; then
+    bad=$(sed 's/[[:space:]]*#.*$//' "$f" \
+      | sed 's/\${\([A-Za-z_][A-Za-z0-9_]*\)\[@\]+"\${\1\[@\]}"}//g' \
+      | grep -nE '\$\{[A-Za-z_][A-Za-z0-9_]*\[@\]\}' 2>/dev/null || true)
+    [ -z "$bad" ] || fail "$rel: bare \${arr[@]} under set -u dies on bash 3.2 when the array is empty — use \${arr[@]+\"\${arr[@]}\"}: $bad"
+  fi
+
   if grep -qE '(^|[^[:alnum:]_])flock($|[^[:alnum:]_])' "$f"; then
     grep -qE 'command[[:space:]]+-v[[:space:]]+flock' "$f" \
       || fail "$rel: flock used without command -v flock probe"

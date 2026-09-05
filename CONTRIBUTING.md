@@ -28,15 +28,26 @@ Harness-specific install commands: [README.md → Install the plugin](README.md#
 
 ### Machine config (for publish tests)
 
-```bash
-cp .env.example ~/.config/silex/forge.env
-chmod 600 ~/.config/silex/forge.env
-# fill from your ops vault — see forge-setup skill
+Do **not** `cp .env.example ~/.config/silex/forge.env`. `.env.example` is a
+schema reference (key names + comments); copying it over a real file wipes
+discovered values and would point your deploy at the wrong host. Derive the
+credentials from Cloudflare instead:
 
+```bash
+wrangler login
+plugins/silex-forge/scripts/forge-discover.sh --write   # → forge.env (chmod 600), key names only
 plugins/silex-forge/scripts/forge-doctor.sh
 ```
 
-You need a valid **silex-hub** path in `~/.config/silex/forge.config.json`. Do not invent paths — use `forge-setup`.
+Doctor exits `0` ready · `1` hub/config KO → run the `forge-setup` skill · `2`
+hub OK but deploy blocked → add the blockers it names (API token, account id,
+KV id, Access vars, `forge.env` permissions). `publish.sh` refuses to deploy on
+a `1`.
+
+No forge on your Cloudflare account yet → `plugins/silex-forge/scripts/forge-provision.sh`
+(interactive wizard, your own project). You still need a valid **silex-hub**
+path in `~/.config/silex/forge.config.json`; do not invent paths — use
+`forge-setup`.
 
 ### Craft HTML (separate plugin)
 
@@ -64,7 +75,14 @@ plugins/silex-forge/
   skills/forge-setup/agents/openai.yaml  # Codex: no implicit invocation
   scripts/publish.sh
   scripts/forge-doctor.sh
+  scripts/forge-discover.sh              # derive forge.env from an existing forge
+  scripts/forge-provision.sh             # stand up a forge on your own account
+  scripts/gen-og-images.sh
+  scripts/build-site-from-hub.py
   scripts/lib/load_config.py
+  scripts/lib/discover.py
+  scripts/lib/forge_common.sh
+  scripts/lib/patch_wrangler.py
   forge.config.example.json
 ```
 

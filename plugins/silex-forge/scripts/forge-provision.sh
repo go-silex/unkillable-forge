@@ -126,11 +126,13 @@ ask_secret() {
 }
 
 # write_env KEY VALUE upserts KEY=VALUE into ENV_FILE (creates it; replaces
-# any existing line). Idempotent.
+# any existing line). Idempotent. Deviates from the generated library on one
+# line: the working copy goes through forge_tmp (config dir, cleaned on exit)
+# instead of mktemp in $TMPDIR, because this file holds the API token.
 write_env() {
   local key="$1" value="$2" tmp
   touch "$ENV_FILE"
-  tmp=$(mktemp)
+  tmp=$(forge_tmp) || fail "could not create a temporary file next to $ENV_FILE — check the directory is writable, then re-run this wizard"
   grep -vE "^${key}=" "$ENV_FILE" > "$tmp" || true
   printf '%s=%s\n' "$key" "$value" >> "$tmp"
   mv "$tmp" "$ENV_FILE"
@@ -174,7 +176,7 @@ finish() {
   (( ${#WRITTEN_SECRET[@]} )) && note "set ${#WRITTEN_SECRET[@]} GitHub secret(s): ${WRITTEN_SECRET[*]}"
   if (( ${#SKIPPED[@]} )); then
     printf '\n'; warn "still to do by hand:"
-    for s in "${SKIPPED[@]}"; do note "  - $s"; done
+    for s in ${SKIPPED[@]+"${SKIPPED[@]}"}; do note "  - $s"; done
   fi
   printf '\n'
 }
@@ -192,13 +194,70 @@ LIB_DIR="$SCRIPT_DIR/lib"
 # Credentials land in the forge config dir, never in the repo.
 ENV_FILE="${FORGE_ENV:-$HOME/.config/silex/forge.env}"
 CONFIG_FILE="${FORGE_CONFIG:-$HOME/.config/silex/forge.config.json}"
-mkdir -p "$(dirname "$ENV_FILE")" "$(dirname "$CONFIG_FILE")"
-chmod 700 "$(dirname "$ENV_FILE")" 2>/dev/null || true
 
 fail() { printf '  %s✗ %s%s\n' "$RED" "$1" "$RESET" >&2; exit 1; }
 
-# write_env creates the file with default perms; the token lives here.
-secure_env() { chmod 600 "$ENV_FILE" 2>/dev/null || true; }
+# Every guard in this wizard is a y/N question a human must answer, and two of
+# them create things on the account (a Pages project in stage 3, a KV
+# namespace in stage 4). Piped stdin (`yes | …`, CI, an agent) would answer
+# them all, so a bare pipe is refused. A scripted run against a throwaway
+# account is legitimate — it is how this wizard gets end-to-end tested — so it
+# is reachable, but only by opting in explicitly.
+if [ ! -t 0 ] && [ "${FORGE_PROVISION_NONINTERACTIVE:-}" != "1" ]; then
+  fail "this wizard is interactive: run it directly in a terminal, with no pipe on stdin. To attach a machine to a forge that already exists, use \`forge-discover.sh --write\` instead. For a deliberate scripted run against a throwaway account, set FORGE_PROVISION_NONINTERACTIVE=1."
+fi
+
+mkdir -p "$(dirname "$ENV_FILE")" "$(dirname "$CONFIG_FILE")"
+chmod 700 "$(dirname "$ENV_FILE")" 2>/dev/null || true
+
+# write_env creates the file with default perms; the API token lives here, so a
+# failed chmod is fatal rather than a shrug.
+secure_env() {
+  chmod 600 "$ENV_FILE" \
+    || fail "could not restrict $ENV_FILE — it holds your Cloudflare API token and must not stay group/world readable. Run \`chmod 600 $ENV_FILE\`, then re-run this wizard."
+}
+
+# Temp files stay inside the already-700 config dir, and anything a Ctrl-C
+# leaves behind is removed on exit: the banner promises Ctrl-C is safe, and
+# from stage 5 on every write_env copy contains the Cloudflare API token.
+_TMP_PREFIX="$(dirname "$ENV_FILE")/.forge-provision.tmp"
+trap 'rm -f "$_TMP_PREFIX".*' EXIT HUP INT TERM
+forge_tmp() { mktemp "${_TMP_PREFIX}.XXXXXX"; }
+
+# cfg_read KEY... prints one line per key from forge.config.json — empty when
+# the key, the value's type or the file itself is not there. Python stdlib
+# only, and never fatal: the wizard's own prompts are the fallback.
+cfg_read() {
+  CONFIG_FILE="$CONFIG_FILE" python3 - "$@" <<'PY'
+import json, os, sys
+from pathlib import Path
+cfg = {}
+try:
+    data = json.loads(Path(os.environ["CONFIG_FILE"]).read_text(encoding="utf-8"))
+    if isinstance(data, dict):
+        cfg = data
+except Exception:
+    pass
+for key in sys.argv[1:]:
+    val = cfg.get(key)
+    print(val if isinstance(val, str) else "")
+PY
+}
+
+# ask_seeded KEY "Prompt" SEED is ask() with an explicit default instead of the
+# forge.env lookup: the host and the Pages project live in forge.config.json,
+# so a re-run must offer the *config* value, never a stale forge.env line.
+ask_seeded() {
+  local key="$1" prompt="$2" seed="$3" input
+  if [ -n "$seed" ]; then
+    printf '  %s%s%s %s[Enter keeps %s]%s ' "$BOLD" "$prompt" "$RESET" "$DIM" "$seed" "$RESET"
+  else
+    printf '  %s%s%s ' "$BOLD" "$prompt" "$RESET"
+  fi
+  read -r input || true
+  [ -n "$input" ] || input="$seed"
+  printf -v "$key" '%s' "$input"
+}
 
 # shellcheck source=/dev/null
 . "$LIB_DIR/forge_common.sh"
@@ -225,7 +284,7 @@ done
 if ! forge_wrangler >/dev/null 2>&1; then
   fail "wrangler or npx is required — install Node.js, then \`npm i -g wrangler\`"
 fi
-WHOAMI_TMP="$(mktemp)"
+WHOAMI_TMP="$(forge_tmp)" || fail "could not create a temporary file in $(dirname "$ENV_FILE")"
 if ! wr whoami >"$WHOAMI_TMP" 2>&1; then
   step "Log in to Cloudflare in the browser window that opens."
   wr login || fail "wrangler login failed"
@@ -246,24 +305,29 @@ secure_env
 stage "Name the forge"
 say "The public host is where your team will read artifacts."
 note "It must be a domain you control, e.g. forge.acme.com"
-ask PUBLIC_HOST "Public host (no https://):"
+# Both answers belong to forge.config.json, written in stage 9 — never to
+# forge.env. A credentials file that disagreed with the config used to decide
+# which Pages project the deploy landed in, while the doctor validated the
+# config. So a resume seeds its defaults from the config, not from forge.env.
+_CFG_NAMES=$(cfg_read public_host pages_project)
+_HOST_SEED=$(printf '%s\n' "$_CFG_NAMES" | sed -n '1p')
+_PROJ_SEED=$(printf '%s\n' "$_CFG_NAMES" | sed -n '2p')
+ask_seeded PUBLIC_HOST "Public host (no https://):" "$_HOST_SEED"
 [ -n "$PUBLIC_HOST" ] || fail "a public host is required"
 case "$PUBLIC_HOST" in
   *[!A-Za-z0-9.-]*) fail "invalid characters in hostname: $PUBLIC_HOST" ;;
   *.*) ;;
   *) fail "that does not look like a hostname: $PUBLIC_HOST" ;;
 esac
-ask FORGE_PAGES_PROJECT "Cloudflare Pages project name [forge]:"
+ask_seeded FORGE_PAGES_PROJECT "Cloudflare Pages project name [forge]:" "$_PROJ_SEED"
 [ -n "$FORGE_PAGES_PROJECT" ] || FORGE_PAGES_PROJECT="forge"
 case "$FORGE_PAGES_PROJECT" in *[!a-z0-9-]*) fail "Pages names allow lowercase letters, digits and dashes only" ;; esac
-write_env PUBLIC_HOST "$PUBLIC_HOST"
-write_env FORGE_PAGES_PROJECT "$FORGE_PAGES_PROJECT"
-secure_env
+note "Both land in $CONFIG_FILE at stage 9; forge.env keeps credentials only."
 
 # ── 3 ─────────────────────────────────────────────────────────────────────
 stage "Create the Pages project"
-_list="$(mktemp)"
-_lerr="$(mktemp)"
+_list="$(forge_tmp)" || fail "could not create a temporary file in $(dirname "$ENV_FILE")"
+_lerr="$(forge_tmp)" || fail "could not create a temporary file in $(dirname "$ENV_FILE")"
 if ! wr pages project list >"$_list" 2>"$_lerr"; then
   rm -f "$_list" "$_lerr"
   fail "could not list Pages projects — run \`wrangler login\` (needs pages scope)"
@@ -277,7 +341,9 @@ print(kind)
 for name in others:
     print(name)
 ' "$FORGE_PAGES_PROJECT" < "$_list"
-)" || { rm -f "$_list" "$_lerr"; fail "could not parse Pages project list"; }
+)" || { rm -f "$_list" "$_lerr"; fail "could not run the Pages list parser — reinstall or relink the plugin (\`omp plugin\`), then re-run this wizard."; }
+# Kept for the unparsed branch: the raw wrangler output is the only clue.
+_ltail=$(cat "$_list" "$_lerr" 2>/dev/null | tail -n 8 || true)
 rm -f "$_list" "$_lerr"
 _kind=$(printf '%s\n' "$_cls" | sed -n '1p')
 _others=$(printf '%s\n' "$_cls" | sed '1d')
@@ -302,10 +368,11 @@ case "$_kind" in
       || fail "could not create the Pages project"
     ;;
   unparsed)
-    warn "could not parse Pages project list — not sure if a forge already exists."
-    confirm "Create Pages project '$FORGE_PAGES_PROJECT' anyway?" || fail "aborted"
-    wr pages project create "$FORGE_PAGES_PROJECT" --production-branch=main \
-      || fail "could not create the Pages project"
+    warn "could not parse \`wrangler pages project list\` output — not creating a new forge."
+    [ -z "$_ltail" ] || printf '%s\n' "$_ltail" | sed 's/^/    /'
+    note "A forge may already exist on this account; creating a second Pages"
+    note "project would split artifacts across two origins."
+    fail "run \`wrangler pages project list\` yourself: if it prints your projects, the plugin's parser needs a fix — reinstall or relink the plugin (\`omp plugin\`); a wrangler version mismatch is the usual cause. Re-run this wizard once the list is readable; it resumes and keeps every answer you gave."
     ;;
   *) fail "unexpected Pages list classify: ${_kind:-empty}" ;;
 esac
@@ -391,11 +458,22 @@ secure_env
 # ── 9 ─────────────────────────────────────────────────────────────────────
 stage "Local artifact folder"
 say "Artifact HTML is the source of truth and lives on your machine, not in git."
-ask FORGE_HUB_ROOT "Absolute path to the folder that will hold artifacts:"
-case "$FORGE_HUB_ROOT" in /*) ;; *) fail "an absolute path is required" ;; esac
-mkdir -p "$FORGE_HUB_ROOT/artifacts/welcome"
-if [ ! -f "$FORGE_HUB_ROOT/artifacts/welcome/index.html" ]; then
-  cat > "$FORGE_HUB_ROOT/artifacts/welcome/index.html" <<'HTML'
+# A resume must not make the operator retype the absolute hub path, and the
+# placeholder has to land in the artifacts dir this machine actually uses.
+_CFG_SEED=$(cfg_read hub_root artifacts_dir)
+_HUB_SEED=$(printf '%s\n' "$_CFG_SEED" | sed -n '1p')
+_ARTS_DIR=$(printf '%s\n' "$_CFG_SEED" | sed -n '2p')
+[ -n "$_ARTS_DIR" ] || _ARTS_DIR="artifacts"
+if [ -n "$_HUB_SEED" ]; then
+  ask FORGE_HUB_ROOT "Absolute path to the folder that will hold artifacts [$_HUB_SEED]:"
+  [ -n "$FORGE_HUB_ROOT" ] || FORGE_HUB_ROOT="$_HUB_SEED"
+else
+  ask FORGE_HUB_ROOT "Absolute path to the folder that will hold artifacts (e.g. $HOME/silex-hub):"
+fi
+case "$FORGE_HUB_ROOT" in /*) ;; *) fail "an absolute path is required, e.g. $HOME/silex-hub" ;; esac
+mkdir -p "$FORGE_HUB_ROOT/$_ARTS_DIR/welcome"
+if [ ! -f "$FORGE_HUB_ROOT/$_ARTS_DIR/welcome/index.html" ]; then
+  cat > "$FORGE_HUB_ROOT/$_ARTS_DIR/welcome/index.html" <<'HTML'
 <!doctype html>
 <meta charset="utf-8">
 <title>Forge is live</title>
@@ -411,18 +489,22 @@ import json, os
 from pathlib import Path
 p = Path(os.environ["CONFIG_FILE"])
 cfg = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {}
+# Only the four keys this wizard just asked about are forced. Everything else
+# is a policy the operator may already have chosen (a Silex vault has its own
+# artifacts_dir and real vault_markers), so a re-run must not overwrite it.
 cfg.update({
     "version": 1,
     "hub_root": os.environ["FORGE_HUB_ROOT"],
-    "artifacts_dir": "artifacts",
-    "site_dir": "site",
-    "registry_dir": "registry",
-    "internal_prefix": "a",
     "public_host": os.environ["PUBLIC_HOST"],
     "pages_project": os.environ["FORGE_PAGES_PROJECT"],
-    # Not the Silex vault layout: no marker directories to check.
-    "vault_markers": [],
 })
+cfg.setdefault("artifacts_dir", "artifacts")
+cfg.setdefault("site_dir", "site")
+cfg.setdefault("registry_dir", "registry")
+cfg.setdefault("internal_prefix", "a")
+# A fresh non-Silex hub is not the Silex vault layout: no marker directories
+# to check. An existing list is the operator's choice and is left alone.
+cfg.setdefault("vault_markers", [])
 cfg.setdefault("forge_repo", "https://github.com/go-silex/silex-forge.git")
 p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 print(f"  ✓ wrote {p}")
@@ -434,19 +516,75 @@ warn "Order matters. The Functions must be live and refusing anonymous reads"
 warn "BEFORE any Bypass policy exists. Bypass first would publish every artifact."
 say "Deploying the engine plus your placeholder artifact."
 confirm "Deploy now?" || fail "aborted"
-set -a
-# shellcheck source=/dev/null
-. "$ENV_FILE"
-set +a
+# publish.sh reads this wizard's credentials and config files itself. Sourcing
+# forge.env here would also export a pre-C2 PUBLIC_HOST / FORGE_PAGES_PROJECT
+# line from it, and those two must come from the config alone.
+export FORGE_ENV="$ENV_FILE" FORGE_CONFIG="$CONFIG_FILE"
 bash "$SCRIPT_DIR/publish.sh" --rebuild-index || fail "deploy failed — fix the error above and re-run this wizard"
 say "Checking the deployed Functions…"
-ACL=$(curl -sI --max-time 20 "https://${PUBLIC_HOST}/a/welcome/" | tr -d '\r' | grep -i '^x-forge-acl:' || true)
-if [ -n "$ACL" ]; then
-  say "Functions are live: $ACL"
-else
-  warn "no x-forge-acl header seen on https://${PUBLIC_HOST}/a/welcome/"
-  confirm "Continue anyway? Answer no if DNS is still propagating." || fail "re-run once the host answers"
+# Stage 11 tells the operator to put a Bypass policy in front of this origin.
+# That is only safe once the engine is proven live *and* proven to refuse an
+# anonymous artifact read, so both probes are hard gates: no override, no
+# "continue anyway". The wizard is resumable — every answer is already saved.
+#
+# Probe 1 — liveness on "/": _middleware.ts sends the public shell through
+# withAcl(), so a live engine always stamps x-forge-acl there and a
+# Functions-less static deploy never does.
+# Probe 2 — fail closed on "/a/welcome/": with no JWT and no vis: key the
+# middleware answers loginRedirect(), i.e. 302 → /login with no ACL header by
+# design. A 200 is the leak. No -L: following the redirect lands on /login,
+# which *is* a public shell and would carry the header — a false pass.
+FORGE_ACL_EXPECTED="vis-v4"
+SHELL_HEAD=$(curl -sS -I --max-time 20 "https://${PUBLIC_HOST}/" 2>&1 | tr -d '\r' || true)
+ACL=$(printf '%s\n' "$SHELL_HEAD" | grep -i '^x-forge-acl:' | tail -n1 || true)
+ACL_VALUE=$(printf '%s' "${ACL#*:}" | tr -d ' \t')
+if ! printf '%s\n' "$SHELL_HEAD" | grep -qi '^HTTP/'; then
+  warn "https://${PUBLIC_HOST}/ did not answer at all."
+  note "This is the domain, not the deploy: Pages accepted the upload, but"
+  note "$PUBLIC_HOST does not resolve to the project yet (DNS propagation, or"
+  note "the custom domain is not Active)."
+  say  "Check it with: curl -sS -I https://${PUBLIC_HOST}/"
+  fail "cannot verify the fail-closed engine, so stage 11 (Access Bypass) is refused — a Bypass in front of an unverified origin publishes every artifact. Wait for the custom domain to answer, then re-run this wizard: it resumes and keeps every answer you gave."
+elif [ -z "$ACL_VALUE" ]; then
+  warn "$PUBLIC_HOST answers, but / sends no x-forge-acl header."
+  note "This is the deploy, not DNS: the host is live yet Pages is serving the"
+  note "static files without the Functions, so nothing enforces visibility."
+  note "(An Access policy already covering / would also hide the header — the"
+  note "only app so far should be the /login one from stage 8.)"
+  say  "Check it with:  curl -sS -I https://${PUBLIC_HOST}/"
+  say  "Then redeploy:  publish.sh --rebuild-index"
+  fail "the Functions are not live, so stage 11 (Access Bypass) is refused — it would publish every artifact. Redeploy, confirm the header, then re-run this wizard: it resumes and keeps every answer you gave."
+elif [ "$ACL_VALUE" != "$FORGE_ACL_EXPECTED" ]; then
+  warn "x-forge-acl is '$ACL_VALUE', expected '$FORGE_ACL_EXPECTED'."
+  note "Another engine version is answering on this host — its visibility rules"
+  note "are not the ones this wizard is about to open with a Bypass policy."
+  say  "Check it with:  curl -sS -I https://${PUBLIC_HOST}/"
+  say  "Then redeploy:  publish.sh --rebuild-index   (from this checkout)"
+  fail "unexpected engine version, so stage 11 (Access Bypass) is refused. Redeploy the Functions from this checkout, then re-run this wizard: it resumes and keeps every answer you gave."
 fi
+say "Checking that an anonymous artifact read is refused…"
+ART_HEAD=$(curl -sS -I --max-time 20 "https://${PUBLIC_HOST}/a/welcome/" 2>&1 | tr -d '\r' || true)
+ART_STATUS=$(printf '%s\n' "$ART_HEAD" | sed -n 's|^[Hh][Tt][Tt][Pp]/[^ ]* *\([0-9][0-9][0-9]\).*|\1|p' | tail -n1)
+ART_LOC=$(printf '%s\n' "$ART_HEAD" | grep -i '^location:' | tail -n1 || true)
+ART_LOC=$(printf '%s' "${ART_LOC#*:}" | tr -d ' \t')
+if [ "$ART_STATUS" = "200" ]; then
+  warn "https://${PUBLIC_HOST}/a/welcome/ answered 200 with no login."
+  note "The origin is serving artifacts anonymously — do NOT create a Bypass"
+  note "policy: it would publish every artifact you ever deploy. Either a"
+  note "Bypass already covers /a/*, or the Functions are not enforcing"
+  note "visibility on this host (KV binding, CF_ACCESS_AUD, wrong project)."
+  say  "Check it with:   curl -sS -I https://${PUBLIC_HOST}/a/welcome/"
+  say  "Remove any Bypass on /a/*, then: publish.sh --rebuild-index"
+  fail "the origin is serving artifacts anonymously — do NOT create a Bypass policy. Stage 11 is refused until /a/welcome/ answers 302 → /login without a cookie. Fix that, then re-run this wizard: it resumes and keeps every answer you gave."
+elif [ "$ART_STATUS" != "302" ] || [ "$ART_LOC" != "/login" ]; then
+  warn "/a/welcome/ answered ${ART_STATUS:-nothing}${ART_LOC:+ → $ART_LOC}, expected 302 → /login."
+  note "The engine is live on / but an anonymous artifact read is not being"
+  note "redirected to the login page, so its fail-closed path is unproven."
+  say  "Check it with:  curl -sS -I https://${PUBLIC_HOST}/a/welcome/"
+  say  "Then redeploy:  publish.sh --rebuild-index   (from this checkout)"
+  fail "could not prove the origin refuses anonymous artifact reads, so stage 11 (Access Bypass) is refused — a Bypass in front of an unproven origin publishes every artifact. Fix the response above, then re-run this wizard: it resumes and keeps every answer you gave."
+fi
+say "Functions are live and fail closed: / → x-forge-acl: $ACL_VALUE · /a/welcome/ → 302 /login"
 
 # ── 11 ────────────────────────────────────────────────────────────────────
 stage "Access: open the Functions-gated paths, lock down pages.dev"
@@ -463,16 +601,23 @@ pause "Press Enter when the pages.dev application is saved."
 
 # ── 12 ────────────────────────────────────────────────────────────────────
 stage "Verify"
-set -a
-# shellcheck source=/dev/null
-. "$ENV_FILE"
-set +a
-bash "$SCRIPT_DIR/forge-doctor.sh" --online || warn "doctor reported issues above"
+# FORGE_ENV / FORGE_CONFIG were exported in stage 10; the doctor reads both
+# files itself, so forge.env is never sourced into this shell.
+# Non-fatal: everything is already provisioned, and the operator is better
+# served by the smoke tests below than by an abort. But 1 (hub/config broken)
+# and 2 (hub fine, publishing still blocked) need different next steps.
+DOCTOR_RC=0
+bash "$SCRIPT_DIR/forge-doctor.sh" --online || DOCTOR_RC=$?
+case "$DOCTOR_RC" in
+  0) say "Doctor: ready to publish." ;;
+  2) warn "Doctor: config is fine, publishing is still blocked — fix the → lines above, then re-run forge-doctor.sh --online." ;;
+  *) warn "Doctor: the local config or hub is broken (exit $DOCTOR_RC) — fix the issues above, or re-run /forge-setup." ;;
+esac
 say ""
 say "Smoke tests:"
 code() { curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$1" 2>/dev/null || echo "---"; }
 say "  /login              → $(code "https://${PUBLIC_HOST}/login")   expect 302 (Access)"
-say "  /a/welcome/         → $(code "https://${PUBLIC_HOST}/a/welcome/")   expect 302 without a cookie"
+say "  /a/welcome/         → $(code "https://${PUBLIC_HOST}/a/welcome/")   expect 302 → /login without a cookie"
 say "  pages.dev           → $(code "https://${FORGE_PAGES_PROJECT}.pages.dev/")   expect 403 or 302"
 note "A 200 on /a/welcome/ without logging in means Bypass was applied too widely."
 say ""
