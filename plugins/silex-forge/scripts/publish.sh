@@ -7,8 +7,8 @@
 #   publish.sh --list | --remove <slug> | --rebuild-index
 #
 # Architecture (roxabi-forge shape):
-#   SSOT     = $hub/$artifacts_dir/<slug>/  (silex-hub partagé, hors git)
-#   engine   = git main (plugins, functions, site skeleton) — jamais les HTML
+#   SSOT     = $hub/$artifacts_dir/<slug>/  (shared silex-hub, outside git)
+#   engine   = git main (plugins, functions, site skeleton) — never the HTML
 #   deploy   = wrangler pages deploy site  (token ~/.config/silex/forge.env)
 #
 set -euo pipefail
@@ -68,12 +68,25 @@ require_forge_config() {
   if [ ! -f "$LIB_DIR/load_config.py" ]; then
     return 0
   fi
-  if PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
-    'from load_config import doctor; import sys; sys.exit(0 if doctor()["ok"] else 1)' 2>/dev/null; then
+  # One python3 call: exit 0 when doctor().ok, else print the issues on stdout.
+  local diag line
+  if diag=$(PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
+    'import sys
+from load_config import doctor
+d = doctor()
+if d.get("ok"):
+    sys.exit(0)
+for i in d.get("issues") or []:
+    print(i)
+sys.exit(1)'); then
     return 0
   fi
-  warn "forge config incomplete — run skill forge-setup"
-  [ -n "${ARTIFACTS_ROOT:-}" ] || die "hub/artifacts not configured. Run forge-setup (doctor KO)."
+  warn "forge config KO — publish stopped before touching Cloudflare"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    echo "  ✗ $line" >&2
+  done <<<"$diag"
+  die "forge config incomplete — run the forge-setup skill (forge-doctor.sh for the full report)"
 }
 
 usage() {
@@ -120,9 +133,9 @@ materialize_engine() {
   else
     info "clone engine $FORGE_REPO (main)"
     GIT clone --depth 1 --branch main --quiet "$FORGE_REPO" "$WORK/repo" \
-      || die "clone impossible — branche main ? accès GitHub ?"
+      || die "clone failed: $FORGE_REPO (branch main) — check GitHub access, or set forge_repo to a local checkout in ~/.config/silex/forge.config.json"
   fi
-  [ -d "$WORK/repo/site" ] || die "repo sans site/ skeleton"
+  [ -d "$WORK/repo/site" ] || die "engine checkout has no site/ skeleton — $FORGE_REPO is not a silex-forge engine"
   [ -f "$WORK/repo/site/404.html" ] || die "site/404.html missing"
 }
 
@@ -145,11 +158,11 @@ build_from_hub() {
   local build_py
   build_py="$(SCRIPTS)/build-site-from-hub.py"
   [ -f "$build_py" ] || build_py="$SCRIPT_DIR/build-site-from-hub.py"
-  [ -f "$build_py" ] || die "build-site-from-hub.py missing"
+  [ -f "$build_py" ] || die "build-site-from-hub.py missing — reinstall the silex-forge plugin, then forge-doctor.sh"
   info "build site from hub SSOT → $WORK/repo"
   PYTHONPATH="$(dirname "$build_py")/lib${PYTHONPATH:+:$PYTHONPATH}" \
     python3 "$build_py" --repo-root "$WORK/repo" \
-    || die "build-site-from-hub failed"
+    || die "build-site-from-hub failed — check the hub artifacts under ${ARTIFACTS_ROOT:-<artifacts root>} (each slug needs <slug>/index.html), then retry"
 }
 
 # Load token + account from ~/.config/silex/forge.env (never print values)
@@ -177,7 +190,7 @@ source_cf_credentials() {
   mode=$(forge_env_mode)
   case "$mode" in
     600|400|"" ) ;;
-    *) warn "forge.env mode $mode — chmod 600 recommandé" ;;
+    *) warn "forge.env mode $mode — chmod 600 recommended" ;;
   esac
   local line key val
   while IFS= read -r line || [ -n "$line" ]; do
@@ -224,8 +237,20 @@ preflight_cf_mutations() {
     python3 -c 'import json,sys; d=json.load(sys.stdin); [print("  ⚠", w, file=sys.stderr) for w in d.get("warnings",[])]' <<<"$pf_json" || true
     return 0
   fi
-  python3 -c 'import json,sys; d=json.load(sys.stdin); [print("✗", e, file=sys.stderr) for e in d.get("errors",[])]' <<<"$pf_json"
-  die "Cloudflare preflight failed — fix forge.env / credentials before mutating"
+  PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
+    'import json, sys
+from load_config import doctor
+d = json.load(sys.stdin)
+for e in d.get("errors", []):
+    print("✗", e, file=sys.stderr)
+blockers = doctor().get("deploy_blockers") or []
+if blockers:
+    print("  deploy blockers:", ", ".join(blockers), file=sys.stderr)' <<<"$pf_json"
+  echo "  → forge-doctor.sh              # per-blocker fix commands" >&2
+  echo "  → forge-discover.sh --write    # account id / KV id / CF_ACCESS_* from the live account" >&2
+  echo "  → CLOUDFLARE_API_TOKEN goes in ~/.config/silex/forge.env (chmod 600)" >&2
+  echo "  → /forge-setup                 # rebuild the whole local install" >&2
+  die "Cloudflare preflight failed — nothing was mutated"
 }
 
 preflight_before_live() {
@@ -286,11 +311,14 @@ patch_wrangler_for_deploy() {
 deploy_pages() {
   preflight_cf_mutations
   source_cf_credentials
+  # Gate on the *exported* env wrangler will consume, not on the resolved
+  # config: an empty CLOUDFLARE_API_TOKEN makes wrangler fall back to its own
+  # OAuth session, i.e. deploy to whatever account that session owns.
   [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || die \
-    "CLOUDFLARE_API_TOKEN missing — forge-setup (~/.config/silex/forge.env, chmod 600)"
+    "CLOUDFLARE_API_TOKEN not in the publish environment — put it in ~/.config/silex/forge.env (chmod 600), then forge-doctor.sh"
   local acct="${CLOUDFLARE_ACCOUNT_ID:-}"
   [ -n "$acct" ] || die \
-    "CLOUDFLARE_ACCOUNT_ID missing — set in ~/.config/silex/forge.env (see .env.example)"
+    "CLOUDFLARE_ACCOUNT_ID not in the publish environment — add it to ~/.config/silex/forge.env (forge-discover.sh prints it), then forge-doctor.sh"
   local project="${FORGE_PAGES_PROJECT:-silex-forge}"
   export CLOUDFLARE_ACCOUNT_ID="$acct"
   cd "$WORK/repo"
@@ -299,7 +327,7 @@ deploy_pages() {
   patch_wrangler_for_deploy "$WORK/repo/wrangler.toml"
   info "wrangler pages deploy site → ${project} (${acct:0:8}…)"
   local wr_cmd
-  wr_cmd=$(forge_wrangler) || die "wrangler / npx missing"
+  wr_cmd=$(forge_wrangler) || die "wrangler / npx missing — npm i -g wrangler (or install Node so npx wrangler works), then retry"
   # shellcheck disable=SC2086
   $wr_cmd pages deploy site \
     --project-name="$project" \
@@ -346,18 +374,18 @@ PY
 
 resolve_source() {
   local input="$1"
-  [ -e "$input" ] || die "source introuvable: $input"
+  [ -e "$input" ] || die "source not found: $input — pass an existing .html file or a directory containing index.html"
   if [ -f "$input" ]; then
-    case "$input" in *.html|*.htm) ;; *) die "fichier .html attendu" ;; esac
+    case "$input" in *.html|*.htm) ;; *) die "expected a .html file: $input" ;; esac
     STAGE="$WORK/src"
     mkdir -p "$STAGE"
     cp -f "$input" "$STAGE/index.html"
     SRC_DIR="$STAGE"
   elif [ -d "$input" ]; then
-    [ -f "$input/index.html" ] || die "dossier sans index.html"
+    [ -f "$input/index.html" ] || die "directory has no index.html: $input — an artifact directory must contain index.html"
     SRC_DIR="$input"
   else
-    die "source invalide"
+    die "invalid source: $input — expected a .html file or a directory containing index.html"
   fi
 }
 
@@ -793,6 +821,11 @@ cmd_share_only() {
   local slug="$1"
   validate_slug "$slug"
   require_forge_config
+  # Fail before any clone/build/deploy: --share on an unpublished slug used to
+  # redeploy the whole site and only then die on the missing hub artifact.
+  if [ -n "${ARTIFACTS_ROOT:-}" ] && [ ! -f "${ARTIFACTS_ROOT}/${slug}/index.html" ]; then
+    die "hub artifact missing: ${ARTIFACTS_ROOT}/${slug}/index.html — publish the HTML first (publish.sh ${slug} <file.html>), then publish.sh --share ${slug}"
+  fi
   acquire_publish_lock "$slug"
   source_cf_credentials
   preflight_before_live
@@ -856,7 +889,7 @@ cmd_rebuild_index() {
   build_from_hub
   inject_share_bars
   if deploy_pages; then
-    ok "index régénéré + live Pages"
+    ok "index rebuilt + live on Pages"
     hub_index_update
   fi
 }
@@ -872,12 +905,12 @@ cmd_publish() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --share)  do_share=true; shift ;;
-      --public) die "--public et /p/ purgés. Utilise --share." ;;
+      --public) die "--public and /p/ are gone. Use --share." ;;
       --title)  title="${2-}"; shift 2 ;;
       --type)   typ="${2-}"; shift 2 ;;
       --desc)   desc="${2-}"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
-      *) die "option inconnue: $1" ;;
+      *) die "unknown option: $1 — see publish.sh --help" ;;
     esac
   done
   validate_slug "$slug"
@@ -893,7 +926,7 @@ cmd_publish() {
       source="${ARTIFACTS_ROOT}/${slug}"
       info "source hub SSOT: $source"
     else
-      die "path missing and no ${ARTIFACTS_ROOT:-<artifacts>}/${slug}/index.html"
+      die "no source for '${slug}': pass an HTML path (publish.sh ${slug} <file.html>) or write ${ARTIFACTS_ROOT:-<artifacts root>}/${slug}/index.html first"
     fi
   fi
 
