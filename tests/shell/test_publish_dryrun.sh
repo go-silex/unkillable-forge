@@ -206,8 +206,13 @@ on_exit() {
   # so the dump never fired. Assign first, then local is unnecessary.
   st=$?
   if [ "$st" -ne 0 ] && [ -n "${DUMP_ON_EXIT:-}" ] && [ -f "$DUMP_ON_EXIT" ]; then
-    echo "--- captured output ($DUMP_ON_EXIT) ---" >&2
-    cat "$DUMP_ON_EXIT" >&2
+    # Under `cmd > $DUMP_ON_EXIT 2>&1`, this trap inherits the redirect.
+    # `cat` of the file onto itself grew a 333G overlay (2026-09-05).
+    if [ ! "$DUMP_ON_EXIT" -ef /dev/stderr ]; then
+      echo "--- captured output ($DUMP_ON_EXIT) ---" >&2
+      dd if="$DUMP_ON_EXIT" bs=1024 count=16 2>/dev/null >&2
+      echo >&2
+    fi
   fi
   cleanup 2>/dev/null || true
   rm -rf "$TD"

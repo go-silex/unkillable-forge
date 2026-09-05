@@ -83,6 +83,11 @@ assert_grep \
   "publish lock must probe flock rather than requiring it"
 
 assert_grep \
+  'flock -w 0' \
+  "$PUBLISH" \
+  "publish lock must probe GNU flock -w, not just command -v (BusyBox flock is on PATH in the CI bash:3.2 image)"
+
+assert_grep \
   'PUBLISH_LOCK_DIR="\$candidate"' \
   "$PUBLISH" \
   "mkdir lock global must be set only after successful mkdir"
