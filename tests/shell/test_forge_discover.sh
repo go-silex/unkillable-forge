@@ -188,6 +188,13 @@ echo "$OUT" | grep -q 'kv namespace create SHARES' \
   || fail "missing FORGE_SHARES_KV_ID must name the kv namespace create follow-up, got: $OUT"
 pass "half-forged project → exit 0 with a follow-up command for the missing key"
 
+# ── exit 1 · a name Cloudflare Pages would reject never reaches the account ────
+run --project My_Forge.v2
+[ "$RC" -eq 1 ] || fail "a Pages name with uppercase/dots/underscores must exit 1, got $RC: $OUT"
+echo "$OUT" | grep -q 'lowercase' \
+  || fail "invalid name must name the allowed character class, got: $OUT"
+pass "invalid Pages project name → exit 1 before any Cloudflare call"
+
 # ── --write · credentials file ─────────────────────────────────────────────────
 ENVF="$HOME/.config/silex/forge.env"
 mkdir -p "$HOME/.config/silex"
@@ -213,6 +220,17 @@ grep -q "CLOUDFLARE_ACCOUNT_ID=${ACCT}" "$ENVF" \
 grep -q "FORGE_SHARES_KV_ID=${KV_ID}" "$ENVF" \
   || fail "--write did not persist the discovered SHARES KV id"
 pass "--write merges discovered keys and preserves the existing token"
+
+# forge.config.json owns the host and the project name (contract C2): a line
+# for either one in forge.env used to out-rank the config and send the deploy
+# into another Pages project.
+if grep -q '^PUBLIC_HOST=' "$ENVF"; then
+  fail "--write put PUBLIC_HOST in forge.env — forge.config.json owns the host"
+fi
+if grep -q '^FORGE_PAGES_PROJECT=' "$ENVF"; then
+  fail "--write put FORGE_PAGES_PROJECT in forge.env — the config owns it"
+fi
+pass "--write keeps the host and the project name out of forge.env"
 
 if printf '%s\n' "$OUT" | grep -q "$SECRET"; then
   fail "--write echoed a secret value to its output"
@@ -245,11 +263,41 @@ cfg = json.load(open(sys.argv[1], encoding="utf-8"))
 assert cfg.get("pages_project") == "silex-forge", cfg.get("pages_project")
 assert cfg.get("hub_root"), "hub_root dropped"
 assert cfg.get("internal_prefix") == "a", "internal_prefix dropped"
-assert cfg.get("public_host") == "forge.example.com", cfg.get("public_host")
+# Direction of truth is config → Pages, so a Pages [vars] host never travels
+# back: the payload holds forge.example.com, the config must keep its own.
+assert cfg.get("public_host") == "stale.example.com", cfg.get("public_host")
 assert cfg.get("forge_repo", "").startswith("https://"), "forge_repo dropped"
 assert cfg.get("registry_dir") == "registry", "registry_dir dropped"
 PY
 pass "--write updates pages_project in place and preserves every other key"
+
+# ── --write · a symlinked config keeps its link ────────────────────────────────
+# These machines symlink ~/.config/silex/forge.config.json into a synced
+# dotfiles checkout. An atomic rename through the *link* name replaces the link
+# with a regular file and leaves the real config stale forever.
+REAL_DIR="$TD/dotfiles"
+mkdir -p "$REAL_DIR"
+cat > "$REAL_DIR/forge.config.json" <<EOF
+{
+  "version": 1,
+  "hub_root": "$TD/hub",
+  "artifacts_dir": "artifacts",
+  "pages_project": "stale-name"
+}
+EOF
+rm -f "$CFG"
+ln -s "$REAL_DIR/forge.config.json" "$CFG"
+
+run --project silex-forge --write
+[ "$RC" -eq 0 ] || fail "--write on a symlinked config must exit 0, got $RC: $OUT"
+[ -L "$CFG" ] || fail "--write replaced the symlinked config with a regular file"
+python3 - "$REAL_DIR/forge.config.json" <<'PY' || fail "--write did not reach the symlink target"
+import json, sys
+cfg = json.load(open(sys.argv[1], encoding="utf-8"))
+assert cfg.get("pages_project") == "silex-forge", cfg.get("pages_project")
+assert cfg.get("hub_root"), "hub_root dropped"
+PY
+pass "--write follows a symlinked forge.config.json instead of replacing it"
 
 # No local config → discover must not fabricate one (doctor's "no local config"
 # diagnostic and the forge-setup skill own creation).

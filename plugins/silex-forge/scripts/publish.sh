@@ -17,7 +17,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/lib"
 
 _ENV_FORGE_REPO="${FORGE_REPO-}"
-_ENV_PUBLIC_HOST="${PUBLIC_HOST-}"
 _ENV_SHLINK_DOMAIN="${SHLINK_DOMAIN-}"
 
 if [ -f "$LIB_DIR/load_config.py" ] && command -v python3 >/dev/null 2>&1; then
@@ -26,11 +25,17 @@ if [ -f "$LIB_DIR/load_config.py" ] && command -v python3 >/dev/null 2>&1; then
 fi
 
 FORGE_REPO="${_ENV_FORGE_REPO:-${FORGE_REPO:-https://github.com/go-silex/silex-forge.git}}"
-PUBLIC_HOST="${_ENV_PUBLIC_HOST:-${FORGE_PUBLIC_HOST:-${PUBLIC_HOST:-forge.gosilex.com}}}"
 SHLINK_DOMAIN="${_ENV_SHLINK_DOMAIN:-${FORGE_SHLINK_DOMAIN:-${SHLINK_DOMAIN:-s.gosilex.com}}}"
 ARTIFACTS_ROOT="${FORGE_ARTIFACTS_ROOT:-}"
 INTERNAL_PREFIX="${FORGE_INTERNAL_PREFIX:-a}"
-# Export PUBLIC_HOST for forge.env override after load_config
+# forge.config.json is the only source of the host and the Pages project, and
+# both are resolved here — before source_cf_credentials reads forge.env — so a
+# stale credentials file can never redirect the deploy to another project or
+# stamp another host into the deployed [vars]. Point elsewhere with FORGE_CONFIG.
+PUBLIC_HOST="${FORGE_PUBLIC_HOST:-forge.gosilex.com}"
+PAGES_PROJECT="${FORGE_PAGES_PROJECT:-silex-forge}"
+# Exported for patch_wrangler_for_deploy (deployed wrangler.toml [vars]) and for
+# the python helpers that read it — not a user-facing override.
 export PUBLIC_HOST
 
 # shellcheck source=/dev/null
@@ -204,8 +209,12 @@ source_cf_credentials() {
     val="${val%\"}"
     val="${val#\'}"
     val="${val%\'}"
+    # Credentials plus the Access/Shlink Pages vars only. PUBLIC_HOST and
+    # FORGE_PAGES_PROJECT are deliberately absent: forge.config.json owns
+    # them, and a stale forge.env line here used to decide which Pages
+    # project the deploy landed in while the doctor validated the config.
     case "$key" in
-      CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID|CLOUDFLARE_API_KEY|CLOUDFLARE_EMAIL|FORGE_SHARES_KV_ID|CF_ACCESS_TEAM_DOMAIN|CF_ACCESS_AUD|SHLINK_API_URL|PUBLIC_HOST|FORGE_PAGES_PROJECT|SHLINK_DOMAIN)
+      CLOUDFLARE_API_TOKEN|CLOUDFLARE_ACCOUNT_ID|CLOUDFLARE_API_KEY|CLOUDFLARE_EMAIL|FORGE_SHARES_KV_ID|CF_ACCESS_TEAM_DOMAIN|CF_ACCESS_AUD|SHLINK_API_URL|SHLINK_DOMAIN)
         export "$key=$val"
         ;;
     esac
@@ -285,7 +294,8 @@ acquire_publish_lock() {
   PUBLISH_LOCK_DIR="$candidate"
 }
 
-# Patch cloned wrangler.toml: KV id + plain [vars] from forge.env (+ API fallback)
+# Patch cloned wrangler.toml: KV id + Access/Shlink vars from forge.env, host
+# from forge.config.json (+ API fallback for vars absent locally)
 patch_wrangler_for_deploy() {
   local toml="$1"
   local kv="${FORGE_SHARES_KV_ID:-}"
@@ -300,7 +310,7 @@ patch_wrangler_for_deploy() {
   [ -n "$aud" ] || die \
     "CF_ACCESS_AUD missing — set in ~/.config/silex/forge.env (see .env.example)"
   [ -n "$host" ] || die \
-    "PUBLIC_HOST missing — set in forge.config.json or ~/.config/silex/forge.env"
+    "public_host missing — set it in forge.config.json (forge.env no longer holds the host), then retry"
   [ -f "$toml" ] || die "wrangler.toml missing: $toml"
   # --fetch-remote: preserve all Pages plain_text vars; local managed vars override.
   PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
@@ -319,7 +329,8 @@ deploy_pages() {
   local acct="${CLOUDFLARE_ACCOUNT_ID:-}"
   [ -n "$acct" ] || die \
     "CLOUDFLARE_ACCOUNT_ID not in the publish environment — add it to ~/.config/silex/forge.env (forge-discover.sh prints it), then forge-doctor.sh"
-  local project="${FORGE_PAGES_PROJECT:-silex-forge}"
+  # Frozen from the config at startup: never re-read after forge.env is sourced.
+  local project="$PAGES_PROJECT"
   export CLOUDFLARE_ACCOUNT_ID="$acct"
   cd "$WORK/repo"
   [ -d site ] || die "site/ missing in engine clone"
@@ -413,7 +424,9 @@ gen_og_images() {
   local sh
   sh="$(SCRIPTS)/gen-og-images.sh"
   if [ -f "$sh" ]; then
-    if (cd "$WORK/repo" && bash "$sh" "${args[@]}"); then
+    # bash 3.2 + set -u: a bare "${args[@]}" on an empty array is a fatal
+    # expansion error, not an empty list. `${a[@]+"${a[@]}"}` is the 3.2-safe form.
+    if (cd "$WORK/repo" && bash "$sh" ${args[@]+"${args[@]}"}); then
       ok "og thumbs"
     else
       warn "gen-og-images skip/failed (publish continues)"
@@ -447,7 +460,7 @@ inject_og_for_slug() {
     --title "$title" \
     --description "${desc:-$title}" \
     --url "https://${PUBLIC_HOST}${path_url}" \
-    "${img_args[@]}" \
+    ${img_args[@]+"${img_args[@]}"} \
     || die "inject-og failed"
   # write enhanced HTML back to hub SSOT
   if [ -n "${ARTIFACTS_ROOT:-}" ] && [ -d "${ARTIFACTS_ROOT}/${slug}" ]; then
@@ -464,7 +477,7 @@ hub_index_update() {
   [ -d "$reg" ] || return 0
   local hub_args=(--registry "$reg" --host "$PUBLIC_HOST")
   [ -n "$slug" ] && hub_args+=(--slug "$slug")
-  if python3 "$(SCRIPTS)/hub-index.py" "${hub_args[@]}"; then
+  if python3 "$(SCRIPTS)/hub-index.py" ${hub_args[@]+"${hub_args[@]}"}; then
     ok "hub index notes"
   else
     warn "hub-index skip"
@@ -493,7 +506,7 @@ kv_curl() {
   else
     auth=(-H "X-Auth-Email: ${CLOUDFLARE_EMAIL}" -H "X-Auth-Key: ${CLOUDFLARE_API_KEY}")
   fi
-  curl -sS -w '\n%{http_code}' -X "$method" "$url" "${auth[@]}" "$@"
+  curl -sS -w '\n%{http_code}' -X "$method" "$url" ${auth[@]+"${auth[@]}"} "$@"
 }
 
 kv_api_success() {

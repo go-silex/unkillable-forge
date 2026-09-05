@@ -81,7 +81,11 @@ export FORGE_ENV="$ENVF"
 run
 [ "$RC" -eq 0 ] || fail "healthy install must exit 0, got $RC: $OUT $ERR"
 HEALTHY_HUMAN="$OUT$ERR"
-pass "healthy fixture → exit 0"
+# Offline exit 0 proves the values are present, not that they work: the report
+# must hand the operator the live check.
+echo "$OUT" | grep -q -- '--online' \
+  || fail "the exit-0 report must point at the live check (--online), got: $OUT"
+pass "healthy fixture → exit 0, report names the --online live check"
 
 run --json
 [ "$RC" -eq 0 ] || fail "healthy install must exit 0 in --json too, got $RC"
@@ -198,5 +202,94 @@ if echo "$OUT" | grep -q 'No such file or directory'; then
   fail "missing lib/ leaked a raw shell error instead of the diagnostic: $OUT"
 fi
 pass "missing lib/ → exit 1 with a diagnostic, not a crash"
+
+# ── crash safety · a raising load_config must never become a traceback ─────────
+# doctor() reads the config and imports the lib: on a broken install it raises.
+# Every mode is dispatched on (skill, publish.sh, CI), so --json must keep
+# stdout a parseable document, --quiet must keep stderr one line, and no mode
+# may claim ready.
+CRASH="$TD/crash/scripts"
+mkdir -p "$CRASH/lib"
+cp "$DOCTOR" "$CRASH/"
+
+# run_at <script> <args...> → RC, OUT, ERR, ERR_LINES (never aborts).
+run_at() {
+  _script="$1"
+  shift
+  set +e
+  OUT="$("$SH" "$_script" "$@" 2>"$TD/err")"
+  RC=$?
+  set -e
+  ERR="$(cat "$TD/err")"
+  ERR_LINES="$(wc -l < "$TD/err" | tr -d ' ')"
+}
+
+cat > "$CRASH/lib/load_config.py" <<'EOF'
+def doctor():
+    raise RuntimeError("stub: load_config is broken")
+
+
+def doctor_online():
+    raise RuntimeError("stub: load_config is broken")
+EOF
+
+run_at "$CRASH/forge-doctor.sh" --json
+[ "$RC" -eq 1 ] || fail "a raising load_config must exit 1 in --json, got $RC: $OUT $ERR"
+is_json "$OUT" || fail "--json must stay parseable when doctor raises, got: ${OUT}"
+printf '%s' "$OUT" | python3 -c \
+  'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") is False else 1)' \
+  || fail "--json crash document must carry ok:false, got: $OUT"
+echo "$OUT" | grep -q 'load_config.py' \
+  || fail "--json crash document must name load_config.py, got: $OUT"
+case "$OUT" in
+  *Traceback*) fail "--json leaked a traceback on stdout: $OUT" ;;
+esac
+pass "--json: raising load_config → exit 1, parseable ok:false document"
+
+run_at "$CRASH/forge-doctor.sh" --quiet
+[ "$RC" -eq 1 ] || fail "a raising load_config must exit 1 in --quiet, got $RC: $ERR"
+[ -z "$OUT" ] || fail "--quiet must not print to stdout, got: $OUT"
+[ "$ERR_LINES" -eq 1 ] \
+  || fail "--quiet must stay one stderr line when doctor raises, got $ERR_LINES: $ERR"
+echo "$ERR" | grep -q 'load_config.py' \
+  || fail "--quiet crash line must name load_config.py, got: $ERR"
+case "$ERR" in
+  *Traceback*) fail "--quiet leaked a traceback: $ERR" ;;
+esac
+pass "--quiet: raising load_config → exit 1, one stderr line naming load_config.py"
+
+run_at "$CRASH/forge-doctor.sh"
+[ "$RC" -eq 1 ] || fail "a raising load_config must exit 1 in the human report, got $RC"
+printf '%s\n%s\n' "$OUT" "$ERR" | grep -q 'load_config.py' \
+  || fail "the human crash diagnostic must name load_config.py, got: $OUT $ERR"
+pass "human report: raising load_config → exit 1 naming load_config.py"
+
+# An unimportable lib/ (not just a raising call) takes the same path.
+printf 'def doctor(:\n' > "$CRASH/lib/load_config.py"
+run_at "$CRASH/forge-doctor.sh" --json
+[ "$RC" -eq 1 ] || fail "an unimportable lib/ must exit 1 in --json, got $RC: $OUT $ERR"
+is_json "$OUT" || fail "--json must stay parseable on an unimportable lib/, got: ${OUT}"
+pass "--json survives a lib/ that cannot be imported"
+
+run_at "$CRASH/forge-doctor.sh" --quiet
+[ "$RC" -eq 1 ] || fail "an unimportable lib/ must exit 1 in --quiet, got $RC: $ERR"
+[ "$ERR_LINES" -eq 1 ] \
+  || fail "--quiet must stay one stderr line on an unimportable lib/, got $ERR_LINES: $ERR"
+pass "--quiet survives a lib/ that cannot be imported"
+
+# A payload missing deploy_ready must degrade to blocked, never to a silent 0.
+cat > "$CRASH/lib/load_config.py" <<'EOF'
+def doctor():
+    return {"ok": True}
+
+
+def doctor_online():
+    return {"ok": True}
+EOF
+run_at "$CRASH/forge-doctor.sh"
+[ "$RC" -eq 2 ] || fail "a payload without deploy_ready must exit 2, got $RC: $OUT"
+run_at "$CRASH/forge-doctor.sh" --quiet
+[ "$RC" -eq 2 ] || fail "--quiet must exit 2 on a payload without deploy_ready, got $RC"
+pass "a truncated payload degrades to deploy-blocked, never a silent 0"
 
 echo "all forge-doctor behavioral checks passed"

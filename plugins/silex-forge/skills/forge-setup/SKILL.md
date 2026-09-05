@@ -25,8 +25,9 @@ Relative paths like `../silex-hub` are **not** portable → always an **absolute
 path in the local config.
 
 `pages_project` and `public_host` SSOT is `~/.config/silex/forge.config.json`.
-`forge.env` is credentials-only. This skill owns **creation** of the local
-config; `forge-discover.sh --write` may persist `pages_project` into an
+`forge.env` is credentials-only. Two things **create** that config: this skill
+(step 2), and `forge-provision.sh` (its stage 9 writes the host and project it
+prompted for). `forge-discover.sh --write` may persist `pages_project` into an
 **existing** file and never creates it.
 
 ## Exit criteria
@@ -39,10 +40,15 @@ Reached only after the last configuration step (token) and the final
 ✅ hub_root = valid vault per vault_markers
 ✅ $hub_root/$artifacts_dir exists
 ✅ ~/.config/silex/forge.env (discover --write fills account + KV + Access; token still required, chmod 600)
-✅ forge-doctor.sh exit 0 — ready (hub OK AND deploy_ready; with --online, also online_ok)
+✅ forge-doctor.sh --online exit 0 — ready (hub OK AND deploy_ready AND online_ok)
 ⚠️ optional Shlink shortlinks — Pages SHLINK_* + local CLI (step 6b)
 ⚠️ recommended external craft plugins (step 7)
 ```
+
+An offline `forge-doctor.sh` exit 0 is **not** the criterion: it only proves the
+values are filled in. A revoked token or a deleted Pages project still reads as
+ready offline, so `--online` decides — in step 8, and on step 0's exit-`0`
+shortcut.
 
 Missing token is **deploy blocked** (doctor exit 2), not hub KO (exit 1).
 
@@ -114,11 +120,27 @@ Flags: `--json` / `-j`, `--quiet` / `-q`, `--online`, `-h` / `--help`. No others
 
 | Exit | Meaning | Next |
 |---|---|---|
-| `0` | ready (`ok && deploy_ready`) | Print hub + artifacts. Optional step 6b + step 7 if missing. **Stop** unless override requested. |
+| `0` | ready (`ok && deploy_ready`) — **offline** only: every value is filled in, none is proven to work | Run the **live check** below before declaring anything done. |
 | `1` | hub/config KO (`!ok`, or missing `lib/` / `python3`) | Continue **step 1**. Do not invent a path. |
 | `2` | hub OK, deploy blocked (`ok && !deploy_ready`) | Do **not** redo steps 1–4. Follow the `→` lines doctor printed, then **step 5**. |
 
-`--online` is **not** used here (token is step 6; online would fail closed).
+On exit `0` the token is already present (`deploy_ready` requires it), so the
+live check can run now — and must: an offline `0` still says ready with a
+revoked token or a deleted Pages project. Doctor's own last line points here.
+
+```bash
+: "${S:?bind S in the § Step 0 block above first}"
+bash "$S" --online
+```
+
+| `--online` exit | Next |
+|---|---|
+| `0` | Machine is ready. Optional step 6b + step 7 if missing, then **step 8** (report). Skip steps 1–6. |
+| `2` | The live checks failed (rotated token, deleted project, wrong KV id). Quote the `✗` / `→` lines; resume at the named step — **step 5** (discover / provision) or **step 6** (token). Do not claim setup complete. |
+| `1` | Config went KO between the two runs. Continue **step 1**. |
+
+On exit `1` or `2`, `--online` is **not** run here: the token is step 6, so the
+live check would fail closed on a machine that is merely unfinished.
 
 Exit 2 arrow lines (quoted from `forge-doctor.sh`; `${ENV}` = resolved
 `forge.env` path, default `~/.config/silex/forge.env`):
@@ -129,20 +151,21 @@ Exit 2 arrow lines (quoted from `forge-doctor.sh`; `${ENV}` = resolved
 → shares kv: forge-discover.sh --write   (or forge-provision.sh on a new account)
 → access   : add CF_ACCESS_TEAM_DOMAIN to ${ENV}   (forge-discover.sh --write)
 → access   : add CF_ACCESS_AUD to ${ENV}   (forge-discover.sh --write)
-→ host     : set public_host in the local forge.config.json   (run the forge-setup skill)
 → env perms: chmod 600 ${ENV}
 → <unknown-code>: see forge-doctor.sh --json
   once fixed: forge-doctor.sh --online
 ```
 
 `deploy_blockers` codes: `token`, `account_id`, `kv_id`, `CF_ACCESS_TEAM_DOMAIN`,
-`CF_ACCESS_AUD`, `public_host`, `forge_env_permissions`.
+`CF_ACCESS_AUD`, `forge_env_permissions`. An empty `public_host` is a config
+**issue**, not a blocker: it makes doctor exit **1**, so no arrow is printed for
+it — fix it in step 2 / 5a.
 
 On exit 2, after the arrows:
 
 - `forge_env_permissions` → `chmod 600` on that env file, then continue
 - only `token` remaining → skip to **step 6**
-- `public_host` / `account_id` / `kv_id` / Access → **step 5** (do not redo hub)
+- `account_id` / `kv_id` / Access → **step 5** (do not redo hub)
 
 ## Step 1 — Resolve hub_root
 
@@ -205,12 +228,16 @@ chmod 700 ~/.config/silex
 EXAMPLE="$FORGE_ROOT/forge.config.example.json"
 # in-repo: plugins/silex-forge/forge.config.example.json
 LOCAL=~/.config/silex/forge.config.json
-python3 - <<PY
+# Operator input never reaches Python source: quoted <<'PY' + os.environ, the
+# same shape forge-provision.sh stage 9 uses.
+FORGE_LIB="$FORGE_ROOT/scripts/lib" \
+HUB="$HUB" EXAMPLE="$EXAMPLE" LOCAL="$LOCAL" python3 - <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, "$FORGE_ROOT/scripts/lib")
+sys.path.insert(0, os.environ["FORGE_LIB"])
 from load_config import (
     infer_hub_layout,
     pick_forge_repo,
@@ -218,14 +245,14 @@ from load_config import (
     vault_ok,
 )
 
-raw = "$HUB"
+raw = os.environ["HUB"]
 if not raw.startswith("/"):
     print("HUB must be an absolute path (got: %r)" % (raw or "empty"), file=sys.stderr)
     print("→ re-run step 1; propose a candidate then confirm. Never invent a path.", file=sys.stderr)
     sys.exit(1)
 
-example = Path("$EXAMPLE")
-local = Path("$LOCAL")
+example = Path(os.environ["EXAMPLE"])
+local = Path(os.environ["LOCAL"])
 hub = Path(raw).expanduser().resolve()
 
 base = json.loads(example.read_text(encoding="utf-8"))
@@ -315,7 +342,9 @@ fi
 
 Skip if step 0 exited 0 or 2.
 
-Hub only. **No `--online`** (token is still step 6).
+Hub only. **No `--online` here** (token is still step 6, so a live check would
+fail closed on a machine that is merely unfinished). The live check runs in
+**step 8**, and on the exit-`0` shortcut below.
 
 ```bash
 : "${FORGE_ROOT:?run § Shell setup first}"
@@ -324,7 +353,7 @@ bash "$FORGE_ROOT/scripts/forge-doctor.sh"
 
 | Exit | Next |
 |---|---|
-| `0` | Hub + deploy credentials already complete. Skip steps 5–6 unless override. Optional 6b + 7, then **step 8**. |
+| `0` | Hub + deploy credentials already complete — **offline**. Skip steps 5–6 unless override. Optional 6b + 7, then **step 8**, which runs `--online`: nothing is reported ready before that live check passes. |
 | `1` | Hub still KO. **Stop.** Name the issues. Do not invent a path. Operator reruns `/forge-setup`. |
 | `2` | Hub OK, deploy blocked. Continue **step 5**. Follow the `→` lines. |
 
@@ -358,34 +387,47 @@ the Pages project name. Persist them into the **existing** local config
 HOST="<confirmed public host, no https://>"
 PROJECT="<confirmed Pages project name>"
 case "$HOST" in
+  *://*|*/*)
+    echo "public host must be bare — no scheme, no path (got: $HOST)" >&2
+    echo "→ ask the operator for the host (e.g. forge.acme.com)" >&2
+    exit 1
+    ;;
+  ""|*[!a-z0-9.-]*|.*|*.|*..*)
+    echo "public host must be a lowercase hostname — letters, digits, dots, dashes (got: ${HOST:-empty})" >&2
+    echo "→ ask the operator for the host (e.g. forge.acme.com)" >&2
+    exit 1
+    ;;
   *.*) ;;
   *)
-    echo "public host must look like a hostname (got: ${HOST:-empty})" >&2
+    echo "public host must look like a hostname (got: $HOST)" >&2
     echo "→ ask the operator for the host (e.g. forge.acme.com)" >&2
     exit 1
     ;;
 esac
 case "$PROJECT" in
-  ""|*[!A-Za-z0-9._-]*)
+  ""|*[!a-z0-9-]*)
     echo "invalid Pages project name: ${PROJECT:-empty}" >&2
+    echo "→ Cloudflare Pages accepts lowercase letters, digits and dashes only" >&2
     echo "→ ask the operator for the Pages project name" >&2
     exit 1
     ;;
 esac
 LOCAL=~/.config/silex/forge.config.json
-python3 - <<PY
+# Operator input never reaches Python source: quoted <<'PY' + os.environ.
+LOCAL="$LOCAL" HOST="$HOST" PROJECT="$PROJECT" python3 - <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
-local = Path("$LOCAL")
+local = Path(os.environ["LOCAL"])
 if not local.is_file():
     print("no local config — run hub steps first (step 2 writes it)", file=sys.stderr)
     print("→ rerun forge-setup from step 1", file=sys.stderr)
     sys.exit(1)
 base = json.loads(local.read_text(encoding="utf-8"))
-base["public_host"] = "$HOST"
-base["pages_project"] = "$PROJECT"
+base["public_host"] = os.environ["HOST"]
+base["pages_project"] = os.environ["PROJECT"]
 local.write_text(json.dumps(base, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 print("public_host=%s" % base["public_host"])
 print("pages_project=%s" % base["pages_project"])
@@ -423,15 +465,33 @@ Do not dump the JSON in chat. Branch on the exit code (exactly `0` / `1` / `2`):
 | Exit | Meaning | Next |
 |---|---|---|
 | `0` | Forge found, values discovered | `--write` below (keep `--project NAME` if 5a or a retry supplied one), then step 6 for the token only |
-| `1` | wrangler/npx missing **or** not logged in **or** Pages list/download failed | Split on the script's message — see below |
-| `2` | Named project missing on this account | Other Pages names listed → one question, assign `PROJECT=NAME`, retry 5b (`--json --project` then `--write --project`). Empty list → run `forge-provision.sh` (5a). Unparsed list → `PROJECT=NAME`, retry, do not provision. Provision itself lists existing Pages names and asks `[y/N]` before creating a second project. |
+| `1` | **Two different classes** — wrangler/login/tooling, **or** a local config prerequisite | Split on the script's message — see below. Never collapse to `wrangler login`. |
+| `2` | Named project missing, or the list was unreadable | Other Pages names listed → one question, assign `PROJECT=NAME`, retry 5b (`--json --project` then `--write --project`). Empty list → run `forge-provision.sh` (5a). List **unparsed** → the wrangler output was not understood, so nothing is known about what exists: `--project` would re-parse the same unreadable text. Relink/reinstall the plugin (a wrangler version mismatch is the usual cause), check `wrangler pages project list` by hand, then re-run 5b. Do **not** provision, do **not** retry with `--project`. Provision itself lists existing Pages names and asks `[y/N]` before creating a second project. |
 
-Exit `1` — do **not** collapse these into a single `wrangler login`:
+Exit `1`, class A — **tooling / login** (retry this step after fixing):
 
 - `wrangler / npx missing` → install wrangler (`npm i -g wrangler`, or Node.js so `npx` works), then `wrangler login`, retry this step
 - `wrangler not logged in` → `wrangler login`, retry this step
 - `cannot list Pages projects` → `wrangler login` (needs pages scope), retry this step
 - `wrangler pages download config … failed` → tooling/auth; retry after `wrangler login`. Not an exit-2 missing-project.
+- `could not classify the Pages project list` / `could not read the discovery payload` / `could not render the discovery payload` → the plugin's parser failed: relink or reinstall the plugin, then re-run 5b
+
+Exit `1`, class B — **local config / filesystem prerequisite**. `wrangler login`
+is the wrong command here and a bare retry loops: `--json` never touches these
+files, so it keeps exiting `0` while `--write` keeps exiting `1`. Recognise the
+message, fix the file, **then** re-run `--write` (unchanged retries are pointless):
+
+| Message contains | Meaning | Remedy |
+|---|---|---|
+| `is not a JSON object` | `forge.config.json` holds a list/string/number | Make it a JSON object again, or re-run this skill from step 2 to rewrite it |
+| `cannot read` / `could not remember pages_project` | the config is unreadable or invalid JSON | Repair the JSON (or move it aside and re-run step 2), then `forge-discover.sh --write` |
+| `cannot write` | the config's directory or the file is read-only | Fix the permissions on `~/.config/silex` (`chmod 700`) and the file, then `--write` |
+| `cannot create` `<dir>` | `~/.config/silex` cannot be created | `mkdir -p ~/.config/silex && chmod 700 ~/.config/silex`, then `--write` |
+| `could not be chmod 600` | credentials were written but are not private | `chmod 600 ~/.config/silex/forge.env` **now**, then `--write` to verify |
+
+Class B fires **after** `forge.env` was written, so the run is half-applied:
+the credentials are on disk, the project name is not remembered. Do not restart
+at step 1 — fix the named file and re-run `--write`.
 
 On exit `0`:
 
@@ -448,9 +508,12 @@ fi
 and `--write` (last flag wins, the other mode is dropped).
 
 Merges into `~/.config/silex/forge.env` (chmod 600). Prints **key names only**.
-`--write` also persists `pages_project` into an **existing**
-`~/.config/silex/forge.config.json` (never creates that file). After the first
-successful `--write`, later runs need no `--project`.
+`forge.env` holds credentials plus the Access / Shlink Pages vars only — never
+`public_host`, never `pages_project`. `--write` persists the confirmed
+`pages_project` into an **existing** `~/.config/silex/forge.config.json` (never
+creates that file) and never writes `public_host` back from Pages: the config
+is the source, Pages the destination. After the first successful `--write`,
+later runs need no `--project`.
 
 A half-forged project (missing `FORGE_SHARES_KV_ID` or Access vars) still
 exits 0. Each missing key prints `  ! KEY not set on this project` plus a
@@ -465,7 +528,6 @@ not a dashboard-only edit:
 | `FORGE_SHARES_KV_ID` | create the namespace — `wrangler kv namespace create SHARES` — put its id in `FORGE_SHARES_KV_ID` in forge.env, then re-deploy with `publish.sh` (or re-run `forge-provision.sh` on a fresh account) |
 | `CF_ACCESS_TEAM_DOMAIN` | set `CF_ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com` in forge.env, then re-deploy with `publish.sh` |
 | `CF_ACCESS_AUD` | Zero Trust → Access → the login application → copy its AUD into `CF_ACCESS_AUD` in forge.env, then re-deploy with `publish.sh` (Functions fail closed without it) |
-| `PUBLIC_HOST` | set `public_host` in `forge.config.json` (SSOT; not forge.env), then re-deploy with `publish.sh` |
 | `SHLINK_API_URL` | only needed for shortlinks — set `SHLINK_API_URL` in forge.env, then re-deploy with `publish.sh` |
 
 Summary line from the script: `forge-doctor.sh` exits 2 while any of these is
@@ -624,7 +686,10 @@ bash "$FORGE_ROOT/scripts/forge-doctor.sh"
 bash "$FORGE_ROOT/scripts/forge-doctor.sh" --online
 ```
 
-| Exit | Report |
+The verdict is the **`--online`** exit code; the offline run above is only there
+to separate a config problem from a live one.
+
+| `--online` exit | Report |
 |---|---|
 | `0` | Ready. Print the report below. |
 | `1` | Hub/config KO. Do **not** claim setup complete. Name the issues. `→` run this skill from step 1. |
@@ -638,7 +703,7 @@ Report (only on exit 0):
 **config**     : ~/.config/silex/forge.config.json
 **hub_root**   : [path OK]
 **artifacts**  : [path OK | created]
-**doctor**     : exit 0 (ready)
+**doctor**     : exit 0 (`--online` ready)
 
 **Next**
 - Generate: `silex-craft@silex-plugins` → write under $artifacts/<slug>/

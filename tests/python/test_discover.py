@@ -118,8 +118,15 @@ class DiscoveredEnvTests(unittest.TestCase):
         self.assertEqual(d["project"], "silex-forge")
         self.assertEqual(d["values"]["CLOUDFLARE_ACCOUNT_ID"], ACCT)
         self.assertEqual(d["values"]["FORGE_SHARES_KV_ID"], KV_ID)
-        self.assertEqual(d["values"]["PUBLIC_HOST"], "forge.example.com")
+        self.assertEqual(d["values"]["CF_ACCESS_AUD"], "d" * 64)
         self.assertEqual(d["missing"], [])
+
+    def test_never_carries_the_host_back_from_pages(self) -> None:
+        """public_host lives in forge.config.json; the config is pushed *to*
+        Pages at deploy, so a PUBLIC_HOST var must never land in forge.env."""
+        d = discovered_env(CONFIG, WHOAMI, "silex-forge")
+        self.assertNotIn("PUBLIC_HOST", d["values"])
+        self.assertNotIn("PUBLIC_HOST", d["missing"])
 
     def test_never_invents_the_api_token(self) -> None:
         """The token is a secret; discovery must not fabricate or carry one."""

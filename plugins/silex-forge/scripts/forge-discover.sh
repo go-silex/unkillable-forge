@@ -8,7 +8,9 @@
 #
 # --write merges the discovered credentials into ~/.config/silex/forge.env
 # (chmod 600) and remembers pages_project in an *existing*
-# ~/.config/silex/forge.config.json — it never creates that file.
+# ~/.config/silex/forge.config.json — it never creates that file, and it never
+# writes public_host: the config is pushed to Pages at deploy time, never the
+# other way round.
 #
 # Exit: 0 forge found — values may still be missing; every missing one is
 #         reported with the command that fixes it, and forge-doctor.sh keeps
@@ -18,7 +20,8 @@
 #         unparsed → no provision, the wrangler output was not understood)
 #
 # Never discoverable: hub_root (local vault path) and CLOUDFLARE_API_TOKEN
-# (a secret; publish.sh still requires one to deploy).
+# (a secret; publish.sh still requires one to deploy). Never read from Pages
+# either: public_host and pages_project, which forge.config.json owns.
 #
 # bash 3.2-safe.
 set -euo pipefail
@@ -46,7 +49,7 @@ while [ $# -gt 0 ]; do
     --project) PROJECT="${2-}"; [ -n "$PROJECT" ] || die "--project needs a name"; shift 2 ;;
     --json) MODE="json"; shift ;;
     --write) MODE="write"; shift ;;
-    -h|--help) sed -n '2,21p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,24p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -62,8 +65,10 @@ if [ -z "$PROJECT" ]; then
   fi
   PROJECT="${FORGE_PAGES_PROJECT:-silex-forge}"
 fi
+# Cloudflare Pages accepts lowercase letters, digits and dashes only, so a
+# looser check here would persist a name the deploy later rejects.
 case "$PROJECT" in
-  *[!A-Za-z0-9._-]*) die "invalid project name: $PROJECT" ;;
+  ""|*[!a-z0-9-]*) die "invalid Pages project name: $PROJECT — Cloudflare Pages allows lowercase letters, digits and dashes only" ;;
 esac
 
 # Follow-up command for a key the Pages project did not provide. Pages [vars]
@@ -79,8 +84,6 @@ missing_hint() {
       echo "set CF_ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com in ${ENV_PATH}, then re-deploy with publish.sh" ;;
     CF_ACCESS_AUD)
       echo "Zero Trust → Access → the login application → copy its AUD into CF_ACCESS_AUD in ${ENV_PATH}, then re-deploy with publish.sh (Functions fail closed without it)" ;;
-    PUBLIC_HOST)
-      echo "set public_host in ${CONFIG_PATH} (or PUBLIC_HOST in ${ENV_PATH}), then re-deploy with publish.sh" ;;
     SHLINK_API_URL)
       echo "only needed for s.gosilex.com shortlinks — set SHLINK_API_URL in ${ENV_PATH}, then re-deploy with publish.sh" ;;
     *)
@@ -111,8 +114,10 @@ summary_line() {
 # C2: forge.config.json owns pages_project. Persist the confirmed name so the
 # next run needs no --project. Never creates the file — doctor's "no local
 # config" issue must stay meaningful, and the forge-setup skill owns creation.
+# public_host is deliberately not touched: the config is the source pushed to
+# Pages at deploy time, so reading it back from Pages would invert the truth.
 remember_project() {
-  if ! CONFIG_PATH="$CONFIG_PATH" PROJECT="$PROJECT" PAYLOAD="$PAYLOAD" python3 - <<'PY'
+  if ! CONFIG_PATH="$CONFIG_PATH" PROJECT="$PROJECT" python3 - <<'PY'
 import json, os, sys
 from pathlib import Path
 
@@ -130,25 +135,26 @@ if not isinstance(cfg, dict):
     print(f"  ✗ {path} is not a JSON object", file=sys.stderr)
     raise SystemExit(1)
 
-payload = json.load(open(os.environ["PAYLOAD"], encoding="utf-8"))
 changed = []
 if cfg.get("pages_project") != os.environ["PROJECT"]:
     cfg["pages_project"] = os.environ["PROJECT"]
     changed.append("pages_project")
-host = str(payload["values"].get("PUBLIC_HOST", ""))
-# public_host is refreshed only when the config already tracks it.
-if host and "public_host" in cfg and cfg["public_host"] != host:
-    cfg["public_host"] = host
-    changed.append("public_host")
 if not changed:
     print(f"  pages_project already current in {path}")
     raise SystemExit(0)
 
-tmp = path.with_name(path.name + ".forge-discover.tmp")
+# os.replace swaps the *name*, so writing through the given path would turn a
+# symlinked config (a dotfiles checkout, common here) into a regular file and
+# leave the real one stale. Resolve first, then rename inside its own dir.
+try:
+    real = path.resolve()
+except OSError:
+    real = path
+tmp = real.with_name(real.name + ".forge-discover.tmp")
 try:
     tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.chmod(tmp, os.stat(path).st_mode & 0o7777)
-    os.replace(tmp, path)
+    os.chmod(tmp, os.stat(real).st_mode & 0o7777)
+    os.replace(tmp, real)
 except OSError as exc:
     try:
         tmp.unlink()

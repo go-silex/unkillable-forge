@@ -35,10 +35,17 @@ Publish = doctor exit `0` (hub config sound **and** deploy credentials present).
 
 ```
 ~/.config/silex/forge.config.json     # hub_root, pages_project, public_host, vault_markers
-~/.config/silex/forge.env             # CLOUDFLARE_* + FORGE_SHARES_KV_ID + Pages vars (chmod 600)
+~/.config/silex/forge.env             # credentials + CF_ACCESS_* + SHLINK_API_URL (chmod 600)
 .env.example                          # schema reference (committed) — never cp'd onto forge.env
 plugins/.../forge.config.example.json # defaults + code fallback
 ```
+
+`pages_project` and `public_host` live **only** in `forge.config.json`.
+`forge.env` holds credentials plus the Access/Shlink values that ship to Pages
+as plain `[vars]`; it is not read for the host or the project name. The
+direction of truth is config → `wrangler.toml` → Pages (`patch_wrangler.py` at
+deploy), never Pages → config: a `forge.env` that disagreed with the config
+used to decide which Pages project a deploy landed in.
 
 Fill `forge.env` from Cloudflare, never from the example:
 

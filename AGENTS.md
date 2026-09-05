@@ -24,7 +24,9 @@
 | `/s/*` | Bypass + KV key |
 | `/login` | Access Allow team (JWT cookie) |
 
-Bypass host `/` and `/a` **only AFTER** Functions deploy (`x-forge-acl: vis-v4`). Before that: Access Allow on the host. Reverse order = leak. `forge-provision.sh` enforces it — its Bypass stage is unreachable until it has seen that header on the live host; there is no override.
+Bypass host `/` and `/a` **only AFTER** Functions deploy. Before that: Access Allow on the host. Reverse order = leak. `forge-provision.sh` enforces it — its Bypass stage is unreachable until two live probes pass: `GET /` carries `x-forge-acl: vis-v4` (a forge engine is answering, not a static deploy) **and** `GET /a/<slug>/` answers `302` to `/login` (it really fails closed — a `200` there is the leak). There is no override.
+
+Both probes are load-bearing and neither may be loosened: the header value must equal `vis-v4` exactly, and the artifact probe must **not** follow the redirect (`/login` is a public shell and would itself carry the header, so a `-L` turns the fail-closed proof into a tautology). A header-less `302` on `/a/<slug>/` is the normal answer of a correctly enforcing forge — the liveness signal comes from `/`, never from an artifact URL.
 
 ## Visibility (model v4)
 
@@ -97,11 +99,11 @@ site/ # skeleton only (404, _headers, …) — NOT artifact HTML
 | File | Role |
 |---|---|
 | `~/.config/silex/forge.config.json` | local: `hub_root`, `pages_project`, `public_host`, `vault_markers` — **not git** |
-| `~/.config/silex/forge.env` | credentials + Pages plain-var mirror: CF token · account · KV id · `CF_ACCESS_*` · `PUBLIC_HOST` · `SHLINK_API_URL` (chmod 600, dir 700) — **not git** |
+| `~/.config/silex/forge.env` | credentials + the Access/Shlink Pages vars: CF token · account · KV id · `CF_ACCESS_*` · `SHLINK_API_URL` (chmod 600, dir 700) — **not git**, and never `public_host` / `pages_project` |
 | `.env.example` | schema reference for `forge.env` — **never `cp` it onto a real file** |
 | plugin `forge.config.example.json` | defaults + fallback if no local config |
 
-Config keys `pages_project` / `public_host` = SSOT in `forge.config.json`; the `PUBLIC_HOST` line in `forge.env` is only the value `publish.sh` injects into the deployed `wrangler.toml`. `.env.example` ships no host value.
+Config keys `pages_project` / `public_host` = SSOT in `forge.config.json`, with no environment override: `publish.sh` resolves both from the config and only exports `PUBLIC_HOST` internally, to push it into the deployed `wrangler.toml` `[vars]`. `forge.env` cannot set them; `.env.example` ships no host value. Point a run at another forge with `FORGE_CONFIG=<path>`.
 
 ### Set up a machine
 
@@ -118,18 +120,18 @@ plugins/silex-forge/scripts/publish.sh --rebuild-index  # hub → wrangler Pages
 | `forge-discover.sh` exit | Meaning | Next |
 |---|---|---|
 | `0` | forge found (missing project keys are listed with a follow-up command — still `0`) | `--write`, then the token |
-| `1` | wrangler / npx missing, or not logged in | `wrangler login` |
-| `2` | named project absent | other names listed → `--project NAME` · empty account → `forge-provision.sh` · list unparsed → **never provision** |
+| `1` | **two classes.** Tooling/login: wrangler / npx missing, not logged in, Pages list or download failed, parser failure. **Or** a local prerequisite: `forge.config.json` unreadable / not a JSON object / in a read-only dir, or `chmod 600` on `forge.env` failed | Tooling → `wrangler login` (or install wrangler / relink the plugin). Prerequisite → fix or recreate `forge.config.json` (perms, valid JSON object) and `chmod 600` the env file; **not** `wrangler login`, and never a bare retry — `--json` does not touch those files, so it keeps exiting `0` while `--write` keeps exiting `1`. `forge.env` is already written when this fires, so the run is half-applied |
+| `2` | named project absent, or the list was unreadable | other names listed → `--project NAME` · empty account → `forge-provision.sh` · list unparsed → **never provision and never `--project`** (the same output would be re-parsed): relink/reinstall the plugin (wrangler version mismatch), verify `wrangler pages project list` by hand, re-run |
 
 Project-name defaults are two, on purpose: `forge-discover.sh` → `silex-forge` (the Silex forge), `forge-provision.sh` prompt → `[forge]` (never brand a client's project). `forge.config.json`'s `pages_project` overrides both.
 
 | `forge-doctor.sh` exit | Meaning | Next |
 |---|---|---|
-| `0` | ready (`--online`: live CF checks pass too) | publish |
+| `0` | ready — **offline**: every value is present, none is proven to work. `--online` is the live check (a revoked token or a deleted Pages project still exits 0 offline); doctor's last line points there | `--online`, then publish |
 | `1` | hub/config KO (or missing `lib/` / `python3`) | operator runs **`/forge-setup`** |
 | `2` | hub OK, **deploy blocked** (token · account · KV id · Access vars · `forge.env` perms) | run the command doctor names per blocker |
 
-`--json` (payload) and `--quiet` (one stderr line on any non-zero exit) follow the same codes. A missing token is exit `2`, not a hub problem — and never a silent `0`.
+`--json` (payload) and `--quiet` (one stderr line on any non-zero exit) follow the same codes, including a `load_config` crash: `--json` still emits a JSON document (`ok: false` + one `issues[]` line naming `lib/load_config.py`), `--quiet` still one stderr line, both exit `1`. A missing token is exit `2`, not a hub problem — and never a silent `0`. An empty `public_host` is a config **issue** (exit 1), never an exit-2 blocker.
 
 `publish.sh` refuses to deploy while doctor reports `ok: false`: it dies naming `/forge-setup` instead of falling back to the example config. `--share <slug>` verifies the hub artifact exists before any clone or deploy.
 

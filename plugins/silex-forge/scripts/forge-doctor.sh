@@ -47,12 +47,31 @@ done
 [ -d "$LIB_DIR" ] || die "lib missing: $LIB_DIR — reinstall the silex-forge plugin"
 command -v python3 >/dev/null || die "python3 required — install python3 (>= 3.9), then rerun forge-doctor.sh"
 
+# doctor() reads the local config and the lib/; on a broken install it can
+# raise (missing/unreadable config, import failure). Every mode must degrade
+# to a report, never to a traceback: --json keeps stdout a parseable document,
+# --quiet keeps stderr one line. LIB_DIR travels through the environment so it
+# is never interpolated into Python source.
 if [ "$JSON_ONLY" -eq 1 ]; then
-  python3 - <<PY
-import json, sys
-from load_config import doctor, doctor_online
+  FORGE_DOCTOR_LIB="$LIB_DIR" python3 - <<PY
+import json, os, sys
 online = ${ONLINE}
-d = doctor_online() if online else doctor()
+try:
+    from load_config import doctor, doctor_online
+    d = doctor_online() if online else doctor()
+except Exception as exc:
+    lib = os.path.join(os.environ.get("FORGE_DOCTOR_LIB", "lib"), "load_config.py")
+    detail = " ".join(("%s: %s" % (exc.__class__.__name__, exc)).split())
+    print(json.dumps({
+        "ok": False,
+        "deploy_ready": False,
+        "deploy_blockers": [],
+        "issues": [
+            "doctor failed to run (%s) — check %s, then rerun forge-doctor.sh"
+            % (detail, lib)
+        ],
+    }, ensure_ascii=False, indent=2))
+    sys.exit(1)
 print(json.dumps(d, ensure_ascii=False, indent=2))
 if not d.get("ok"):
     sys.exit(1)
@@ -64,11 +83,21 @@ PY
 fi
 
 if [ "$QUIET" -eq 1 ]; then
-  python3 - <<PY
-import sys
-from load_config import doctor, doctor_online
+  FORGE_DOCTOR_LIB="$LIB_DIR" python3 - <<PY
+import os, sys
 online = ${ONLINE}
-d = doctor_online() if online else doctor()
+try:
+    from load_config import doctor, doctor_online
+    d = doctor_online() if online else doctor()
+except Exception as exc:
+    lib = os.path.join(os.environ.get("FORGE_DOCTOR_LIB", "lib"), "load_config.py")
+    detail = " ".join(("%s: %s" % (exc.__class__.__name__, exc)).split())
+    print(
+        "✗ forge doctor: cannot run (%s) — check %s, then rerun forge-doctor.sh"
+        % (detail, lib),
+        file=sys.stderr,
+    )
+    sys.exit(1)
 if not d.get("ok"):
     n = len(d.get("issues") or [])
     print(
@@ -172,6 +201,9 @@ read -r D_OK D_DEPLOY D_ONLINE ENV_PATH <<<"$STATUS_LINE"
 BLOCKERS=${BLOCKER_LINE#blockers:}
 
 # deploy_blockers code → the command that fixes it (load_config.doctor codes).
+# No public_host case on purpose: an empty public_host is also a config issue,
+# so ok is false and the run exits 1 before any hint is printed. The *) arm
+# covers it if that ever decouples.
 blocker_hint() {
   case "$1" in
     token)
@@ -184,8 +216,6 @@ blocker_hint() {
       echo "→ access   : add CF_ACCESS_TEAM_DOMAIN to ${ENV_PATH}   (forge-discover.sh --write)" ;;
     CF_ACCESS_AUD)
       echo "→ access   : add CF_ACCESS_AUD to ${ENV_PATH}   (forge-discover.sh --write)" ;;
-    public_host)
-      echo "→ host     : set public_host in the local forge.config.json   (run the forge-setup skill)" ;;
     forge_env_permissions)
       echo "→ env perms: chmod 600 ${ENV_PATH}" ;;
     *)
@@ -194,6 +224,12 @@ blocker_hint() {
 }
 
 echo "$REPORT"
+
+if [ "$D_OK" -eq 1 ] && [ "$D_DEPLOY" -eq 1 ] && [ "$D_ONLINE" -eq 1 ] && [ "$ONLINE" -eq 0 ]; then
+  # Offline checks only prove the values are filled in: a revoked token or a
+  # deleted Pages project still reads as ready here.
+  echo "  live check: forge-doctor.sh --online   (offline run proves the values are present, not that they work)"
+fi
 
 if [ "$D_OK" -eq 1 ] && { [ "$D_DEPLOY" -eq 0 ] || [ "$D_ONLINE" -eq 0 ]; }; then
   hinted=0
