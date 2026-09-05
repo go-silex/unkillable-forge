@@ -9,6 +9,17 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-09-06
+
+### Fixed
+
+- OG thumbnail regeneration now follows content instead of file mtimes. A hub-only `og.src` binds SHA-256 of the canonical craft HTML to SHA-256 of the exact `og.jpg`; a Drive/zip/`cp -r` transfer that loses mtimes no longer makes 13 of 30 real artifacts appear stale, while an out-of-order Drive sync cannot bless a new HTML against an old JPEG. Cloudflare Pages already deduplicates unchanged files, so avoiding false renders also avoids uploading non-deterministic screenshots of decks with remote fonts, video, or iframes.
+- Share-bar and forge-owned OG blocks are stripped with their exact inverses before hashing. A `share-bar.js` or metadata-only engine update therefore renders 0 thumbnails, while one changed craft renders exactly 1; a new artifact converges on its first publish. `og.src` is never deployed, and a standalone run without a resolvable hub retains the historical mtime fallback.
+
+### Added
+
+- `tests/shell/test_og_staleness.sh` covers first-run migration, unchanged content, destroyed mtimes, engine-only changes, real craft changes, mismatched JPEG bytes, missing thumbnails, and the standalone fallback. Persistence tests also refuse a hub source that changes after the deploy tree was checked. The suite fails when restored to the previous mtime-only implementation.
+
 ## [1.14.1] - 2026-09-05
 
 ### Fixed
@@ -270,7 +281,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 - Cloudflare Pages host for team decks and guides
 - Plugin marketplace manifest (`.claude-plugin/marketplace.json`)
 
-[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.14.1...HEAD
+[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.15.0...HEAD
+[1.15.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.14.1...silex-forge/v1.15.0
 [1.14.1]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.14.0...silex-forge/v1.14.1
 [1.14.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.13.0...silex-forge/v1.14.0
 [1.13.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.12.0...silex-forge/v1.13.0

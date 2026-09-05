@@ -144,6 +144,11 @@ def build(
             # meta.json stays hub-only name; registry is the deploy mirror
             if item.name == "meta.json":
                 continue
+            # og.src binds the canonical source digest to the exact JPEG bytes.
+            # It is hub bookkeeping for gen-og-images.sh, never a served asset:
+            # shipping it would add a file per slug and expose nothing useful.
+            if item.name == "og.src":
+                continue
             target = dest / item.name
             if item.is_dir():
                 if target.exists():
