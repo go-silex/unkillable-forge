@@ -55,13 +55,28 @@ fi
 bash "$FORGE_ROOT/scripts/forge-doctor.sh"
 ```
 
-If **KO** → stop. Ask the operator to run **forge-setup** themselves (`/forge-setup`; Codex `$forge-setup`; OMP `/skill:forge-setup`). Do not invent `hub_root`. Do not invoke forge-setup.
+`forge-doctor.sh` exit codes (product surface; `load_config.py --doctor` stays 0/1):
 
-Publish also needs `~/.config/silex/forge.env` (Pages token + account + KV id).  
-Doctor warns if absent. See repo `.env.example`.
+| Exit | Meaning | Next |
+|---|---|---|
+| `0` | ready (`ok && deploy_ready`) | Continue. |
+| `1` | hub/config KO | **Stop.** Ask the operator to run **forge-setup** themselves (`/forge-setup`; Codex `$forge-setup`; OMP `/skill:forge-setup`). Do not invent `hub_root`. Do not invoke forge-setup. |
+| `2` | hub OK, deploy blocked | **Stop.** Doctor already printed a `→` line per blocker. Ask the operator to run **forge-setup** (it will skip hub steps and go to discover/token). Do not invent `hub_root`. Do not invoke forge-setup. Do not publish. |
+
+Any non-zero doctor exit → stop. Name `/forge-setup`.
+
+`publish.sh` **hard-stops** when hub/config is broken (`doctor()["ok"]` is
+false): it prints `issues[]` and names `/forge-setup`. There is no
+`ARTIFACTS_ROOT` escape hatch — a partial machine cannot deploy to
+`forge.gosilex.com` using the example fallback.
+
+Publish also needs `~/.config/silex/forge.env` (Pages token + account + KV id
++ Access). A missing token is doctor exit 2, not a warning. See repo
+`.env.example` (placeholders only).
 
 Local config: `~/.config/silex/forge.config.json` (fallback plugin
-`forge.config.example.json`).
+`forge.config.example.json`). `pages_project` / `public_host` live in that
+file, not in `forge.env`.
 
 ## Usage
 
