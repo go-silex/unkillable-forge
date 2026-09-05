@@ -30,7 +30,7 @@ Requires [git-filter-repo](https://github.com/newren/git-filter-repo).
 3. Enable [security policy](https://github.com/go-silex/silex-forge/security/policy) and issue templates
 4. Set repo visibility to public
 5. Confirm Pages env vars still set (deploy injects from `forge.env`)
-6. Tag release `v1.7.0` (see [CHANGELOG.md](../CHANGELOG.md))
+6. Tag the release from the top CHANGELOG section (`silex-forge/vX.Y.Z`) — see [CHANGELOG.md](../CHANGELOG.md)
 
 ## Ops credentials (never in git)
 
@@ -39,4 +39,8 @@ Requires [git-filter-repo](https://github.com/newren/git-filter-repo).
 | `~/.config/silex/forge.env` | token, account, KV, Access, `PUBLIC_HOST`, optional `SHLINK_API_URL` |
 | Pages secrets | `SHLINK_API_KEY`, `FORGE_SHARE_SECRET` |
 
-Copy from [`.env.example`](../.env.example).
+Build `forge.env` with `wrangler login` + `forge-discover.sh --write`, not by
+copying [`.env.example`](../.env.example). The example is a schema reference
+(key names and comments, no values); copying it over a working file wipes the
+real credentials. On a fresh Cloudflare account, run
+`plugins/silex-forge/scripts/forge-provision.sh` instead.

@@ -1,4 +1,11 @@
-# Cloudflare Access — forge.gosilex.com
+# Cloudflare Access — Silex team-prod instance
+
+**Scope:** the **Silex** production forge (`forge.gosilex.com`, Pages project
+`silex-forge`). Configuring your own forge? Do not create these apps by hand and
+do not point them at our host — `plugins/silex-forge/scripts/forge-provision.sh`
+creates the same three applications on your account, in the safe order, with
+your host. Client-owned setup notes live in
+[artifacts-config.md](./artifacts-config.md).
 
 ## Goal
 
@@ -13,7 +20,7 @@ Open `/p/` paths are **gone**. External share = keyed `/s/…` only.
 
 ## Apps (Zero Trust)
 
-After Functions are live (`x-forge-acl: vis-v4`):
+After Functions are live and the host actually answers `x-forge-acl: vis-v4`:
 
 | App | Domain path | Policy |
 |---|---|---|
@@ -21,7 +28,11 @@ After Functions are live (`x-forge-acl: vis-v4`):
 | **Silex Forge · public surface** | `forge.gosilex.com/`, `/a/*`, `/s/*`, `/api/*` | **Bypass** everyone (Functions enforce visibility) |
 | **Silex Forge · pages.dev** | `<project>.pages.dev` | Allow team + middleware 403 on every path |
 
-**Order matters:** deploy fail-closed Functions **first**, then flip host Bypass. Bypass before Functions = public leak.
+**Order matters:** deploy fail-closed Functions **first**, verify the header, then flip host Bypass. Bypass before Functions = public leak. `forge-provision.sh` enforces this: its Bypass stage is unreachable until it has observed `x-forge-acl: vis-v4` on the live host — a missing header aborts the wizard, there is no "continue anyway". Configuring by hand, run the check yourself:
+
+```bash
+curl -sI "https://<your-host>/a/<any-slug>/" | grep -i x-forge-acl   # must print vis-v4
+```
 
 | Origin | Catalogue + `/a` | Share `/s` |
 |---|---|---|
@@ -32,6 +43,13 @@ After Functions are live (`x-forge-acl: vis-v4`):
 
 Cloudflare account that owns the zone · zone for your public host.
 
+Order: login app (1) → JWT env in place (4) → deploy the Functions
+(`publish.sh --rebuild-index`) and confirm `x-forge-acl: vis-v4` on the live
+host → Bypass app (2) → `pages.dev` app (3). `publish.sh` injects
+`CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` from `forge.env` at deploy, so step 4
+is really "have those two keys in `forge.env`". `forge-provision.sh` follows the
+same dependency order and refuses to reach the Bypass step without the header.
+
 ### 1. Self-hosted app (login)
 
 1. [Zero Trust](https://one.dash.cloudflare.com/) → **Access** → **Applications** → **Add**
@@ -40,6 +58,8 @@ Cloudflare account that owns the zone · zone for your public host.
 4. Session duration as you prefer
 
 ### 2. Bypass for Functions-gated paths
+
+**Only after** the header check above returns `x-forge-acl: vis-v4`.
 
 Separate app(s) or paths: `/`, `/a/*`, `/s/*`, `/api/*` → policy **Bypass** → everyone.
 
