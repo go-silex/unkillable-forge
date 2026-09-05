@@ -651,16 +651,72 @@ gen_og_images() {
   fi
 }
 
-# gen_og_images writes og.jpg under site/; build_from_hub rebuilds site/<prefix>
-# from the hub and drops anything the hub does not hold. Persist first.
+# gen_og_images writes og.jpg plus a two-hash og.src proof under site/. The
+# proof binds the canonical source HTML to the exact JPEG bytes; it is required
+# before anything is copied back to the hub.
+sha256_file() {
+  python3 - "$1" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+}
+
+# Use the same exact overlay inverses as gen-og-images.sh. This makes a hub
+# source comparable to the deploy HTML that was actually checked/rendered,
+# while keeping share-bar and OG metadata changes outside thumbnail identity.
+canonical_og_source_digest() {
+  local html="$1" tmp="$WORK/.og-source-persist-$$.html"
+  local share_inj="" og_inj="" digest=""
+  og_inj="$(SCRIPTS)/inject-og.py"
+  [ -f "$html" ] && [ -f "$og_inj" ] || return 0
+  if ! share_inj="$(share_bar_script)"; then
+    return 0
+  fi
+  if ! cp -f "$html" "$tmp"; then
+    return 0
+  fi
+  if python3 "$share_inj" "$tmp" --strip >/dev/null 2>&1 \
+      && python3 "$og_inj" "$tmp" --strip >/dev/null 2>&1; then
+    digest="$(sha256_file "$tmp")" || digest=""
+  fi
+  rm -f "$tmp"
+  printf '%s\n' "$digest"
+}
+
 persist_og_to_hub() {
   local slug="$1"
   [ -n "${ARTIFACTS_ROOT:-}" ] || return 0
-  local src="$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/og.jpg"
-  [ -f "$src" ] || return 0
-  [ -d "${ARTIFACTS_ROOT}/${slug}" ] || return 0
-  cp -f "$src" "${ARTIFACTS_ROOT}/${slug}/og.jpg"
+  local dir="$WORK/repo/site/${INTERNAL_PREFIX}/${slug}"
+  local src="$dir/og.jpg" proof="$dir/og.src"
+  local hub_dir="${ARTIFACTS_ROOT}/${slug}"
+  # build_from_hub excludes og.src. Its presence therefore proves that this run
+  # checked the existing source/image pair or completed a render. Missing
+  # Chrome/ffmpeg and failed renders never produce one.
+  [ -f "$src" ] && [ -f "$proof" ] || return 0
+  [ -d "$hub_dir" ] && [ -f "$hub_dir/index.html" ] || return 0
+
+  local proof_source="" proof_image="" hub_source="" deploy_image=""
+  proof_source="$(awk 'NR == 1 {print $1}' "$proof" 2>/dev/null)"
+  proof_image="$(awk 'NR == 1 {print $2}' "$proof" 2>/dev/null)"
+  hub_source="$(canonical_og_source_digest "$hub_dir/index.html")"
+  deploy_image="$(sha256_file "$src")" || deploy_image=""
+  if [ -z "$proof_source" ] || [ -z "$proof_image" ] \
+      || [ "$hub_source" != "$proof_source" ] \
+      || [ "$deploy_image" != "$proof_image" ]; then
+    warn "OG persist skipped for $slug — source/image proof changed while the hub was syncing"
+    return 0
+  fi
+
+  # Copy the image first. If the second copy is interrupted, the old sidecar's
+  # image digest no longer matches and the next publish fails stale rather than
+  # blessing a mixed generation.
+  cp -f "$src" "$hub_dir/og.jpg"
+  cp -f "$proof" "$hub_dir/og.src"
 }
+
 
 inject_og_for_slug() {
   local slug="$1" title="$2" desc="$3" path_url="$4"
@@ -683,9 +739,10 @@ inject_og_for_slug() {
   # bar belongs to the deploy tree only: persisting it turned it into craft
   # input for the next build, and since strip+inject was not an exact inverse
   # the artifact changed content hash on every republish and Cloudflare
-  # re-uploaded a page whose craft content had not moved. og.jpg is already
-  # persisted by persist_og_to_hub — copying it again here would bump the hub
-  # mtime for nothing and make gen-og-images treat the thumbnail as stale.
+  # re-uploaded a page whose craft content had not moved. The image and its
+  # two-hash proof are persisted after this write-back, so the proof can bind
+  # the exact final hub HTML without treating engine-owned metadata as a craft
+  # change on the next publish.
   #
   # The strip MUST come from the same script that injected the bar, so an
   # engine clone predating --strip cannot be substituted with the local
@@ -1263,9 +1320,15 @@ cmd_publish() {
   dest="$WORK/repo/site/${INTERNAL_PREFIX}/${slug}"
   [ -f "$dest/index.html" ] || die "build missing index for $slug"
 
-  gen_og_images "$slug"
-  persist_og_to_hub "$slug"
+  # Finalize the title before hashing/rendering. inject-og may update <title>
+  # outside its own block; doing that afterwards would make the proof describe
+  # the previous source. The forge OG block itself is excluded from identity.
   inject_og_for_slug "$slug" "$title" "$desc" "$path_url"
+  gen_og_images "$slug"
+  # Repeat after generation so a first publish gains og:image. This only changes
+  # the excluded engine-owned block, so the source/image proof remains valid.
+  inject_og_for_slug "$slug" "$title" "$desc" "$path_url"
+  persist_og_to_hub "$slug"
   # Second chance for the published slug: build-site-from-hub only warns when
   # its own inject fails, so this is the one call that must land.
   local publish_inj

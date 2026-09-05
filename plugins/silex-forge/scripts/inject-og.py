@@ -130,15 +130,27 @@ def inject(
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("html_file")
-    ap.add_argument("--title", required=True)
+    ap.add_argument("--title", default="")
     ap.add_argument("--description", default="")
-    ap.add_argument("--url", required=True)
+    ap.add_argument("--url", default="")
     ap.add_argument("--image", default="", help="Absolute og:image URL (optional)")
     ap.add_argument("--indexable", action="store_true", help="allow index (default: noindex)")
+    ap.add_argument(
+        "--strip",
+        action="store_true",
+        help="remove the forge OG block without injecting a replacement",
+    )
     args = ap.parse_args()
     p = Path(args.html_file)
+    content = p.read_text(encoding="utf-8")
+    if args.strip:
+        p.write_text(strip_old_block(content), encoding="utf-8")
+        print(f"stripped OG block → {p}")
+        return 0
+    if not args.title or not args.url:
+        ap.error("--title and --url are required unless --strip is used")
     out = inject(
-        p.read_text(encoding="utf-8"),
+        content,
         title=args.title,
         description=args.description or args.title,
         url=args.url,

@@ -222,6 +222,18 @@ assert_not_grep \
   'GIT[[:space:]]+clone' \
   "$cmd_publish_body" \
   "cmd_publish must not contain a raw GIT clone"
+first_inject_line=$(awk '/inject_og_for_slug "\$slug"/ {print NR; exit}' "$cmd_publish_body")
+last_inject_line=$(awk '/inject_og_for_slug "\$slug"/ {line=NR} END {if (line) print line}' "$cmd_publish_body")
+gen_line=$(awk '/gen_og_images "\$slug"/ {print NR}' "$cmd_publish_body")
+persist_line=$(awk '/persist_og_to_hub "\$slug"/ {print NR}' "$cmd_publish_body")
+[ -n "$first_inject_line" ] && [ -n "$last_inject_line" ] \
+  && [ -n "$gen_line" ] && [ -n "$persist_line" ] \
+  || fail "cmd_publish must inject metadata, generate OG, and persist the bound proof"
+[ "$first_inject_line" -lt "$gen_line" ] \
+  && [ "$gen_line" -lt "$last_inject_line" ] \
+  && [ "$last_inject_line" -lt "$persist_line" ] \
+  || fail "cmd_publish must finalize title before generation and og:image before persistence"
+pass "cmd_publish binds the final craft source and generated image"
 rm -f "$cmd_publish_body"
 pass "cmd_publish does not GIT clone"
 

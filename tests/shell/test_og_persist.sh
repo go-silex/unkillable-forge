@@ -49,14 +49,33 @@ build() { python3 "$BUILD" --repo-root "$WORK/repo" >/dev/null 2>&1; }
 build || fail "initial build_from_hub failed"
 [ -f "$WORK/repo/site/a/new-deck/index.html" ] || fail "build produced no index.html"
 
-# gen_og_images writes the card under site/ only
-printf 'FAKE_OG' > "$WORK/repo/site/a/new-deck/og.jpg"
+DEPLOY_DIR="$WORK/repo/site/a/new-deck"
+DEPLOY_HTML="$DEPLOY_DIR/index.html"
+DEPLOY_OG="$DEPLOY_DIR/og.jpg"
+DEPLOY_SRC="$DEPLOY_DIR/og.src"
 
+# Model gen_og_images: a successful render produces an image plus a proof that
+# binds the canonical deploy source to those exact image bytes.
+printf 'FAKE_OG' > "$DEPLOY_OG"
+SOURCE_DIGEST="$(canonical_og_source_digest "$DEPLOY_HTML")"
+IMAGE_DIGEST="$(sha256_file "$DEPLOY_OG")"
+printf '%s %s\n' "$SOURCE_DIGEST" "$IMAGE_DIGEST" > "$DEPLOY_SRC"
+
+# cmd_publish then injects stable OG metadata and writes it back to the hub.
+# The proof must be rebound to that exact final HTML before persistence.
+inject_og_for_slug new-deck "New" "" "/a/new-deck/"
 persist_og_to_hub new-deck
 
 [ -f "$ARTIFACTS_ROOT/new-deck/og.jpg" ] \
   || fail "og.jpg not persisted to the hub SSOT"
 pass "og.jpg lands in the hub SSOT"
+[ -f "$ARTIFACTS_ROOT/new-deck/og.src" ] \
+  || fail "og.src not persisted to the hub SSOT"
+EXPECTED_SOURCE="$(canonical_og_source_digest "$ARTIFACTS_ROOT/new-deck/index.html")"
+EXPECTED_IMAGE="$(sha256_file "$ARTIFACTS_ROOT/new-deck/og.jpg")"
+[ "$(cat "$ARTIFACTS_ROOT/new-deck/og.src")" = "$EXPECTED_SOURCE $EXPECTED_IMAGE" ] \
+  || fail "og.src does not bind the final hub HTML to the persisted JPEG"
+pass "og.src binds the final hub source and exact image bytes"
 
 build || fail "second build_from_hub failed"
 
@@ -65,6 +84,34 @@ build || fail "second build_from_hub failed"
 [ "$(cat "$WORK/repo/site/a/new-deck/og.jpg")" = "FAKE_OG" ] \
   || fail "og.jpg content not preserved through the rebuild"
 pass "og.jpg survives the rebuild into the deployed tree"
+[ ! -f "$WORK/repo/site/a/new-deck/og.src" ] \
+  || fail "og.src leaked into the deployed tree"
+pass "og.src remains hub-only bookkeeping"
+
+# An existing card without a deploy-tree sidecar means this run did not render
+# it (for example Chrome/ffmpeg was absent or failed). Never create a fresh hub
+# digest in that state: it would bless the old card against the new source.
+rm -f "$ARTIFACTS_ROOT/new-deck/og.src"
+persist_og_to_hub new-deck
+[ ! -f "$ARTIFACTS_ROOT/new-deck/og.src" ] \
+  || fail "persist marked an unrendered thumbnail as fresh"
+pass "no render proof means no new source digest"
+
+# If the hub changes after the deploy tree was checked, the proof describes the
+# old source. Refuse the whole copy rather than clobbering a remotely-synced
+# image and stamping the new HTML as fresh against it.
+CHECKED_SOURCE="$(canonical_og_source_digest "$DEPLOY_HTML")"
+CHECKED_IMAGE="$(sha256_file "$DEPLOY_OG")"
+printf '%s %s\n' "$CHECKED_SOURCE" "$CHECKED_IMAGE" > "$DEPLOY_SRC"
+printf '%s\n' '<html><body>concurrent hub update</body></html>' \
+  > "$ARTIFACTS_ROOT/new-deck/index.html"
+printf 'REMOTE_OG' > "$ARTIFACTS_ROOT/new-deck/og.jpg"
+persist_og_to_hub new-deck
+[ "$(cat "$ARTIFACTS_ROOT/new-deck/og.jpg")" = "REMOTE_OG" ] \
+  || fail "persist clobbered an image after the hub source changed"
+[ ! -f "$ARTIFACTS_ROOT/new-deck/og.src" ] \
+  || fail "persist blessed a mixed source/image generation"
+pass "a concurrent hub source change refuses stale image persistence"
 
 # No og.jpg produced (chrome/ffmpeg missing) must stay a silent no-op.
 rm -f "$WORK/repo/site/a/new-deck/og.jpg" "$ARTIFACTS_ROOT/new-deck/og.jpg"
