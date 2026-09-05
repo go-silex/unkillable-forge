@@ -51,6 +51,7 @@ export -f forge_die
 GIT() { git -c core.hooksPath=/dev/null "$@"; }
 
 WORK=""
+DRY_RUN=false
 PUBLISH_LOCK_FD=""
 PUBLISH_LOCK_DIR=""
 cleanup() {
@@ -97,10 +98,14 @@ sys.exit(1)'); then
 usage() {
   cat <<EOF
 Usage:
-  publish.sh <slug> [path] [--share] [--title T] [--type TYPE] [--desc D]
+  publish.sh <slug> [path] [--share] [--title T] [--type TYPE] [--desc D] [--dry-run]
   publish.sh --share <slug>
   publish.sh --unshare <slug>
   publish.sh --list | --remove <slug> | --rebuild-index
+
+  --dry-run : accepted anywhere in argv, for every command — builds and
+              validates everything (engine, hub snapshot, wrangler.toml)
+              without deploying and without mutating KV.
 
   SSOT   : \$ARTIFACTS_ROOT/<slug>/  (hub, forge.config)
   Deploy : wrangler pages deploy (token ~/.config/silex/forge.env)
@@ -147,6 +152,53 @@ materialize_engine() {
 clone_engine() {
   WORK="$(mktemp -d)"
   materialize_engine
+}
+
+# Dry run: the real hub must come out of the run byte-identical — including the
+# vault notes hub-index.py writes outside the artifacts dir. So the sandbox is
+# a fake *hub root* under $WORK holding a copy of the artifacts subtree only
+# (never a cp -a of the real hub root — that is a full Obsidian vault).
+#
+# The hub root has three independent consumers: this shell (ARTIFACTS_ROOT),
+# build-site-from-hub.py and hub-index.py (both via load_config). The config is
+# the one seam that covers all three plus any future consumer, so the sandbox
+# dumps the *resolved* config with hub_root rewritten and exports FORGE_CONFIG.
+# Every other key is copied verbatim: preflight, patch_wrangler and the
+# project/host resolution behave exactly as in a wet run.
+#
+# Runs after WORK exists and before the first hub write; no-op on the wet path.
+# require_forge_config and preflight_before_live deliberately run *before* it,
+# against the real config, so the gate still validates the real deploy target.
+enter_dry_run_sandbox() {
+  $DRY_RUN || return 0
+  [ -n "${WORK:-}" ] || die "enter_dry_run_sandbox: WORK unset"
+  local root="$WORK/hub-root"
+  mkdir -p "$root" || die "dry run: cannot create hub sandbox $root"
+  local sandbox
+  sandbox=$(FORGE_DRY_RUN_HUB_ROOT="$root" \
+    PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c 'import json, os
+from load_config import load_config
+root = os.environ["FORGE_DRY_RUN_HUB_ROOT"]
+cfg = load_config()
+for k in ("_config_source", "_config_fallback"):
+    cfg.pop(k, None)
+rel = (cfg.get("artifacts_dir") or "artifacts").strip()
+cfg["hub_root"] = root
+cfg["artifacts_dir"] = rel
+os.makedirs(os.path.join(root, rel), exist_ok=True)
+with open(os.path.join(root, "forge.config.json"), "w", encoding="utf-8") as fh:
+    json.dump(cfg, fh, ensure_ascii=False, indent=2)
+    fh.write("\n")
+print(os.path.join(root, rel))') \
+    || die "dry run: cannot write the sandbox config $root/forge.config.json"
+  [ -n "$sandbox" ] || die "dry run: sandbox artifacts dir unresolved"
+  if [ -n "${ARTIFACTS_ROOT:-}" ] && [ -d "$ARTIFACTS_ROOT" ]; then
+    cp -a "$ARTIFACTS_ROOT"/. "$sandbox"/ \
+      || die "dry run: hub snapshot failed ($ARTIFACTS_ROOT → $sandbox)"
+  fi
+  export FORGE_CONFIG="$root/forge.config.json"
+  ARTIFACTS_ROOT="$sandbox"
+  info "dry run — hub sandboxed at $root (real hub untouched)"
 }
 
 SCRIPTS() {
@@ -298,6 +350,8 @@ acquire_publish_lock() {
 # from forge.config.json (+ API fallback for vars absent locally)
 patch_wrangler_for_deploy() {
   local toml="$1"
+  # $2 = --no-fetch-remote: dry run patches from local vars only, so the
+  # validation path needs no network.
   local kv="${FORGE_SHARES_KV_ID:-}"
   local team="${CF_ACCESS_TEAM_DOMAIN:-}"
   local aud="${CF_ACCESS_AUD:-}"
@@ -312,9 +366,36 @@ patch_wrangler_for_deploy() {
   [ -n "$host" ] || die \
     "public_host missing — set it in forge.config.json (forge.env no longer holds the host), then retry"
   [ -f "$toml" ] || die "wrangler.toml missing: $toml"
-  # --fetch-remote: preserve all Pages plain_text vars; local managed vars override.
+  # --fetch-remote: preserve all Pages plain_text vars; local managed vars
+  # override. The wet path must keep it or the deploy wipes the vars that live
+  # only on Pages.
+  if [ "${2-}" = "--no-fetch-remote" ]; then
+    PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+      python3 "$LIB_DIR/patch_wrangler.py" "$toml" "$kv" "$team" "$aud" "$host" "${shlink_url:-}"
+    return
+  fi
   PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
     python3 "$LIB_DIR/patch_wrangler.py" --fetch-remote "$toml" "$kv" "$team" "$aud" "$host" "${shlink_url:-}"
+}
+
+# Dry-run plan: what the wet deploy would push. cwd is $WORK/repo.
+print_deploy_plan() {
+  local project="$1" acct="$2"
+  local files slugs
+  # wc -l pads with spaces on macOS — trim before printing.
+  files=$(find site -type f | wc -l | tr -d '[:space:]')
+  slugs=$(find "site/${INTERNAL_PREFIX}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
+    | wc -l | tr -d '[:space:]')
+  info "dry run — no deploy, no KV mutation"
+  echo "  project : ${project}"
+  echo "  account : ${acct:0:8}…"
+  echo "  host    : ${PUBLIC_HOST}"
+  echo "  branch  : main"
+  echo "  dir     : ${WORK}/repo/site"
+  echo "  files   : ${files}"
+  echo "  slugs   : ${slugs} under /${INTERNAL_PREFIX}/"
+  echo "  wrangler.toml : patched (local vars only; --fetch-remote skipped)"
+  ok "dry run OK — nothing deployed"
 }
 
 # Direct Upload — HTML never touches git
@@ -335,6 +416,13 @@ deploy_pages() {
   cd "$WORK/repo"
   [ -d site ] || die "site/ missing in engine clone"
   [ -f wrangler.toml ] || die "wrangler.toml missing"
+  if $DRY_RUN; then
+    # Every wet precondition has been checked above; a dry run is a gate, not
+    # a preview, so it stops here with the plan and never calls wrangler.
+    patch_wrangler_for_deploy "$WORK/repo/wrangler.toml" --no-fetch-remote
+    print_deploy_plan "$project" "$acct"
+    return 0
+  fi
   patch_wrangler_for_deploy "$WORK/repo/wrangler.toml"
   info "wrangler pages deploy site → ${project} (${acct:0:8}…)"
   local wr_cmd
@@ -581,6 +669,12 @@ kv_wrangler() {
 
 kv_put_value() {
   local key="$1" val="$2"
+  # Last line of defense: the named dry-run paths refuse before reaching this,
+  # so a dry run here is a bug — refuse anyway (no wrangler kv, no HTTP).
+  if $DRY_RUN; then
+    info "dry run — would put KV ${key} (no mutation)" >&2
+    return 0
+  fi
   if kv_auth_ok; then
     local resp body code
     resp=$(kv_curl PUT "/values/${key}" -H "Content-Type: text/plain" --data "$val" 2>/dev/null) || true
@@ -604,6 +698,10 @@ kv_put_value() {
 
 kv_delete_key() {
   local key="$1"
+  if $DRY_RUN; then
+    info "dry run — would delete KV ${key} (no mutation)" >&2
+    return 0
+  fi
   if kv_auth_ok; then
     local resp body code
     resp=$(kv_curl DELETE "/values/${key}" 2>/dev/null) || true
@@ -646,6 +744,10 @@ kv_activate_share() {
 
 kv_revoke_share() {
   local slug="$1"
+  if $DRY_RUN; then
+    info "dry run — would revoke KV share:${slug} + set vis:${slug}=private (no KV mutation)"
+    return 0
+  fi
   kv_set_visibility "$slug" "private" || return 1
   kv_delete_share "$slug" || return 1
 }
@@ -655,6 +757,10 @@ kv_revoke_share() {
 #   2) set vis:private tombstone (kept intentionally — NOT deleted)
 kv_clear_artifact_auth() {
   local slug="$1"
+  if $DRY_RUN; then
+    info "dry run — would clear KV share:${slug} + set vis:${slug}=private (no KV mutation)"
+    return 0
+  fi
   if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ] || [ -z "${FORGE_SHARES_KV_ID:-}" ]; then
     warn "KV credentials missing — cannot clear share/vis for $slug"
     return 1
@@ -676,6 +782,10 @@ mint_key() {
 maybe_shortlink() {
   local long_url="$1" slug="$2"
   local short_slug="f-${slug}"
+  if $DRY_RUN; then
+    info "dry run — would mint shortlink https://${SHLINK_DOMAIN}/${short_slug}" >&2
+    return 1
+  fi
   if ! command -v shlink &>/dev/null; then
     warn "shlink CLI missing — no auto shortlink"
     return 1
@@ -744,6 +854,13 @@ create_share_kv() {
 create_share_after_deploy() {
   local slug="$1"
   local url
+  if $DRY_RUN; then
+    # stdout of this function is the share URL its callers print — the refusal
+    # goes to stderr, and no key is minted, no KV written, no shortlink called.
+    info "dry run — would mint a share key for ${slug} (KV share:${slug} + vis:shared, shortlink https://${SHLINK_DOMAIN}/f-${slug})" >&2
+    printf '%s' "https://${PUBLIC_HOST}/s/${slug}/<dry-run-key>/"
+    return 0
+  fi
   if ! url=$(create_share_kv "$slug"); then
     warn "share KV activation failed after deploy — rolling back"
     kv_revoke_share "$slug" || true
@@ -794,10 +911,15 @@ cmd_remove() {
   source_cf_credentials
   preflight_before_live
   kv_clear_artifact_auth "$slug" || die "KV clear failed for $slug — abort remove (fix credentials and retry)"
-  info "KV cleared for $slug (share + vis)"
-  rm -rf "${ARTIFACTS_ROOT:?}/${slug}"
-  ok "removed from hub SSOT: $slug"
+  $DRY_RUN || info "KV cleared for $slug (share + vis)"
+  if $DRY_RUN; then
+    info "dry run — would remove hub artifact ${ARTIFACTS_ROOT}/${slug}"
+  else
+    rm -rf "${ARTIFACTS_ROOT:?}/${slug}"
+    ok "removed from hub SSOT: $slug"
+  fi
   clone_engine
+  enter_dry_run_sandbox
   build_from_hub
   if deploy_pages; then
     hub_index_update
@@ -812,12 +934,17 @@ cmd_unshare() {
   source_cf_credentials
   preflight_before_live
   if kv_revoke_share "$slug"; then
-    info "KV share:${slug} revoked + vis:private"
+    $DRY_RUN || info "KV share:${slug} revoked + vis:private"
   else
     die "KV revoke failed — share link may still work; fix credentials and retry"
   fi
-  set_hub_shared "$slug" false
+  if $DRY_RUN; then
+    info "dry run — would set hub meta shared=false for ${slug}"
+  else
+    set_hub_shared "$slug" false
+  fi
   clone_engine
+  enter_dry_run_sandbox
   build_from_hub
   local html="$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/index.html"
   if [ -f "$html" ]; then
@@ -843,6 +970,7 @@ cmd_share_only() {
   source_cf_credentials
   preflight_before_live
   clone_engine
+  enter_dry_run_sandbox
   build_from_hub
   local html="$WORK/repo/site/${INTERNAL_PREFIX}/${slug}/index.html"
   if [ -f "$html" ]; then
@@ -891,6 +1019,7 @@ cmd_rebuild_index() {
   source_cf_credentials
   preflight_before_live
   clone_engine
+  enter_dry_run_sandbox
   build_from_hub
   gen_og_images
   # og.jpg is written under site/; persist to the hub before rebuilding
@@ -944,6 +1073,7 @@ cmd_publish() {
   fi
 
   WORK="$(mktemp -d)"
+  enter_dry_run_sandbox
   resolve_source "$source"
   write_source_to_hub "$slug"
 
@@ -995,6 +1125,18 @@ if [ -n "${FORGE_PUBLISH_LIB_ONLY:-}" ]; then
 fi
 source_cf_credentials
 
+# --dry-run is global: accepted anywhere in argv, for every command. Strip it
+# here, before the dispatch, so no per-command parser ever sees it.
+_dry_run_args=()
+for _arg in "$@"; do
+  case "$_arg" in
+    --dry-run) DRY_RUN=true ;;
+    *) _dry_run_args+=("$_arg") ;;
+  esac
+done
+set -- ${_dry_run_args[@]+"${_dry_run_args[@]}"}
+unset _arg _dry_run_args
+
 case "${1-}" in
   ""|-h|--help) usage; exit 0 ;;
   --list) cmd_list ;;
@@ -1011,7 +1153,7 @@ case "${1-}" in
     if [ -n "${2-}" ] && [ -z "${3-}" ]; then
       cmd_share_only "$2"
     else
-      die "usage: --share <slug>   ou   publish.sh <slug> [path] --share"
+      die "usage: --share <slug>   or   publish.sh <slug> [path] --share"
     fi
     ;;
   *)

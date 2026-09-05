@@ -67,9 +67,20 @@ S=plugins/silex-forge/scripts/publish.sh
 "$S" --list
 "$S" --remove my-deck
 "$S" --rebuild-index
+
+"$S" my-deck ./deck.html --dry-run # build + validate, no deploy, no KV
+"$S" --rebuild-index --dry-run
 ```
 
 Deploy: `publish.sh` → `wrangler pages deploy` (token in `~/.config/silex/forge.env`). HTML **not in git**.
+
+`--dry-run` works on every command, anywhere in argv. It runs the whole chain
+— engine materialize, build from hub, og, share-bar inject, `wrangler.toml`
+patch — against a **sandboxed copy of the hub** (`$WORK/hub-root`, with
+`FORGE_CONFIG` redirected so the Python helpers follow), then prints the deploy
+plan instead of deploying. The online preflight still runs: it is a gate, not a
+preview. Nothing is written to the real hub, no KV entry is touched, no
+shortlink is minted.
 
 ## Structure
 

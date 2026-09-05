@@ -265,12 +265,42 @@ S=plugins/silex-forge/scripts/publish.sh
 "$S" --list
 "$S" --remove my-deck
 "$S" --rebuild-index
+
+"$S" my-deck ./deck.html --dry-run                  # build + validate, deploy nothing
+"$S" --rebuild-index --dry-run
 ```
 
 `publish.sh` refuses to run while the local config is broken: it prints the
 doctor issues and names `/forge-setup` rather than deploying with example
 defaults. `--share <slug>` checks the artifact exists in the hub before it
 deploys anything.
+
+### `--dry-run`
+
+Accepted on every command, anywhere in argv. The whole chain runs for real —
+engine materialize, build from the hub, og thumbnails, share-bar injection,
+`wrangler.toml` patch — but against a **sandboxed copy of the hub** under
+`$WORK/hub-root`, with `FORGE_CONFIG` redirected so the Python helpers
+(`build-site-from-hub.py`, `hub-index.py`) follow the same redirect. Instead of
+deploying it prints the plan:
+
+```
+▸ dry run — no deploy, no KV mutation
+  project : silex-forge
+  account : 1a2b3c4d…
+  host    : forge.gosilex.com
+  branch  : main
+  dir     : /tmp/tmp.XXXX/repo/site
+  files   : 214
+  slugs   : 17 under /a/
+  wrangler.toml : patched (local vars only; --fetch-remote skipped)
+✓ dry run OK — nothing deployed
+```
+
+The online preflight still runs, so a dry run is a **gate, not a preview**: it
+exits non-zero on the same missing token, unreachable account or absent Pages
+project that would stop a real deploy. The real hub is never written, no KV
+entry is touched, and no shortlink is minted.
 
 Team URL: `https://forge.gosilex.com/a/<slug>/`  
 Share URL: `https://forge.gosilex.com/s/<slug>/<key>/`
