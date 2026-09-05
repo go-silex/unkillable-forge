@@ -217,11 +217,16 @@ secure_env() {
     || fail "could not restrict $ENV_FILE — it holds your Cloudflare API token and must not stay group/world readable. Run \`chmod 600 $ENV_FILE\`, then re-run this wizard."
 }
 
-# Temp files stay inside the already-700 config dir, and anything a Ctrl-C
-# leaves behind is removed on exit: the banner promises Ctrl-C is safe, and
-# from stage 5 on every write_env copy contains the Cloudflare API token.
+# Temp files stay inside the already-700 config dir. Cleanup runs on EXIT
+# only: an INT/TERM trap that just `rm`s would resume the wizard on bash 3.2
+# after deleting the token-bearing copy — the opposite of "Ctrl-C is safe".
+# Signal traps exit, which fires EXIT, which removes the temps once.
 _TMP_PREFIX="$(dirname "$ENV_FILE")/.forge-provision.tmp"
-trap 'rm -f "$_TMP_PREFIX".*' EXIT HUP INT TERM
+_cleanup_tmp() { rm -f "$_TMP_PREFIX".*; }
+trap '_cleanup_tmp' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 forge_tmp() { mktemp "${_TMP_PREFIX}.XXXXXX"; }
 
 # cfg_read KEY... prints one line per key from forge.config.json — empty when
