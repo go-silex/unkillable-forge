@@ -129,6 +129,14 @@ run_deploy() {
     preflight_cf_mutations() { :; }
     source_cf_credentials() { :; }
     patch_wrangler_for_deploy() { echo "patched: $1" >> "$WRANGLER_REC"; }
+    # snapshot_record runs at the end of a successful deploy and asks the Pages
+    # API for the deployment it just created. With the fake token exported below
+    # that is a real HTTPS request to api.cloudflare.com — measured, it returns
+    # an API "could not route" error rather than failing locally — which breaks
+    # this file's no-network contract and would block for the 20 s _cf_api
+    # timeout per case on a slow or offline link. It is covered by
+    # tests/shell/test_publish_snapshot.sh instead.
+    snapshot_record() { echo "snapshot_record: skipped" >> "$WRANGLER_REC"; }
     export CLOUDFLARE_API_TOKEN="$CASE_TOKEN"
     export CLOUDFLARE_ACCOUNT_ID="$CASE_ACCOUNT"
     # A stale forge.env exports FORGE_PAGES_PROJECT long after startup.
@@ -171,6 +179,15 @@ pass "wrangler runs from \$WORK/repo (site/ resolves to the engine clone)"
 must_rec "account: $ACCOUNT" \
   "CLOUDFLARE_ACCOUNT_ID was not exported into the wrangler environment"
 pass "CLOUDFLARE_ACCOUNT_ID reaches the wrangler environment"
+
+# The no-network contract in this file's header is load-bearing, and it is not
+# self-enforcing: snapshot_record was added to the end of deploy_pages later and
+# silently reached api.cloudflare.com from here. Assert the stub ran, so a
+# future post-deploy hook that needs stubbing fails this suite instead of
+# quietly making live API calls on every run.
+must_rec "snapshot_record: skipped" \
+  "snapshot_record was not stubbed — deploy_pages reached the Pages API from a no-network suite"
+pass "post-deploy hooks stay stubbed (no live API call from this suite)"
 
 case "$(sed -n '1p' "$REC")" in
   patched:*) ;;

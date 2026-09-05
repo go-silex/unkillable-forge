@@ -82,6 +82,43 @@ plan instead of deploying. The online preflight still runs: it is a gate, not a
 preview. Nothing is written to the real hub, no KV entry is touched, no
 shortlink is minted.
 
+## Hub drift guard
+
+Every deploy is a **full** snapshot of the Pages project built from the
+**local** hub, and the hub is a Drive copy shared across the team. A local copy
+that is behind therefore publishes a snapshot that **deletes** the artifacts
+other people added — the live site has no other source of truth, and the
+`.forge-locks` lockfile gives no cross-machine exclusion over Drive.
+
+`preflight_before_live` fingerprints the hub (`lib/snapshot.py`, sha256 per slug
+over sorted relative path + bytes, so digests compare across machines), reads
+the `snapshot:live` KV record written after the last successful deploy, and
+refuses when the deploy would remove a recorded slug. It sits in the preflight,
+not in `deploy_pages`, because `cmd_remove` clears KV and `rm -rf`s the hub
+artifact **before** the deploy — a guard further down would abort after the
+destruction it exists to prevent.
+
+|Situation|Behaviour|
+|---|---|
+|Unexpected removal|**refuses** — pull the hub, or `--allow-removals`|
+|`cmd_remove`'s own slug|passes (`EXPECTED_REMOVALS`)|
+|No record · KV unreadable · compare fails|warns, proceeds (pre-guard behaviour)|
+|Record from another deployment|`untrusted` on stderr, removals still checked|
+
+The record is anchored on `latest_deployment.id`: the Pages API exposes no
+per-file manifest, so the record is our own bookkeeping and would otherwise lie
+after a rollback or a dashboard deploy. The same payload yields the live
+deploy's engine commit (`deployment_trigger.metadata.commit_hash`).
+
+Pages Direct Upload already dedupes by content hash
+(`blake3(base64(content) + extension)`, per project, server-side) — so a deploy
+only uploads what changed. That only holds while the build is byte-stable:
+`share-bar.js` is inlined into every artifact, so `inject-share-bar.py` and
+`inject-og.py` MUST stay idempotent with strip as the exact inverse of inject,
+and the share bar MUST NOT be written back into the hub. `share_bar_script()`
+is the single resolution point (clone first) — two callers resolving it
+differently flip the hash of the whole catalogue.
+
 ## Structure
 
 ```

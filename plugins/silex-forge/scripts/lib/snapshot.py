@@ -1,0 +1,475 @@
+#!/usr/bin/env python3
+"""Fingerprint the local artifact hub and guard a forge deploy against stale-hub deletions.
+
+Why this exists: a forge publish deploys a FULL snapshot of the Pages project,
+built from the LOCAL artifact hub -- a Google Drive copy shared across the team.
+A hub copy that is behind therefore deploys a site missing the artifacts a
+teammate published in the meantime, and Pages replaces the whole site, so those
+artifacts silently disappear from production.
+
+The Cloudflare Pages API exposes no per-file manifest for a deployment (the
+project payload carries `canonical_deployment` / `latest_deployment` and nothing
+that lists files), so we cannot ask Cloudflare what is live. Instead we keep our
+own fingerprint record in the existing KV namespace and anchor its
+trustworthiness on the live deployment id: a record written for a different
+deployment id no longer describes what is live (rollback, or a deploy made
+out of band from the dashboard), so its removal list is advisory only.
+
+Subcommands -- JSON on stdout, human-readable lines on stderr:
+
+  fingerprint      per-slug sha256 of the local hub
+  live-deployment  id + engine commit of the live Pages deployment
+  compare          record vs local hub -> verdict (+ exit 3 on unexpected removals)
+  record           the JSON record to store in KV after a successful deploy
+
+Exit codes: 0 = safe to deploy, 3 = unexpected removals (the caller refuses),
+1 = usage or internal error. `live-deployment` exits 0 even when the lookup
+fails: the caller decides what an unknown live deployment means.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import shlex
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+_LIB = Path(__file__).resolve().parent
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from load_config import (  # noqa: E402
+    _cf_api,
+    artifacts_root,
+    load_config,
+    resolve_api_token,
+    resolved_account_id,
+)
+
+# Sync noise, never part of an artifact's state.
+SKIP_NAMES = frozenset({".DS_Store", "Thumbs.db", "__pycache__"})
+
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_REMOVALS = 3
+
+
+def _say(line: str) -> None:
+    print(line, file=sys.stderr)
+
+
+def _emit(payload: dict[str, Any]) -> None:
+    """One JSON line on stdout -- consumed by publish.sh and by a KV put."""
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+
+def _quoted(path: Path | None) -> str:
+    """Shell-pasteable path for a remedy line, or a placeholder when unresolved."""
+    return shlex.quote(str(path)) if path is not None else "<artifacts-root>"
+
+
+# ---------------------------------------------------------------- fingerprint
+
+
+def slug_dirs(root: Path) -> list[Path]:
+    """Immediate subdirectories holding an index.html, sorted by name.
+
+    Same selection rule as build-site-from-hub.py: a directory without
+    index.html is not deployable, and dotted directories are hub-local
+    (.obsidian, .git, Drive scratch), so neither is part of the snapshot.
+    """
+    out: list[Path] = []
+    for child in sorted(root.iterdir(), key=lambda p: p.name):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        if not (child / "index.html").is_file():
+            continue
+        out.append(child)
+    return out
+
+
+def _slug_files(slug_dir: Path) -> list[tuple[str, Path]]:
+    """(relative posix path, path) for every hashable file under a slug, sorted.
+
+    meta.json is included on purpose: it is part of the artifact's state (title,
+    type, client, share intent), so editing it must change the slug digest even
+    though build-site-from-hub.py copies it into registry/ instead of site/.
+    """
+    out: list[tuple[str, Path]] = []
+    for path in slug_dir.rglob("*"):
+        rel = path.relative_to(slug_dir)
+        if any(part in SKIP_NAMES for part in rel.parts):
+            continue
+        if not path.is_file():
+            continue
+        out.append((rel.as_posix(), path))
+    out.sort(key=lambda item: item[0])
+    return out
+
+
+def slug_digest(slug_dir: Path) -> str:
+    """sha256 over the sorted (relative path, bytes) pairs of the slug.
+
+    The relative path is fed into the digest next to the bytes, so a rename
+    inside an artifact is a change; and because the path is relative to the
+    slug directory, two teammates whose hubs live at different absolute paths
+    compute the same digest for the same content.
+    """
+    h = hashlib.sha256()
+    for rel, path in _slug_files(slug_dir):
+        data = path.read_bytes()
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        h.update(str(len(data)).encode("ascii"))
+        h.update(b"\0")
+        h.update(data)
+    return h.hexdigest()
+
+
+def fingerprint(root: Path) -> dict[str, str]:
+    """{slug: sha256hex} for the whole artifacts root."""
+    return {d.name: slug_digest(d) for d in slug_dirs(root)}
+
+
+def _local_fingerprint() -> tuple[dict[str, str], Path | None, str]:
+    """(slugs, artifacts root, error). Error is non-empty when the root is unusable.
+
+    The root travels with the result so the removal guard can name the exact
+    directory the operator has to re-sync.
+    """
+    try:
+        cfg = load_config()
+    except SystemExit as exc:  # missing packaged defaults
+        return {}, None, f"cannot load config: {exc}"
+    root = artifacts_root(cfg)
+    if root is None:
+        return {}, None, "artifacts root unresolved: set hub_root and artifacts_dir (forge-setup)"
+    if not root.is_dir():
+        return {}, root, f"artifacts root missing: {root} -- forge-setup?"
+    try:
+        return fingerprint(root), root, ""
+    except OSError as exc:
+        return {}, root, f"cannot read artifacts root {root}: {exc}"
+
+
+def cmd_fingerprint(_args: argparse.Namespace) -> int:
+    slugs, _root, err = _local_fingerprint()
+    if err:
+        _say(f"✗ {err}")
+        _emit({"ok": False, "error": err})
+        return EXIT_ERROR
+    _emit({"ok": True, "count": len(slugs), "slugs": slugs})
+    _say(f"fingerprinted {len(slugs)} slug(s)")
+    return EXIT_OK
+
+
+# ------------------------------------------------------------ live deployment
+
+
+def live_deployment(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Live Pages deployment id + engine commit, or a structured failure.
+
+    Never returns or logs the API token.
+    """
+    cfg = cfg or load_config()
+    project = str(cfg.get("pages_project") or "silex-forge")
+    token = resolve_api_token()
+    if not token:
+        return {
+            "ok": False,
+            "error_kind": "auth_missing",
+            "error": "CLOUDFLARE_API_TOKEN missing",
+        }
+    acct = resolved_account_id(cfg)
+    if not acct:
+        return {
+            "ok": False,
+            "error_kind": "auth_missing",
+            "error": "CLOUDFLARE_ACCOUNT_ID missing",
+        }
+    code, data, err = _cf_api(
+        "GET", f"/accounts/{acct}/pages/projects/{project}", token
+    )
+    if code == 0:
+        return {
+            "ok": False,
+            "error_kind": "unreachable",
+            "error": err or "network error",
+        }
+    if code != 200 or not data or not data.get("success"):
+        errors = (data or {}).get("errors") or [{}]
+        first = errors[0] if isinstance(errors[0], dict) else {}
+        return {
+            "ok": False,
+            "error_kind": "api_error",
+            "error": str(first.get("message") or err or f"HTTP {code}"),
+        }
+    latest = (data.get("result") or {}).get("latest_deployment") or {}
+    dep_id = str(latest.get("id") or "")
+    trigger = latest.get("deployment_trigger") or {}
+    meta = trigger.get("metadata") or {}
+    commit = str(meta.get("commit_hash") or "")
+    if not dep_id:
+        return {
+            "ok": False,
+            "error_kind": "no_deployment",
+            "error": f"Pages project {project} has no deployment yet",
+        }
+    return {"ok": True, "deployment_id": dep_id, "engine_commit": commit}
+
+
+def cmd_live_deployment(_args: argparse.Namespace) -> int:
+    result = live_deployment()
+    _emit(result)
+    if result["ok"]:
+        _say(
+            "live deployment {} (engine commit {})".format(
+                result["deployment_id"], result["engine_commit"] or "unset"
+            )
+        )
+    else:
+        _say(
+            "! live deployment unknown ({}): {}".format(
+                result["error_kind"], result["error"]
+            )
+        )
+        _say("! the stale-hub guard cannot anchor its record on a live deployment")
+    # Exit 0 in both cases: whether an unknown live deployment blocks a publish
+    # is the caller's policy, not ours.
+    return EXIT_OK
+
+
+# -------------------------------------------------------------------- compare
+
+
+def parse_expected_removals(raw: str) -> list[str]:
+    """Split a whitespace- or comma-separated slug list, deduplicated and sorted."""
+    return sorted({tok for tok in raw.replace(",", " ").split() if tok})
+
+
+def load_record(spec: str) -> tuple[dict[str, Any], str]:
+    """(record, error). '-' reads stdin; empty content or JSON null is an empty record.
+
+    A missing file is an error, not an empty record: a wrong path would
+    otherwise disable the removal guard without anyone noticing. A KV miss is
+    expressed by piping empty input through '-'.
+    """
+    if spec == "-":
+        raw = sys.stdin.read()
+    else:
+        try:
+            raw = Path(spec).expanduser().read_text(encoding="utf-8")
+        except OSError as exc:
+            return {}, f"cannot read record {spec}: {exc}"
+    text = raw.strip()
+    if not text or text == "null":
+        return {}, ""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return {}, f"record is not valid JSON: {exc}"
+    if data is None:
+        return {}, ""
+    if not isinstance(data, dict):
+        return {}, "record must be a JSON object"
+    return data, ""
+
+
+def compare_record(
+    record: dict[str, Any],
+    local: dict[str, str],
+    live_deployment_id: str,
+    expected_removals: list[str],
+) -> dict[str, Any]:
+    """Classify the local hub against a fingerprint record.
+
+    `ok` mirrors safe-to-deploy: it is false exactly when a removal was not
+    announced by the operator. `verdict` names the strongest concern, and an
+    untrusted record outranks its own removal list in that field -- the
+    removals are still reported, because an out-of-date record plus missing
+    artifacts is the very situation that loses other people's work.
+    """
+    raw_slugs = record.get("slugs")
+    recorded: dict[str, str] = {}
+    if isinstance(raw_slugs, dict):
+        recorded = {str(k): str(v) for k, v in raw_slugs.items()}
+    record_deployment_id = str(record.get("deployment_id") or "")
+
+    removals = sorted(slug for slug in recorded if slug not in local)
+    expected = set(expected_removals)
+    unexpected = [slug for slug in removals if slug not in expected]
+    additions = sorted(slug for slug in local if slug not in recorded)
+    changed = sorted(
+        slug for slug, digest in local.items()
+        if slug in recorded and recorded[slug] != digest
+    )
+
+    if not recorded:
+        verdict = "bootstrap"
+    elif record_deployment_id != live_deployment_id:
+        verdict = "untrusted"
+    elif unexpected:
+        verdict = "removals"
+    elif removals or additions or changed:
+        verdict = "drift"
+    else:
+        verdict = "match"
+
+    return {
+        "ok": not unexpected,
+        "verdict": verdict,
+        "removals": removals,
+        "unexpected_removals": unexpected,
+        "additions": additions,
+        "changed": changed,
+        "record_deployment_id": record_deployment_id,
+        "live_deployment_id": live_deployment_id,
+    }
+
+
+def _narrate(result: dict[str, Any], root: Path | None) -> None:
+    verdict = result["verdict"]
+    if verdict == "bootstrap":
+        _say("no fingerprint record yet -- removal guard skipped (first publish, or KV record absent)")
+    if verdict == "untrusted":
+        _say(
+            "! record describes deployment {} but the live deployment is {}".format(
+                result["record_deployment_id"] or "(none)",
+                result["live_deployment_id"] or "(unknown)",
+            )
+        )
+        _say("! a rollback or an out-of-band dashboard deploy happened: this record no longer describes the live site")
+        _say("! treat its removal list as advisory and check the live site before you overwrite it")
+    if result["removals"]:
+        _say("recorded slug(s) absent from the local hub: " + " ".join(result["removals"]))
+    if result["additions"]:
+        _say("new slug(s): " + " ".join(result["additions"]))
+    if result["changed"]:
+        _say("changed slug(s): " + " ".join(result["changed"]))
+    if verdict == "match":
+        _say("hub matches the record -- nothing added, changed or removed")
+    if result["unexpected_removals"]:
+        _say(
+            "✗ refusing to deploy: {} artifact(s) would be deleted from the live site: {}".format(
+                len(result["unexpected_removals"]),
+                " ".join(result["unexpected_removals"]),
+            )
+        )
+        _say("  the local hub is very likely behind the team copy. Fix it, then publish again:")
+        _say(
+            "    1. pull the shared hub, e.g. rclone copy <drive-remote>:<hub> {}".format(
+                _quoted(root)
+            )
+        )
+        _say("       (or let the Google Drive client finish syncing), then re-run publish")
+        _say("    2. if the deletion is intended, re-run publish with --allow-removals")
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    record, err = load_record(args.record)
+    if err:
+        _say(f"✗ {err}")
+        _emit({"ok": False, "error": err})
+        return EXIT_ERROR
+    local, root, err = _local_fingerprint()
+    if err:
+        _say(f"✗ {err}")
+        _emit({"ok": False, "error": err})
+        return EXIT_ERROR
+    result = compare_record(
+        record,
+        local,
+        args.live_deployment_id,
+        parse_expected_removals(args.expected_removals),
+    )
+    _emit(result)
+    _narrate(result, root)
+    return EXIT_REMOVALS if result["unexpected_removals"] else EXIT_OK
+
+
+# --------------------------------------------------------------------- record
+
+
+def build_record(
+    deployment_id: str, engine_commit: str, by: str, slugs: dict[str, str]
+) -> dict[str, Any]:
+    return {
+        "deployment_id": deployment_id,
+        "engine_commit": engine_commit,
+        "by": by,
+        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "slugs": slugs,
+    }
+
+
+def cmd_record(args: argparse.Namespace) -> int:
+    slugs, _root, err = _local_fingerprint()
+    if err:
+        _say(f"✗ {err}")
+        _emit({"ok": False, "error": err})
+        return EXIT_ERROR
+    _emit(build_record(args.deployment_id, args.engine_commit, args.by, slugs))
+    _say(f"record for deployment {args.deployment_id}: {len(slugs)} slug(s)")
+    return EXIT_OK
+
+
+# ------------------------------------------------------------------------ CLI
+
+
+class _Parser(argparse.ArgumentParser):
+    """argparse exits 2 on a usage error; our callers expect 1."""
+
+    def error(self, message: str) -> None:  # type: ignore[override]
+        _emit({"ok": False, "error": message})
+        self.exit(EXIT_ERROR, f"{self.prog}: {message}\n")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = _Parser(prog="snapshot.py", description=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser(
+        "fingerprint", help="per-slug sha256 of the local artifacts root"
+    ).set_defaults(func=cmd_fingerprint)
+
+    sub.add_parser(
+        "live-deployment", help="id + engine commit of the live Pages deployment"
+    ).set_defaults(func=cmd_live_deployment)
+
+    cmp_ap = sub.add_parser(
+        "compare", help="record vs local hub; exit 3 on unexpected removals"
+    )
+    cmp_ap.add_argument(
+        "--record", required=True, help="record JSON path, or - for stdin"
+    )
+    cmp_ap.add_argument(
+        "--live-deployment-id",
+        default="",
+        help="deployment id the record must match to be trusted",
+    )
+    cmp_ap.add_argument(
+        "--expected-removals",
+        default="",
+        help="slugs the operator knowingly deletes, whitespace-separated",
+    )
+    cmp_ap.set_defaults(func=cmd_compare)
+
+    rec_ap = sub.add_parser("record", help="record JSON for a KV put")
+    rec_ap.add_argument("--deployment-id", required=True)
+    rec_ap.add_argument("--engine-commit", required=True)
+    rec_ap.add_argument("--by", required=True, help="who published")
+    rec_ap.set_defaults(func=cmd_record)
+
+    return ap
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv[1:])
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

@@ -47,5 +47,6 @@ export FORGE_BASH="$BASH"
 "$BASH" tests/shell/test_forge_discover.sh
 "$BASH" tests/shell/test_publish_lock.sh
 "$BASH" tests/shell/test_og_persist.sh
+"$BASH" tests/shell/test_publish_snapshot.sh
 
 echo "os-script-tests OK"

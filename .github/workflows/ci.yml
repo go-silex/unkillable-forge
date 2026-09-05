@@ -47,6 +47,7 @@ jobs:
         run: |
           python3 -m py_compile plugins/silex-forge/scripts/lib/load_config.py
           python3 -m py_compile plugins/silex-forge/scripts/lib/patch_wrangler.py
+          python3 -m py_compile plugins/silex-forge/scripts/lib/snapshot.py
           python3 -m py_compile scripts/check_plugin_versions.py
 
       - name: Shell syntax (test_release_plugin.sh)
