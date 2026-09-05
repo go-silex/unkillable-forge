@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Inject forge share toolbar into an HTML artifact (internal /a/ view).
 
-Mint externe au clic via POST /api/share ; lien interne = /a/<slug>/ (Access).
-Remplace toute injection précédente (évite les barres empilées).
+External link is minted on click via POST /api/share; internal link = /a/<slug>/ (Access).
+Replaces any previous injection (avoids stacked bars).
 """
 from __future__ import annotations
 

@@ -402,7 +402,7 @@ resolve_source() {
 
 write_source_to_hub() {
   local slug="$1"
-  [ -n "${ARTIFACTS_ROOT:-}" ] || die "ARTIFACTS_ROOT vide"
+  [ -n "${ARTIFACTS_ROOT:-}" ] || die "ARTIFACTS_ROOT is empty — set artifacts_dir in ~/.config/silex/forge.config.json, then run forge-doctor.sh"
   local dest="${ARTIFACTS_ROOT}/${slug}"
   mkdir -p "$dest"
   # if source is already the hub dir, skip wipe
