@@ -61,26 +61,32 @@ ACCENT_WORD = re.compile(
 )
 
 # Unambiguously French, plausible in this codebase, and -- critically -- not
-# valid English and not identifiers used here. Words such as `absent`, `index`,
-# `public`, `share`, `private`, `token`, `date`, `local` and `site` are
-# legitimate English or code in this repo (forge-doctor.sh prints
-# "absent (publish KO)"; every .sh uses the `local` keyword) and are therefore
-# deliberately absent from this list. Unaccented spellings are included so
-# transliterated French ("echec", "deja") is caught by this rule even when the
-# accent rule cannot see it.
+# valid English and not identifiers used here.
+#
+# The FR/EN homograph trap is the one that bites: a word being French is not
+# enough, it must not also be English, or this lint fails CI on correct code
+# and blames "French" for it. `absent`, `index`, `public`, `share`, `private`,
+# `token`, `date`, `local` and `site` are legitimate English or code here
+# (forge-doctor.sh prints "absent (publish KO)"; every .sh uses the `local`
+# keyword). `impossible` and `dossier` are English too -- `die "impossible
+# state: ..."` is idiomatic error text -- so they are excluded despite being
+# French words; French sentences using them almost always carry another marker
+# ("impossible de lire le fichier" trips `fichier`). test_known_english_strings
+# pins these exclusions.
+#
+# Unaccented spellings are included so transliterated French ("echec", "deja")
+# is caught by this rule even when the accent rule cannot see it.
 FRENCH_WORDS = (
     "aucun",
     "aucune",
     "bouton",
     "chemin",
     "deja",
-    "dossier",
     "echec",
     "equipe",
     "fichier",
     "genere",
     "generer",
-    "impossible",
     "inconnu",
     "introuvable",
     "lien",
@@ -163,6 +169,33 @@ class LanguageBoundaryTests(unittest.TestCase):
         """Guard against the glob silently matching nothing (moved directory)."""
         self.assertTrue(SCRIPTS.is_dir(), "missing {0}".format(SCRIPTS))
         self.assertGreater(len(scanned_files()), len(ALLOWLIST))
+
+    def test_known_english_strings_are_not_flagged(self) -> None:
+        """Correct English operator output must never trip this lint.
+
+        A false positive here is worse than a miss: it blocks correct work and
+        blames "French" for it, which is how a lint earns itself a bypass.
+        Every line below is idiomatic English error text whose words are also
+        French, or repo identifiers that merely look French. They pin the
+        homograph exclusions documented above FRENCH_WORDS -- re-adding
+        `impossible` or `dossier` to that tuple breaks this test.
+        """
+        english = (
+            'die "impossible state: STAGE set without WORK"',
+            'die "cannot read the dossier at $dest"',
+            'print("  cf token : absent (publish KO)")',
+            '  local project="$PAGES_PROJECT"',
+            'die "no such file: $input"',
+            'info "share link minted for private slug"',
+            'echo "index rebuilt from the public catalogue"',
+        )
+        flagged = []
+        for line in english:
+            for pattern, reason in RULES:
+                hits = [m.group(0) for m in pattern.finditer(line)]
+                if hits:
+                    flagged.append("{0}: {1}: {2}".format(reason, ", ".join(hits), line))
+        self.assertEqual([], flagged, "false positive on correct English:\n" + "\n".join(flagged))
 
 
 if __name__ == "__main__":
