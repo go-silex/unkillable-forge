@@ -9,6 +9,14 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+### Fixed
+
+- Two operator-facing strings in `plugins/silex-forge/scripts/` were still French. `publish.sh` died with `ARTIFACTS_ROOT vide` — untranslated and hintless, where its sibling `die` calls name the fix; it now reads `ARTIFACTS_ROOT is empty` and points at `artifacts_dir` in `forge.config.json` plus `forge-doctor.sh`. The `inject-share-bar.py` module docstring is English on both of its French lines.
+
+### Added
+
+- `tests/python/test_lang_boundary.py`. The repo enforced its bash 3.2 floor mechanically (`test_bash32_lint.sh`) but enforced its language convention by human vigilance, which is how `ARTIFACTS_ROOT vide` survived. The boundary is now written down as `AGENTS.md` rule 12 and checked in the Python tier: everything under `plugins/silex-forge/scripts/` is English — comments and docstrings included, no exemption, because a rule with holes is one nobody can apply — against a three-file allowlist whose French is product content, not operator output: `gen-index.py` (site UI), `hub-index.py` (the note written into the hub vault), `share-bar.js` (the team toolbar). The uniform rule earned itself on the first run: a French docstring line with no accents and no `die` prefix had been missed by manual review.
+
 ## [1.13.0] - 2026-09-05
 
 ### Changed

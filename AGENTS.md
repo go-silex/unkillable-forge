@@ -207,3 +207,4 @@ Writes `site/a/<slug>/og.jpg` (1200×630). Wired in `publish.sh` + `--rebuild-in
 9. Missing forge config → tell the operator to run `/forge-setup` (do not invent hub_root; do not auto-invoke forge-setup)
 10. Artifacts → hub `$artifacts_dir/<slug>/`; live CF ← Direct Upload (not git)
 11. No Cloudflare account / Access AUD / KV namespace IDs in git — `.env.example` placeholders only
+12. `plugins/silex-forge/scripts/` is **English-only** (CLI output, `die`/`info`/`warn`, doctor lines, comments, docstrings); French-by-design allowlist = `gen-index.py` (site UI), `hub-index.py` (vault note), `share-bar.js` (team toolbar) — enforced by `tests/python/test_lang_boundary.py`, so a French string outside the allowlist fails CI
