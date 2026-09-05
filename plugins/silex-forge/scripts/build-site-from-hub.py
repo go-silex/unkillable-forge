@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -153,7 +154,22 @@ def build(
         html_dest = dest / "index.html"
         if html_dest.is_file():
             # Overlay on the deploy tree only — hub remains craft SSOT.
+            #
+            # Restore the hub mtime afterwards. copy2 carried it over, then the
+            # injection rewrote the file and stamped it with "now", which made
+            # index.html newer than the og.jpg copied beside it — so
+            # gen-og-images.sh considered EVERY thumbnail stale and re-rendered
+            # all of them through headless Chrome on every publish (~55 s), even
+            # though no craft content had changed. Some decks animate, so their
+            # capture is not byte-reproducible: those re-renders then uploaded
+            # thumbnails that were only different, never newer. Keeping the hub's
+            # mtime relationship makes staleness mean what it says — the craft
+            # HTML actually changed.
+            src_html = src / "index.html"
+            st = src_html.stat() if src_html.is_file() else None
             _inject_share_bar(html_dest, slug)
+            if st is not None:
+                os.utime(html_dest, ns=(st.st_atime_ns, st.st_mtime_ns))
         reg_path = reg_dir / f"{slug}.json"
         reg_path.write_text(
             json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

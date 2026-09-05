@@ -77,4 +77,39 @@ persist_og_to_hub ghost-slug || fail "persist_og_to_hub must tolerate an unknown
 [ ! -d "$ARTIFACTS_ROOT/ghost-slug" ] || fail "persist created a hub dir for an unknown slug"
 pass "unknown slug does not touch the hub"
 
+# The deploy tree must mirror the hub's mtime relationship. copy2 carries it
+# over, then the share-bar injection rewrites index.html — which used to stamp
+# it with "now", making it newer than the og.jpg beside it. gen-og-images.sh
+# then considered EVERY thumbnail stale and re-rendered all of them through
+# headless Chrome on every publish (~55 s for 30 slugs) with no craft change,
+# and the decks that animate are not byte-reproducible, so those re-renders
+# uploaded thumbnails that were merely different. Measured before the fix:
+# "30 rendered, 0 up-to-date" on two identical runs, with 2 og.jpg changing.
+printf 'HUB_OG' > "$ARTIFACTS_ROOT/new-deck/og.jpg"
+# Make the hub's og.jpg newer than its index.html, i.e. not stale at source.
+touch -t 202601010000 "$ARTIFACTS_ROOT/new-deck/index.html"
+touch -t 202601020000 "$ARTIFACTS_ROOT/new-deck/og.jpg"
+
+build || fail "build_from_hub failed for the mtime case"
+
+DEPLOY_HTML="$WORK/repo/site/a/new-deck/index.html"
+DEPLOY_OG="$WORK/repo/site/a/new-deck/og.jpg"
+[ -f "$DEPLOY_HTML" ] || fail "no deploy-tree index.html"
+[ -f "$DEPLOY_OG" ] || fail "no deploy-tree og.jpg"
+
+grep -qF '<!-- forge-share-bar -->' "$DEPLOY_HTML" \
+  || fail "the bar was not injected — this case only matters after the rewrite"
+
+if [ "$DEPLOY_HTML" -nt "$DEPLOY_OG" ]; then
+  fail "index.html is newer than og.jpg in the deploy tree — gen-og-images would re-render every thumbnail on every publish"
+fi
+pass "share-bar injection preserves the hub mtime (og staleness still means 'craft changed')"
+
+# And the converse must still work: a genuinely newer craft HTML stays stale.
+touch -t 202601030000 "$ARTIFACTS_ROOT/new-deck/index.html"
+build || fail "build_from_hub failed for the genuinely-stale case"
+[ "$DEPLOY_HTML" -nt "$DEPLOY_OG" ] \
+  || fail "a hub index.html newer than its og.jpg must stay stale in the deploy tree"
+pass "a genuinely newer craft HTML is still reported stale"
+
 echo "all og persistence checks passed"
