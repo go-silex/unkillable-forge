@@ -41,6 +41,7 @@ export FORGE_BASH="$BASH"
 "$BASH" tests/shell/test_bash32_lint.sh
 "$BASH" tests/shell/test_publish_contracts.sh
 "$BASH" tests/shell/test_forge_doctor.sh
+"$BASH" tests/shell/test_forge_discover.sh
 "$BASH" tests/shell/test_publish_lock.sh
 "$BASH" tests/shell/test_og_persist.sh
 
