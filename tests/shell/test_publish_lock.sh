@@ -82,3 +82,43 @@ case "$seq" in
 esac
 
 echo "ok  mkdir lock serializes and cleanup removes lockdir"
+
+# BusyBox flock is *present* but has no -w. `command -v flock` is true, then
+# `flock -w 120` errors as "unrecognized option" and used to be reported as a
+# lock timeout. The probe `flock -w 0 /dev/null true` must fail closed onto
+# the mkdir path.
+unset -f command
+mkdir -p "$ART/bin"
+cat > "$ART/bin/flock" <<'SH'
+#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    -w|-w*) echo "flock: unrecognized option: w" >&2; exit 1 ;;
+  esac
+done
+exit 0
+SH
+chmod +x "$ART/bin/flock"
+PATH="$ART/bin:$PATH"
+export PATH
+
+ART2="$(mktemp -d)"
+trap 'cleanup 2>/dev/null || true; rm -rf "$ART" "$ART2"' EXIT
+ARTIFACTS_ROOT="$ART2"
+FORGE_ARTIFACTS_ROOT="$ART2"
+export ARTIFACTS_ROOT FORGE_ARTIFACTS_ROOT
+acquire_publish_lock busybox-demo
+if [ ! -d "$ART2/.forge-locks/busybox-demo.lockdir" ]; then
+  echo "FAIL: BusyBox flock did not fall through to mkdir lockdir" >&2
+  exit 1
+fi
+if [ -f "$ART2/.forge-locks/busybox-demo.lock" ]; then
+  echo "FAIL: BusyBox flock took the util-linux fd path" >&2
+  exit 1
+fi
+cleanup
+if [ -d "$ART2/.forge-locks/busybox-demo.lockdir" ]; then
+  echo "FAIL: lockdir left after cleanup (BusyBox path)" >&2
+  exit 1
+fi
+echo "ok  BusyBox flock (no -w) falls through to mkdir lockdir"

@@ -76,11 +76,18 @@ ACCENT_WORD = re.compile(
 #
 # Unaccented spellings are included so transliterated French ("echec", "deja")
 # is caught by this rule even when the accent rule cannot see it.
+#
+# Connectives matter as much as nouns: `die "usage: --share <slug> ou ..."` was
+# French that no noun in this list could see. `pour` and `sans` are excluded
+# from that group for the homograph reason above -- `pour` is an English verb
+# and `\bsans\b` matches the `sans` in a CSS `sans-serif` declaration.
 FRENCH_WORDS = (
     "aucun",
     "aucune",
+    "avec",
     "bouton",
     "chemin",
+    "dans",
     "deja",
     "echec",
     "equipe",
@@ -92,13 +99,17 @@ FRENCH_WORDS = (
     "lien",
     "manquant",
     "manquante",
+    "ou",
     "partage",
     "partagee",
     "prive",
     "privee",
     "publique",
+    "puis",
+    "selon",
     "veuillez",
     "vide",
+    "voir",
 )
 
 FRENCH_WORD = re.compile(r"\b(?:" + "|".join(FRENCH_WORDS) + r")\b", re.IGNORECASE)
@@ -178,7 +189,8 @@ class LanguageBoundaryTests(unittest.TestCase):
         Every line below is idiomatic English error text whose words are also
         French, or repo identifiers that merely look French. They pin the
         homograph exclusions documented above FRENCH_WORDS -- re-adding
-        `impossible` or `dossier` to that tuple breaks this test.
+        `impossible`, `dossier`, `pour` or `sans` to that tuple breaks this
+        test.
         """
         english = (
             'die "impossible state: STAGE set without WORK"',
@@ -188,6 +200,8 @@ class LanguageBoundaryTests(unittest.TestCase):
             'die "no such file: $input"',
             'info "share link minted for private slug"',
             'echo "index rebuilt from the public catalogue"',
+            'info "pour the resolved config into the deploy tree"',
+            'echo "  font-family: system-ui, sans-serif;"',
         )
         flagged = []
         for line in english:
