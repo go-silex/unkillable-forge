@@ -1122,11 +1122,14 @@ kv_get_key() {
   # `wrangler whoami` and `wrangler kv namespace list` before the read itself
   # — three wrangler invocations for one rehearsed read — and forge_wrangler
   # resolves to `npx --yes wrangler` when no global wrangler is installed, so
-  # the rehearsal can go fetch a package from npm. Any of them can drop into
-  # an interactive OAuth flow and hang a run that is supposed to be cheap and
-  # predictable. A dry run therefore keeps the REST classification, and
-  # snapshot_guard reports it WITHOUT claiming a verdict: it says the read was
-  # denied over REST and that a real publish retries through wrangler OAuth.
+  # the rehearsal goes through npm: measured at ~8 s per invocation on a
+  # machine with no global binary. It does not hang (a logged-out
+  # `wrangler whoami` prints "You are not authenticated" and never opens a
+  # browser — verified), it is simply a cost with no payoff: the fallback can
+  # only tell the dry run what snapshot_guard already says without it. So a
+  # dry run keeps the REST classification and reports it WITHOUT claiming a
+  # verdict: the read was denied over REST, and a real publish retries it
+  # through wrangler OAuth.
   if $DRY_RUN; then
     return 1
   fi

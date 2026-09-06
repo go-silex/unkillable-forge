@@ -181,14 +181,18 @@ failed"*. `--allow-unverified` is still required; the operator is told the real
 cause instead of being sent to refresh a hub that is fine.
 
 Under `--dry-run` the fallback is deliberately **not** attempted: `kv_wrangler`
-spawns `wrangler whoami` and `wrangler kv namespace list` before the read,
+spawns `wrangler whoami` and `wrangler kv namespace list` before the read, and
 `forge_wrangler` resolves to `npx --yes wrangler` when no global wrangler
-exists, and either can drop into an interactive OAuth flow and hang a
-rehearsal. So a REST-denied read makes the dry run say what it actually knows
-— the read was denied over REST, a real publish retries it through wrangler
-OAuth — and decline to predict the verdict, instead of printing a
-`would refuse` a real publish would not honour. Every other unverifiable
-reason keeps its `would refuse …` line.
+exists — three npm-routed invocations, measured at ~8 s each, for one
+rehearsed read. It does not hang (a logged-out `wrangler whoami` prints *"You
+are not authenticated"* and never opens a browser — verified), it just buys
+nothing: the fallback can only confirm what the message already states. So a
+REST-denied read makes the dry run say what it actually knows — the read was
+denied over REST, a real publish retries it through wrangler OAuth — and
+decline to predict the verdict, instead of printing a `would refuse` a real
+publish would not honour. Every other unverifiable reason keeps its
+`would refuse …` line. The dry-run suite pins the boundary: zero wrangler
+invocations, in either recording log.
 
 **Recovery from a lost record: `publish.sh --reanchor-snapshot`.**
 `snapshot_record` is best-effort, so one refused KV write after a successful
