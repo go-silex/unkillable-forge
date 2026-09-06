@@ -13,7 +13,8 @@ that lists files), so we cannot ask Cloudflare what is live. Instead we keep our
 own fingerprint record in the existing KV namespace and anchor its
 trustworthiness on the live deployment id: a record written for a different
 deployment id no longer describes what is live (rollback, or a deploy made
-out of band from the dashboard), so its removal list is advisory only.
+out of band from the dashboard), so compare refuses (exit 4) until
+`--allow-unverified`. Unexpected removals still outrank that (exit 3).
 
 Subcommands -- JSON on stdout, human-readable lines on stderr:
 
