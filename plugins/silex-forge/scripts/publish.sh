@@ -62,15 +62,18 @@ ALLOW_REMOVALS=false
 ALLOW_UNVERIFIED=false
 SNAPSHOT_KV_KEY="snapshot:live"
 # The guard runs in the preflight; the upload happens minutes later (engine
-# clone, OG rendering). deploy_pages re-asserts both of these immediately
+# clone, OG rendering). deploy_pages re-asserts all three of these immediately
 # before wrangler: PASSED makes "no deploy without the guard" machine-checked
 # instead of a convention across five call sites, and LIVE_ID catches a
 # teammate who deployed inside that window (no flock serializes two machines
-# that each hold their own copy of the shared hub). LIVE_ID is empty when the
-# live deployment is unknown, when the project has none, or when the guard was
-# skipped.
+# that each hold their own copy of the shared hub). LIVE_ID is empty in three
+# different situations and LIVE_UNKNOWN is what tells them apart: a project
+# whose deployment list is confirmed empty is a real observation (live moving
+# off it is a provable race), while a failed lookup and a skipped guard
+# observed nothing at all, so no id can be compared against them.
 SNAPSHOT_GUARD_PASSED=false
 SNAPSHOT_GUARD_LIVE_ID=""
+SNAPSHOT_GUARD_LIVE_UNKNOWN=false
 # Outcome of the last kv_get_key: ok | miss | denied | error. A denied read is
 # not a missing record — telling the operator their hub is stale when the token
 # simply cannot read KV refuses every publish forever, for the wrong reason.
@@ -447,11 +450,15 @@ sys.stdout.write(str(d.get("error_kind") or ""))' 2>/dev/null) || live_kind=""
 }
 
 # Arm what deploy_pages re-asserts immediately before the upload. $1 = the live
-# deployment id this decision was made against — empty when the live state is
-# unknown, when the project has no deployment, or when the guard was skipped.
+# deployment id this decision was made against, $2 = whether the live state was
+# UNKNOWN when the decision was taken ("true" / "false"). Both facts, never the
+# id alone: an empty id means "this project verifiably has no deployment" on
+# one path and "live could not be read" on another, and only the first turns a
+# later non-empty live state into a provable race.
 snapshot_guard_pass() {
   SNAPSHOT_GUARD_PASSED=true
   SNAPSHOT_GUARD_LIVE_ID="${1-}"
+  SNAPSHOT_GUARD_LIVE_UNKNOWN="${2-false}"
 }
 
 snapshot_guard() {
@@ -460,12 +467,21 @@ snapshot_guard() {
   local live_id=""
   SNAPSHOT_GUARD_PASSED=false
   SNAPSHOT_GUARD_LIVE_ID=""
+  SNAPSHOT_GUARD_LIVE_UNKNOWN=false
+  # Nothing observed yet. The snapshot.py-missing branch below never reaches
+  # resolve_live_deployment and falls through to the shared unverified
+  # handling, which arms the sentinels from these two: "unknown" is the only
+  # honest starting value, and re-setting them here keeps a previous call in
+  # the same process from lending it a live state it never looked at.
+  LIVE_RESOLVED_ID=""
+  LIVE_RESOLVED_UNKNOWN=true
   if [ -z "${ARTIFACTS_ROOT:-}" ]; then
     # Returning silently here was indistinguishable from a clean pass in the
     # logs. build_from_hub dies later (build-site-from-hub.py resolves the
     # artifacts root itself), but the skip is named where it happens.
     warn "hub drift guard skipped — artifacts root unresolved, so there is no local hub to compare against the live site"
-    snapshot_guard_pass ""
+    # Unknown, not known-empty: this path never looked at live at all.
+    snapshot_guard_pass "" true
     return 0
   fi
 
@@ -524,7 +540,7 @@ print("true" if d.get("verifiable") is True else "false")' 2>/dev/null) || verif
     [ -n "$verifiable" ] || verifiable="false"
     case "$rc" in
       0)
-        snapshot_guard_pass "$live_id"
+        snapshot_guard_pass "$live_id" "$LIVE_RESOLVED_UNKNOWN"
         return 0
         ;;
       3)
@@ -534,7 +550,7 @@ print("true" if d.get("verifiable") is True else "false")' 2>/dev/null) || verif
           else
             warn "hub drift: removing live artifacts because --allow-removals was passed, and accepting an unanchored record because --allow-unverified was passed — the record no longer describes the live site, so live artifacts it never listed can be deleted without being named"
           fi
-          snapshot_guard_pass "$live_id"
+          snapshot_guard_pass "$live_id" "$LIVE_RESOLVED_UNKNOWN"
           return 0
         fi
         if $ALLOW_REMOVALS; then
@@ -557,7 +573,7 @@ print("true" if d.get("verifiable") is True else "false")' 2>/dev/null) || verif
     else
       warn "hub drift unverified — proceeding because --allow-unverified was passed"
     fi
-    snapshot_guard_pass "$live_id"
+    snapshot_guard_pass "$live_id" "$LIVE_RESOLVED_UNKNOWN"
     return 0
   fi
   if $DRY_RUN; then
@@ -566,7 +582,7 @@ print("true" if d.get("verifiable") is True else "false")' 2>/dev/null) || verif
     else
       warn "would refuse: hub drift unverified — a real deploy needs a synced hub or --allow-unverified"
     fi
-    snapshot_guard_pass "$live_id"
+    snapshot_guard_pass "$live_id" "$LIVE_RESOLVED_UNKNOWN"
     return 0
   fi
   if [ -n "$unverified_reason" ]; then
@@ -737,17 +753,35 @@ deploy_pages() {
   # of the shared hub never contend. Without this, a teammate deploying inside
   # that window has their artifact deleted by this older snapshot, and
   # snapshot_record then re-baselines the loss.
+  #
+  # An empty SNAPSHOT_GUARD_LIVE_ID is NOT automatically "unknown", which is
+  # why the guard reports the two separately: a Pages project whose deployment
+  # list was confirmed empty (bootstrap) is a real observation, so live turning
+  # into a deployment id since then IS a teammate's deploy and must refuse. A
+  # guard that never saw live is the opposite case — comparing its empty id
+  # against a live id proves nothing, and claiming "someone else deployed"
+  # there is a fabricated accusation that no flag could override.
   [ "${SNAPSHOT_GUARD_PASSED:-false}" = true ] || die \
     "internal error — deploy reached wrangler without snapshot_guard: every deploy_pages caller must run preflight_before_live first"
-  resolve_live_deployment
-  if $LIVE_RESOLVED_UNKNOWN; then
+  if [ "${SNAPSHOT_GUARD_LIVE_UNKNOWN:-false}" = true ]; then
+    # Nothing to compare against: re-resolving live cannot tell a deploy inside
+    # the window from the state the guard already could not see.
     if $ALLOW_UNVERIFIED; then
-      warn "hub drift unverified — the live deployment could not be re-checked before the upload; proceeding because --allow-unverified was passed"
+      warn "hub drift unverified — the guard never observed the live deployment, so a deploy inside this window cannot be ruled out; proceeding because --allow-unverified was passed"
     else
-      die "hub drift unverified — the live deployment could not be re-checked immediately before the upload (the guard saw '${SNAPSHOT_GUARD_LIVE_ID:-<none>}'), so a deploy inside this window cannot be ruled out. Re-run when the Pages API answers; or pass --allow-unverified to deploy anyway"
+      die "hub drift unverified — the hub drift guard could not see the live deployment when it ran, so there is no id to compare the current live state against and a deploy inside this window cannot be ruled out. Re-run when the Pages API answers (and with a resolved artifacts root); or pass --allow-unverified to deploy anyway"
     fi
-  elif [ "$LIVE_RESOLVED_ID" != "$SNAPSHOT_GUARD_LIVE_ID" ]; then
-    die "hub drift — the live deployment changed while this publish was building (the guard checked '${SNAPSHOT_GUARD_LIVE_ID:-<none>}', live is now '${LIVE_RESOLVED_ID:-<none>}'): someone else deployed, so this snapshot no longer describes the live site and would delete their artifacts. Refresh this machine's copy of the shared artifacts directory, then re-run"
+  else
+    resolve_live_deployment
+    if $LIVE_RESOLVED_UNKNOWN; then
+      if $ALLOW_UNVERIFIED; then
+        warn "hub drift unverified — the live deployment could not be re-checked before the upload; proceeding because --allow-unverified was passed"
+      else
+        die "hub drift unverified — the live deployment could not be re-checked immediately before the upload (the guard saw '${SNAPSHOT_GUARD_LIVE_ID:-<none>}'), so a deploy inside this window cannot be ruled out. Re-run when the Pages API answers; or pass --allow-unverified to deploy anyway"
+      fi
+    elif [ "$LIVE_RESOLVED_ID" != "$SNAPSHOT_GUARD_LIVE_ID" ]; then
+      die "hub drift — the live deployment changed while this publish was building (the guard checked '${SNAPSHOT_GUARD_LIVE_ID:-<none>}', live is now '${LIVE_RESOLVED_ID:-<none>}'): someone else deployed, so this snapshot no longer describes the live site and would delete their artifacts. Refresh this machine's copy of the shared artifacts directory, then re-run"
+    fi
   fi
   # shellcheck disable=SC2086
   $wr_cmd pages deploy site \

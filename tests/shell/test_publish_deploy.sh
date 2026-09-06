@@ -111,9 +111,11 @@ new_case() {
   CASE_HIJACK=""
   # The hub drift guard ran in the preflight, minutes before the upload, and
   # deploy_pages re-asserts its verdict right before wrangler. Default: the
-  # guard passed on GUARD_LIVE_ID and the live deployment is still that one.
+  # guard passed on GUARD_LIVE_ID, that id was actually observed
+  # (GUARD_LIVE_UNKNOWN=false) and the live deployment is still that one.
   CASE_GUARD_PASSED=true
   CASE_GUARD_LIVE_ID="dep-guard-1"
+  CASE_GUARD_LIVE_UNKNOWN=false
   CASE_LIVE_JSON='{"ok":true,"deployment_id":"dep-guard-1","engine_commit":"eng1"}'
   CASE_ALLOW_UNVERIFIED=false
   mk_engine "$CASE_DIR/work"
@@ -145,11 +147,12 @@ run_deploy() {
     # tests/shell/test_publish_snapshot.sh instead.
     snapshot_record() { echo "snapshot_record: skipped" >> "$WRANGLER_REC"; }
     # Same reason as snapshot_record: the pre-upload re-assert resolves the
-    # live deployment id through the Pages API. Stub it, and set the two
+    # live deployment id through the Pages API. Stub it, and set the three
     # sentinels snapshot_guard would have armed in the preflight.
     live_deployment_json() { printf '%s\n' "$CASE_LIVE_JSON"; }
     SNAPSHOT_GUARD_PASSED="$CASE_GUARD_PASSED"
     SNAPSHOT_GUARD_LIVE_ID="$CASE_GUARD_LIVE_ID"
+    SNAPSHOT_GUARD_LIVE_UNKNOWN="$CASE_GUARD_LIVE_UNKNOWN"
     ALLOW_UNVERIFIED="$CASE_ALLOW_UNVERIFIED"
     export CLOUDFLARE_API_TOKEN="$CASE_TOKEN"
     export CLOUDFLARE_ACCOUNT_ID="$CASE_ACCOUNT"
@@ -284,10 +287,14 @@ pass "live deployment changed during the build: refuses before wrangler, naming 
 
 new_case
 CASE_GUARD_LIVE_ID=""
-CASE_LIVE_JSON='{"ok":true,"deployment_id":"dep-first-by-someone-else","engine_commit":"eng9"}'
+CASE_GUARD_LIVE_UNKNOWN=false
+CASE_LIVE_JSON='{"ok":true,"deployment_id":"dep-new","engine_commit":"eng9"}'
 if run_deploy; then dump; fail "a project that gained its first deployment mid-build must abort"; fi
 no_wrangler "wrangler ran after a teammate created the first deployment of an empty project"
-pass "empty -> non-empty live deployment also refuses"
+grep -q "dep-new" "$LOG" || { dump; fail "the refusal must name the id that is live now"; }
+grep -q "<none>" "$LOG" \
+  || { dump; fail "the refusal must name the empty state the guard verified"; }
+pass "known-empty -> non-empty live deployment refuses, naming both ids (the fresh-forge race)"
 
 new_case
 CASE_GUARD_PASSED=false
@@ -312,5 +319,49 @@ must_rec "argv: pages deploy site " "--allow-unverified did not reach the upload
 grep -q "hub drift unverified" "$LOG" \
   || { dump; fail "the override must still warn about the unverified re-check"; }
 pass "--allow-unverified downgrades the re-check failure to a warning"
+
+# --- 8. an empty live id the guard NEVER OBSERVED is not a changed deployment
+# resolve_live_deployment reports two facts, and the re-assert used to read only
+# the id. That collapsed "this project verifiably has no deployment" together
+# with "live could not be read at all": an operator who accepted an unverified
+# preflight with --allow-unverified, on a project that does have deployments,
+# was then hard-blocked before wrangler by a refusal claiming a teammate had
+# deployed — a fabricated accusation, and the mismatch branch honours no flag.
+new_case
+CASE_GUARD_LIVE_UNKNOWN=true
+CASE_GUARD_LIVE_ID=""
+CASE_LIVE_JSON='{"ok":true,"deployment_id":"dep-recovered","engine_commit":"engA"}'
+if run_deploy; then
+  dump
+  fail "a guard that never observed live cannot prove the window is clean and must refuse"
+fi
+no_wrangler "wrangler ran although nothing was ever compared against the live deployment"
+grep -q "hub drift unverified" "$LOG" \
+  || { dump; fail "the refusal must be reported as hub drift unverified"; }
+if grep -Eq "changed while this publish was building|someone else deployed" "$LOG"; then
+  dump
+  fail "the refusal claims a deploy that was never observed — nothing was compared, so no change can be asserted"
+fi
+pass "guard view unknown: refuses as unverified without claiming anyone deployed"
+
+new_case
+CASE_GUARD_LIVE_UNKNOWN=true
+CASE_GUARD_LIVE_ID=""
+CASE_LIVE_JSON='{"ok":true,"deployment_id":"dep-recovered","engine_commit":"engA"}'
+CASE_ALLOW_UNVERIFIED=true
+run_deploy || { dump; fail "--allow-unverified must let an unknown guard view through to the upload"; }
+must_rec "argv: pages deploy site " \
+  "the operator already accepted an unverified state and was still blocked before wrangler"
+grep -q "hub drift unverified" "$LOG" \
+  || { dump; fail "the override must still warn that live was never observed"; }
+pass "guard view unknown + --allow-unverified: warns and reaches wrangler"
+
+new_case
+CASE_GUARD_LIVE_UNKNOWN=false
+CASE_GUARD_LIVE_ID="dep-live-1"
+CASE_LIVE_JSON='{"ok":true,"deployment_id":"dep-live-1","engine_commit":"engB"}'
+run_deploy || { dump; fail "an observed, unchanged live deployment must deploy"; }
+must_rec "argv: pages deploy site " "an unchanged observed live id did not reach the upload"
+pass "guard view known and live unchanged: deploy proceeds"
 
 echo "all deploy_pages checks passed"

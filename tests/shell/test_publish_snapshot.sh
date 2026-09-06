@@ -18,10 +18,13 @@
 # 2026-09-06 loss was the old "bootstrap when no record" path.
 #
 # The guard also arms what deploy_pages re-asserts immediately before the
-# upload: SNAPSHOT_GUARD_PASSED and SNAPSHOT_GUARD_LIVE_ID. The guard runs in
-# the preflight and the upload happens minutes later, so a teammate deploying
-# inside that window has to be caught there (the per-slug flock is
-# kernel-local: it never serializes two machines).
+# upload: SNAPSHOT_GUARD_PASSED, SNAPSHOT_GUARD_LIVE_ID and
+# SNAPSHOT_GUARD_LIVE_UNKNOWN. The guard runs in the preflight and the upload
+# happens minutes later, so a teammate deploying inside that window has to be
+# caught there (the per-slug flock is kernel-local: it never serializes two
+# machines). The UNKNOWN flag is what keeps that check honest: an empty live id
+# means "confirmed no deployment" on one path and "could not read live" on
+# another, and only the first makes a later mismatch a provable race.
 #
 # A denied KV read is not a stale hub: the refusal must name the denial, or the
 # operator is sent to re-sync a hub that was never the problem.
@@ -166,12 +169,14 @@ guard() {
 }
 
 guard_direct() {
-  # snapshot_guard in THIS shell: SNAPSHOT_GUARD_PASSED / _LIVE_ID are globals
-  # and the subshell in guard() would discard them. Only for paths that return
-  # 0 — a die() here exits the suite. The pre-set values are deliberately wrong
-  # so an assertion cannot pass on a leftover from an earlier case.
+  # snapshot_guard in THIS shell: SNAPSHOT_GUARD_PASSED / _LIVE_ID /
+  # _LIVE_UNKNOWN are globals and the subshell in guard() would discard them.
+  # Only for paths that return 0 — a die() here exits the suite. The pre-set
+  # values are deliberately wrong so an assertion cannot pass on a leftover
+  # from an earlier case.
   SNAPSHOT_GUARD_PASSED=false
   SNAPSHOT_GUARD_LIVE_ID="never-set"
+  SNAPSHOT_GUARD_LIVE_UNKNOWN="never-set"
   snapshot_guard 2>"$TD/guard.err"
 }
 
@@ -397,8 +402,14 @@ pass "unset KV_GET_STATUS behaves exactly as a miss"
 
 # --- 6i. the guard arms what deploy_pages re-asserts before the upload -------
 # The guard runs in the preflight and the upload happens minutes later, so
-# deploy_pages re-checks these two before wrangler. Every path that lets the
+# deploy_pages re-checks these three before wrangler. Every path that lets the
 # deploy proceed must set them, or the deploy dies as an internal error.
+#
+# SNAPSHOT_GUARD_LIVE_UNKNOWN is not redundant with an empty live id: an id is
+# also empty for a project whose deployment list is confirmed empty, and there
+# the pre-upload compare is a REAL race check (live gaining a deployment means
+# a teammate deployed). Collapsing the two made the re-assert refuse an
+# --allow-unverified publish with a fabricated "someone else deployed".
 KV_RECORD="$RECORD"
 LIVE_JSON='{"ok":true,"deployment_id":"dep-live-1","engine_commit":"abc1234"}'
 ALLOW_REMOVALS=false
@@ -409,6 +420,8 @@ guard_direct || { guard_err; fail "a matching hub must deploy"; }
   || { guard_err; fail "a clean pass did not arm SNAPSHOT_GUARD_PASSED"; }
 [ "$SNAPSHOT_GUARD_LIVE_ID" = "dep-live-1" ] \
   || { guard_err; fail "clean pass recorded live id '$SNAPSHOT_GUARD_LIVE_ID', expected dep-live-1"; }
+[ "$SNAPSHOT_GUARD_LIVE_UNKNOWN" = false ] \
+  || { guard_err; fail "a clean pass against a resolvable deployment armed LIVE_UNKNOWN='$SNAPSHOT_GUARD_LIVE_UNKNOWN', expected false"; }
 pass "clean pass arms SNAPSHOT_GUARD_PASSED + the live id it checked"
 
 LIVE_JSON='{"ok":true,"deployment_id":"dep-live-9","engine_commit":"abc1234"}'
@@ -418,6 +431,8 @@ guard_direct || { guard_err; fail "--allow-unverified must proceed on an untrust
   || { guard_err; fail "an override did not arm SNAPSHOT_GUARD_PASSED"; }
 [ "$SNAPSHOT_GUARD_LIVE_ID" = "dep-live-9" ] \
   || { guard_err; fail "override recorded live id '$SNAPSHOT_GUARD_LIVE_ID', expected dep-live-9"; }
+[ "$SNAPSHOT_GUARD_LIVE_UNKNOWN" = false ] \
+  || { guard_err; fail "an override granted against a KNOWN live id armed LIVE_UNKNOWN='$SNAPSHOT_GUARD_LIVE_UNKNOWN', expected false"; }
 ALLOW_UNVERIFIED=false
 pass "--allow-unverified arms the sentinels with the id the override was granted against"
 
@@ -431,8 +446,45 @@ grep -q "would refuse" "$TD/guard.err" \
   || { guard_err; fail "the dry-run downgrade did not arm SNAPSHOT_GUARD_PASSED"; }
 [ "$SNAPSHOT_GUARD_LIVE_ID" = "dep-live-1" ] \
   || { guard_err; fail "dry-run downgrade recorded live id '$SNAPSHOT_GUARD_LIVE_ID'"; }
+[ "$SNAPSHOT_GUARD_LIVE_UNKNOWN" = false ] \
+  || { guard_err; fail "dry-run downgrade armed LIVE_UNKNOWN='$SNAPSHOT_GUARD_LIVE_UNKNOWN' against a resolvable deployment"; }
 DRY_RUN=false
 pass "dry-run downgrade arms the sentinels too"
+
+# A live lookup that FAILED is the case the id alone cannot express: the guard
+# proceeds on --allow-unverified with no id at all, and the pre-upload
+# re-assert must know that it never observed live rather than read the empty
+# id as "the project had no deployment".
+KV_RECORD="$RECORD"
+LIVE_JSON='{"ok":false,"reason":"api_error"}'
+ALLOW_UNVERIFIED=true
+guard_direct || { guard_err; fail "--allow-unverified must proceed when the live lookup failed"; }
+[ "$SNAPSHOT_GUARD_PASSED" = true ] \
+  || { guard_err; fail "the failed-lookup override did not arm SNAPSHOT_GUARD_PASSED"; }
+[ -z "$SNAPSHOT_GUARD_LIVE_ID" ] \
+  || { guard_err; fail "a failed live lookup must claim no live id, got '$SNAPSHOT_GUARD_LIVE_ID'"; }
+[ "$SNAPSHOT_GUARD_LIVE_UNKNOWN" = true ] \
+  || { guard_err; fail "a failed live lookup armed LIVE_UNKNOWN='$SNAPSHOT_GUARD_LIVE_UNKNOWN', expected true"; }
+ALLOW_UNVERIFIED=false
+pass "failed live lookup + --allow-unverified arms LIVE_UNKNOWN=true (no id to compare)"
+
+# The other empty id, and the row that must NOT become "unknown": the real
+# no_deployment payload is a confirmed-empty deployment list, i.e. an
+# observation. A later non-empty live state is a teammate's deploy and the
+# pre-upload re-assert has to keep refusing it.
+KV_RECORD=""
+LIVE_JSON='{"ok":false,"error_kind":"no_deployment","error":"Pages project forge-test-project has no deployment yet"}'
+guard_direct || { guard_err; fail "the real no_deployment payload must bootstrap"; }
+[ "$SNAPSHOT_GUARD_PASSED" = true ] \
+  || { guard_err; fail "the bootstrap path did not arm SNAPSHOT_GUARD_PASSED"; }
+[ -z "$SNAPSHOT_GUARD_LIVE_ID" ] \
+  || { guard_err; fail "a confirmed-empty project must claim no live id, got '$SNAPSHOT_GUARD_LIVE_ID'"; }
+[ "$SNAPSHOT_GUARD_LIVE_UNKNOWN" = false ] \
+  || { guard_err; fail "confirmed-empty live armed LIVE_UNKNOWN='$SNAPSHOT_GUARD_LIVE_UNKNOWN' — a verified-empty project is an observation, not an unknown"; }
+pass "confirmed-empty live (no_deployment) arms LIVE_UNKNOWN=false — the race check stays armed"
+
+KV_RECORD="$RECORD"
+LIVE_JSON='{"ok":true,"deployment_id":"dep-live-1","engine_commit":"abc1234"}'
 
 # --- 6j. a skipped guard must not look like a clean pass ---------------------
 SAVED_ART="$ARTIFACTS_ROOT"
@@ -446,6 +498,8 @@ grep -q "artifacts root" "$TD/guard.err" \
   || { guard_err; fail "the skipped path must still arm the sentinel, or every deploy dies as an internal error"; }
 [ -z "$SNAPSHOT_GUARD_LIVE_ID" ] \
   || { guard_err; fail "a skipped guard must not claim a live id, got '$SNAPSHOT_GUARD_LIVE_ID'"; }
+[ "$SNAPSHOT_GUARD_LIVE_UNKNOWN" = true ] \
+  || { guard_err; fail "a skipped guard armed LIVE_UNKNOWN='$SNAPSHOT_GUARD_LIVE_UNKNOWN' — it never looked at live, so it must be unknown, not known-empty"; }
 ARTIFACTS_ROOT="$SAVED_ART"
 pass "guard skipped (artifacts root unresolved) warns and claims no live id"
 

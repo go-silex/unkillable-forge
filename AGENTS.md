@@ -111,6 +111,7 @@ guard further down would abort after the destruction it exists to prevent.
 |`snapshot:live` read **denied or failed** (`KV_GET_STATUS` = `denied` / `error`, wrangler fallback included)|**refuses** — exit 4, `unverified`, reason names the KV read — unless `--allow-unverified`|
 |Record anchored on another deployment id (rollback, dashboard deploy)|**refuses** — exit 4, verdict `untrusted` — removals still named; unless `--allow-unverified`|
 |The live deployment id changed between the guard and the upload (a teammate deployed mid-run)|**refuses** in `deploy_pages`, before `wrangler`, naming both ids — no flag lifts it; re-run|
+|The guard itself never observed live (its lookup failed, or it was skipped for an unresolved artifacts root)|**refuses** in `deploy_pages` (`hub drift unverified`) — unless `--allow-unverified`; never claims a teammate deployed|
 |The live deployment id cannot be re-resolved at the upload|**refuses** in `deploy_pages` (`hub drift unverified`) — unless `--allow-unverified`|
 |`--dry-run`|exit 4 downgrades to a warning ("would refuse …") because a dry run deploys nothing; exit 3 stays fatal|
 
@@ -138,12 +139,17 @@ requires `--allow-removals` **and** `--allow-unverified`. The zero-removal
 `wrangler pages deploy` happens minutes later — engine git clone,
 `build_from_hub`, OG rendering for every slug on `--rebuild-index`. So
 `snapshot_guard` publishes `SNAPSHOT_GUARD_PASSED` (`true`/`false`) and
-`SNAPSHOT_GUARD_LIVE_ID` (the live deployment id, empty when unknown,
-known-empty, or the guard was skipped) on every proceed path, and `deploy_pages`
-re-asserts both immediately before `wrangler pages deploy`: an unset or `false`
-sentinel is an internal error (no code path may reach the upload unguarded), an
-id that has moved is a refusal naming both ids, and a re-resolution that itself
-fails refuses unless `--allow-unverified`. A teammate who publishes inside that
+`SNAPSHOT_GUARD_LIVE_ID` (the live deployment id) plus `SNAPSHOT_GUARD_LIVE_UNKNOWN`
+on every proceed path, and `deploy_pages` re-asserts them immediately before
+`wrangler pages deploy`: an unset or `false` sentinel is an internal error (no
+code path may reach the upload unguarded), an id that has moved is a refusal
+naming both ids, and a re-resolution that itself fails refuses unless
+`--allow-unverified`. The id is empty in two different situations and the
+`LIVE_UNKNOWN` sentinel is what separates them: a **confirmed-empty** deployment
+list is a real observation, so live gaining an id since then IS a teammate's
+deploy and refuses unconditionally, whereas a guard that **never saw** live has
+nothing to compare against — that refuses as `unverified` (overridable) and
+never accuses anyone of deploying. A teammate who publishes inside that
 window now makes this run refuse instead of deleting their artifact — the loser
 re-runs. `acquire_publish_lock` cannot cover this: it is per-slug, so two
 people publishing different slugs never contend at all, and `flock` is a
