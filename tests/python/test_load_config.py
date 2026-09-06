@@ -527,14 +527,22 @@ class OgToolchainTests(unittest.TestCase):
         self.root = Path(self._td.name)
         self.home = self.root / "home"
         self.home.mkdir()
-        # A real machine has chrome/ffmpeg/jq and a Playwright cache under
-        # $HOME: both are neutralized so the verdict comes from the fixture.
+        # A real machine has chrome/ffmpeg/jq on PATH, a Playwright cache
+        # under $HOME, and -- on a macOS CI runner -- a genuine
+        # /Applications/Google Chrome.app. All three inputs are redirected
+        # into the tmpdir so the verdict comes from the fixture alone.
         self._envcm = patch.dict(
             os.environ, {"HOME": str(self.home), "PATH": ""}, clear=False
         )
         self._envcm.start()
+        self._appcm = patch(
+            "load_config.OG_CHROME_MACOS_APP",
+            str(self.root / "no-Applications/Google Chrome"),
+        )
+        self._appcm.start()
 
     def tearDown(self) -> None:
+        self._appcm.stop()
         self._envcm.stop()
         self._td.cleanup()
 
