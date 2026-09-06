@@ -140,6 +140,16 @@ done
 SH_ABS="$(command -v "$SH" || true)"
 [ -n "$SH_ABS" ] || fail "cannot resolve the test interpreter: $SH"
 
+# ffmpeg and jq are PATH-only, so stripping PATH always hides them. Chrome is
+# not: the renderer also accepts an absolute macOS Chrome.app, which a GitHub
+# macOS runner really has. Expect exactly what the renderer would find.
+OG_EXPECT="chrome ffmpeg jq"
+OG_MAC_CHROME=0
+if [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
+  OG_MAC_CHROME=1
+  OG_EXPECT="ffmpeg jq"
+fi
+
 # run_stripped <args...> — doctor with a PATH that has no OG toolchain.
 run_stripped() {
   set +e
@@ -152,7 +162,7 @@ run_stripped() {
 
 run_stripped
 [ "$RC" -eq 0 ] || fail "a missing OG toolchain must not change the exit code, got $RC: $OUT $ERR"
-for binary in chrome ffmpeg jq; do
+for binary in $OG_EXPECT; do
   echo "$OUT" | grep -q "$binary" \
     || fail "the report must name the missing $binary, got: $OUT"
 done
@@ -177,9 +187,9 @@ is_json "$OUT" || fail "--json stdout is not valid JSON: ${OUT}"
 printf '%s' "$OUT" | python3 -c \
   'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["og_toolchain"]["ok"] is False and d["deploy_blockers"] == [] and d["ok"] is True else 1)' \
   || fail "--json must carry og_toolchain.ok false while ok stays true and deploy_blockers stays empty, got: $OUT"
-printf '%s' "$OUT" | python3 -c \
-  'import json,sys; m=json.load(sys.stdin)["og_toolchain"]["missing"]; sys.exit(0 if m == ["chrome","ffmpeg","jq"] else 1)' \
-  || fail "--json must list every missing binary, got: $OUT"
+printf '%s' "$OUT" | OG_EXPECT="$OG_EXPECT" python3 -c \
+  'import json,os,sys; m=json.load(sys.stdin)["og_toolchain"]["missing"]; sys.exit(0 if m == os.environ["OG_EXPECT"].split() else 1)' \
+  || fail "--json must list exactly the missing binaries ($OG_EXPECT), got: $OUT"
 pass "--json exposes og_toolchain without touching ok / deploy_blockers"
 
 run_stripped --quiet
@@ -197,23 +207,30 @@ case "$(uname -s)" in
     printf '#!/bin/sh\nexit 0\n' > "$STRIP_BIN/apt-get"
     chmod +x "$STRIP_BIN/apt-get"
     run_stripped
-    echo "$OUT" | grep -q 'apt-get install -y chromium' \
-      || fail "an apt host must get the apt-get install line, got: $OUT"
-    echo "$OUT" | grep -q 'ffmpeg jq' \
-      || fail "the install line must carry every missing package, got: $OUT"
+    if [ "$OG_MAC_CHROME" -eq 1 ]; then
+      echo "$OUT" | grep -q 'apt-get install -y ffmpeg jq' \
+        || fail "an apt host must get the apt-get install line, got: $OUT"
+    else
+      echo "$OUT" | grep -q 'apt-get install -y chromium' \
+        || fail "an apt host must name the chromium package, got: $OUT"
+      echo "$OUT" | grep -q 'ffmpeg jq' \
+        || fail "the install line must carry every missing package, got: $OUT"
+    fi
     pass "install hint follows the host package manager (apt-get)"
     ;;
   Darwin)
     run_stripped
-    echo "$OUT" | grep -q 'brew install --cask google-chrome' \
-      || fail "macOS must get the Chrome cask line, got: $OUT"
+    if [ "$OG_MAC_CHROME" -eq 0 ]; then
+      echo "$OUT" | grep -q 'brew install --cask google-chrome' \
+        || fail "macOS must get the Chrome cask line, got: $OUT"
+    fi
     echo "$OUT" | grep -q 'brew install ffmpeg jq' \
       || fail "macOS must get the formula line for ffmpeg/jq, got: $OUT"
     pass "install hint follows the host package manager (brew)"
     ;;
   *)
     run_stripped
-    echo "$OUT" | grep -q 'chrome' \
+    echo "$OUT" | grep -q 'ffmpeg' \
       || fail "an unknown host must still name the binaries, got: $OUT"
     pass "install hint names the binaries on an unknown host"
     ;;
