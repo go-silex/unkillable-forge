@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+## [1.17.0] - 2026-09-06
+
 ### Added
 
 - `forge-doctor.sh` now probes the OG thumbnail toolchain (`google-chrome`/`chromium`, `ffmpeg`, `jq`) and `forge-setup` documents it as an explicit optional step. Nothing in the setup path named those three binaries before — they appeared only in `README.md` and `AGENTS.md` — so a machine passed `/forge-setup`, got doctor exit `0` "ready", and still could not render a thumbnail: `gen-og-images.sh` is best-effort and warns then exits `0` on each missing binary. Measured on 2026-09-06: `unkillable-direction-founders` was published from such a machine and, because every deploy is a full snapshot rebuilt from the local hub, that publish also dropped the `og.jpg` another machine had generated — 30 of 31 artifacts kept a thumbnail, that one did not. The probe resolves chrome exactly like the renderer (same command order, macOS `Chrome.app`, `~/.cache/ms-playwright/` globs) and stays **advisory**: it is a `⚠` line plus a `→ og images:` install command matching the host (`apt-get`/`dnf`/`brew`), and an `og_toolchain` key in `--json`. Exit codes are untouched (`0` ready · `1` config KO · `2` deploy blocked), it is never a `deploy_blocker`, and `--quiet` stays silent when the toolchain is the only finding.
@@ -299,7 +301,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 - Cloudflare Pages host for team decks and guides
 - Plugin marketplace manifest (`.claude-plugin/marketplace.json`)
 
-[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.16.0...HEAD
+[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.17.0...HEAD
+[1.17.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.16.0...silex-forge/v1.17.0
 [1.16.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.15.0...silex-forge/v1.16.0
 [1.15.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.14.1...silex-forge/v1.15.0
 [1.14.1]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.14.0...silex-forge/v1.14.1
