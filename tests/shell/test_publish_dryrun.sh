@@ -106,6 +106,28 @@ EOS
   chmod +x "$TD/bin/$tool"
 done
 
+# wrangler is both boundaries at once: `pages deploy` and `kv key put/delete`
+# mutate, while the KV *read* fallback in kv_get_key (`kv key get`, plus the
+# `whoami` / `kv namespace list` probes that authorise it) reads. A dry run is
+# a gate, not a preview, so it must take the same read path as a real publish —
+# recording those as mutations is what used to force kv_get_key to skip the
+# fallback under --dry-run, making the dry run refuse where a real publish
+# succeeds.
+cat > "$TD/bin/wrangler" <<EOS
+#!/usr/bin/env bash
+_args="\$*"
+case "\$_args" in
+  *"kv key get"*|*whoami*|*"kv namespace list"*)
+    printf 'wrangler %s\n' "\$_args" >> "$REC_READ"
+    ;;
+  *)
+    printf 'wrangler %s\n' "\$_args" >> "$REC"
+    ;;
+esac
+exit 0
+EOS
+chmod +x "$TD/bin/wrangler"
+
 # curl: classify by HTTP method. Anything that can change remote state lands in
 # $REC; a plain GET lands in $REC_READ and returns an empty body, which the
 # guard reads as "no snapshot record". With no verifiable live anchor that is
@@ -329,18 +351,21 @@ pass "the whole hub write chain ran, into the sandbox"
 [ ! -s "$REC" ] || fail "a mutating CLI ran during the dry run: $(tr '\n' ';' < "$REC")"
 pass "dry-run publish invokes no wrangler / shlink / mutating curl"
 
-# 3b. read-only crossings are allowed, but only those: every recorded curl must
-# be a KV *values* GET, never a namespace write or another endpoint.
+# 3b. read-only crossings are allowed, but only those: a recorded curl must be
+# a KV *values* GET, and a recorded wrangler must be the KV read fallback or
+# one of the probes that authorises it — never a namespace write, another
+# endpoint, or a deploy.
 if [ -s "$REC_READ" ]; then
   while IFS= read -r _line || [ -n "$_line" ]; do
     case "$_line" in
       *"/storage/kv/namespaces/"*"/values/"*) ;;
-      *) fail "dry run made a non-KV-read curl call: $_line" ;;
+      "wrangler "*"kv key get"*|"wrangler "*whoami*|"wrangler "*"kv namespace list"*) ;;
+      *) fail "dry run made a read call that is neither a KV values GET nor a KV read probe: $_line" ;;
     esac
   done < "$REC_READ"
-  pass "dry-run read-only curl calls are KV snapshot reads only ($(wc -l < "$REC_READ" | tr -d '[:space:]'))"
+  pass "dry-run read-only calls are KV snapshot reads only ($(wc -l < "$REC_READ" | tr -d '[:space:]'))"
 else
-  pass "dry-run publish made no curl call at all"
+  pass "dry-run publish made no read call at all"
 fi
 
 # 4. the plan carries the config's project and host

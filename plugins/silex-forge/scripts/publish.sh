@@ -1089,11 +1089,10 @@ kv_get_key() {
   if [ "$KV_GET_STATUS" = "miss" ]; then
     return 1
   fi
-  # A dry run is a gate, not a preview: it never invokes wrangler. The REST
-  # classification stands, and the guard reports it as unverified.
-  if $DRY_RUN; then
-    return 1
-  fi
+  # The fallback runs under --dry-run too. A dry run is a gate, not a preview:
+  # `kv key get` (and the whoami / namespace-list probes behind it) mutate
+  # nothing, and skipping them made the dry run refuse where the real publish
+  # succeeds through OAuth — which trains operators to ignore a "would refuse".
   local out
   if out=$(kv_wrangler kv key get "$key" 2>/dev/null); then
     KV_GET_STATUS="ok"

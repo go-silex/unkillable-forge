@@ -158,6 +158,16 @@ shared directory — no sync mechanism propagates lock state. There is no
 cross-machine serialization anywhere; the KV record plus this re-assert are the
 entire enforcement.
 
+**The re-assert is detection, not exclusion — the residual race is accepted.**
+It shrinks the window from "the whole build" to "the upload itself": a deploy
+landing between the re-read and the end of `wrangler pages deploy` is still
+overwritten. Closing that completely needs a lock Cloudflare does not offer
+(Pages Direct Upload has no compare-and-swap on the deployment id), so the
+honest posture is a narrow window plus a record that makes the next run see
+the drift. A re-resolution that itself fails refuses rather than proceeding:
+unlike the KV-read deadlock, that state is transient — the preflight already
+reached the API, so the remedy is to re-run, not to override.
+
 **A KV read failure is named, not dressed up as a stale hub.**
 `preflight_mutations` runs with `require_kv=False` on purpose — a token whose
 KV REST read is denied is admitted because the write paths fall back to
