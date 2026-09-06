@@ -106,33 +106,12 @@ EOS
   chmod +x "$TD/bin/$tool"
 done
 
-# wrangler is both boundaries at once: `pages deploy` and `kv key put/delete`
-# mutate, while the KV *read* fallback in kv_get_key (`kv key get`, plus the
-# `whoami` / `kv namespace list` probes that authorise it) reads. A dry run is
-# a gate, not a preview, so it must take the same read path as a real publish —
-# recording those as mutations is what used to force kv_get_key to skip the
-# fallback under --dry-run, making the dry run refuse where a real publish
-# succeeds.
-cat > "$TD/bin/wrangler" <<EOS
-#!/usr/bin/env bash
-_args="\$*"
-case "\$_args" in
-  *"kv key get"*|*whoami*|*"kv namespace list"*)
-    printf 'wrangler %s\n' "\$_args" >> "$REC_READ"
-    ;;
-  *)
-    printf 'wrangler %s\n' "\$_args" >> "$REC"
-    ;;
-esac
-exit 0
-EOS
-chmod +x "$TD/bin/wrangler"
-
 # curl: classify by HTTP method. Anything that can change remote state lands in
-# $REC; a plain GET lands in $REC_READ and returns an empty body, which the
-# guard reads as "no snapshot record". With no verifiable live anchor that is
-# now an unverified refusal — and under DRY_RUN it becomes a "would refuse"
-# warning so the dry run still completes.
+# $REC; a plain GET lands in $REC_READ and returns an empty body. It prints no
+# HTTP status either, so kv_get_key classifies the snapshot read as a failed
+# REST read (KV_GET_STATUS=error) and — under --dry-run — does NOT fall back to
+# wrangler OAuth. The guard then warns that it cannot predict the real verdict,
+# and the dry run still completes.
 cat > "$TD/bin/curl" <<EOS
 #!/usr/bin/env bash
 _args="\$*"
@@ -351,22 +330,33 @@ pass "the whole hub write chain ran, into the sandbox"
 [ ! -s "$REC" ] || fail "a mutating CLI ran during the dry run: $(tr '\n' ';' < "$REC")"
 pass "dry-run publish invokes no wrangler / shlink / mutating curl"
 
-# 3b. read-only crossings are allowed, but only those: a recorded curl must be
-# a KV *values* GET, and a recorded wrangler must be the KV read fallback or
-# one of the probes that authorises it — never a namespace write, another
-# endpoint, or a deploy.
+# 3b. read-only crossings are allowed, but only those: every recorded curl must
+# be a KV *values* GET, never a namespace write or another endpoint.
 if [ -s "$REC_READ" ]; then
   while IFS= read -r _line || [ -n "$_line" ]; do
     case "$_line" in
       *"/storage/kv/namespaces/"*"/values/"*) ;;
-      "wrangler "*"kv key get"*|"wrangler "*whoami*|"wrangler "*"kv namespace list"*) ;;
-      *) fail "dry run made a read call that is neither a KV values GET nor a KV read probe: $_line" ;;
+      *) fail "dry run made a non-KV-read curl call: $_line" ;;
     esac
   done < "$REC_READ"
-  pass "dry-run read-only calls are KV snapshot reads only ($(wc -l < "$REC_READ" | tr -d '[:space:]'))"
+  pass "dry-run read-only curl calls are KV snapshot reads only ($(wc -l < "$REC_READ" | tr -d '[:space:]'))"
 else
-  pass "dry-run publish made no read call at all"
+  pass "dry-run publish made no curl call at all"
 fi
+
+# 3c. the guarantee stated directly, across BOTH logs: a dry run invokes
+# wrangler zero times. Not even the KV read fallback in kv_get_key, because it
+# is not free — kv_wrangler_verify spawns `wrangler whoami` and
+# `wrangler kv namespace list` before the read (three invocations), a machine
+# with no global wrangler resolves it to `npx --yes wrangler` and fetches the
+# package, and any of them can drop into an interactive OAuth prompt and hang
+# the rehearsal. The guard buys verdict honesty with its wording instead
+# (assertion 4 below), not by widening this boundary.
+if grep -h '^wrangler ' "$REC" "$REC_READ" > "$TD/wrangler-calls" 2>/dev/null \
+   && [ -s "$TD/wrangler-calls" ]; then
+  fail "dry run invoked wrangler: $(tr '\n' ';' < "$TD/wrangler-calls")"
+fi
+pass "dry-run publish invokes wrangler zero times (neither log holds a call)"
 
 # 4. the plan carries the config's project and host
 grep -q '^  project : dryrun-test-project$' "$out" \
@@ -375,8 +365,20 @@ grep -q '^  host    : forge.test.invalid$' "$out" \
   || fail "plan does not report the config's public host"
 grep -q 'dry run OK — nothing deployed' "$out" \
   || fail "plan does not end with the dry-run OK line"
-grep -q 'would refuse' "$out" \
-  || fail "dry-run unverified guard must warn with 'would refuse' (empty KV record)"
+# The snapshot read went out over REST and came back without an HTTP status
+# (the curl stub prints none), so the guard is unverified — and because a real
+# publish would retry that read through wrangler OAuth, which this dry run
+# skips, the warning must NOT claim a refusal verdict.
+grep -q 'hub drift unverified' "$out" \
+  || fail "dry-run guard must report the unverified snapshot read"
+grep -q 'read failed over REST' "$out" \
+  || fail "the dry-run warning must name the REST read as what failed"
+grep -q 'wrangler OAuth' "$out" \
+  || fail "the dry-run warning must name the OAuth retry a real publish would make"
+grep -q 'cannot predict the real verdict' "$out" \
+  || fail "the dry-run warning must say it cannot predict the real verdict"
+refute 'would refuse' "$out" \
+  "the dry run claimed 'would refuse' on a REST-failed read whose OAuth retry it never attempted"
 refute 'wrangler pages deploy' "$out" "dry run announced a wrangler deploy"
 grep -q 'PUBLIC_HOST' "$WORK/repo/wrangler.toml" \
   || fail "wrangler.toml was not patched locally during the dry run"

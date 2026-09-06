@@ -400,6 +400,65 @@ fi
 KV_GET_STATUS="miss"
 pass "unset KV_GET_STATUS behaves exactly as a miss"
 
+# --- 6h-bis. a dry run must not claim a verdict it cannot reach --------------
+# Under --dry-run, kv_get_key stops at the REST classification: the
+# wrangler-OAuth fallback costs three wrangler invocations (kv_wrangler_verify
+# runs `whoami` and `kv namespace list` before the read), may resolve to
+# `npx --yes wrangler`, and can block on an interactive OAuth prompt. So a
+# REST denial is only half the story here — a real publish retries over OAuth
+# and often succeeds. Printing "would refuse" on that row taught operators
+# that a dry-run refusal means nothing; the warning names the REST denial and
+# the retry instead, and explicitly declines to predict the verdict.
+KV_RECORD=""
+LIVE_JSON='{"ok":true,"deployment_id":"dep-live-1","engine_commit":"abc1234"}'
+DRY_RUN=true
+ALLOW_UNVERIFIED=false
+ALLOW_REMOVALS=false
+KV_GET_STATUS="denied"
+guard_direct || { guard_err; fail "a dry run must not hard-refuse a REST-denied KV read"; }
+grep -q "over REST" "$TD/guard.err" \
+  || { guard_err; fail "the dry-run warning must say the read was denied over REST"; }
+grep -q "wrangler OAuth" "$TD/guard.err" \
+  || { guard_err; fail "the dry-run warning must name the wrangler-OAuth retry a real publish would attempt"; }
+grep -q "cannot predict the real verdict" "$TD/guard.err" \
+  || { guard_err; fail "the dry-run warning must decline to predict the real verdict"; }
+if grep -q "would refuse" "$TD/guard.err"; then
+  guard_err
+  fail "the dry run announced 'would refuse' for a REST denial whose OAuth retry it never attempted"
+fi
+[ "$SNAPSHOT_GUARD_PASSED" = true ] \
+  || { guard_err; fail "the REST-denied dry run did not arm SNAPSHOT_GUARD_PASSED — every dry run must complete"; }
+[ "$SNAPSHOT_GUARD_LIVE_ID" = "dep-live-1" ] \
+  || { guard_err; fail "REST-denied dry run recorded live id '$SNAPSHOT_GUARD_LIVE_ID', expected dep-live-1"; }
+[ "$SNAPSHOT_GUARD_LIVE_UNKNOWN" = false ] \
+  || { guard_err; fail "REST-denied dry run armed LIVE_UNKNOWN='$SNAPSHOT_GUARD_LIVE_UNKNOWN' against a resolvable deployment"; }
+pass "dry run + REST-denied KV read -> no verdict claimed, names the OAuth retry, still arms the sentinels"
+
+KV_GET_STATUS="error"
+guard_direct || { guard_err; fail "a dry run must not hard-refuse a failed REST read"; }
+grep -q "over REST" "$TD/guard.err" \
+  || { guard_err; fail "the dry-run warning must say the read failed over REST"; }
+if grep -q "would refuse" "$TD/guard.err"; then
+  guard_err
+  fail "the dry run announced 'would refuse' for a failed REST read whose OAuth retry it never attempted"
+fi
+pass "dry run + failed REST read -> same no-verdict wording"
+
+# The pinned wording is only suspended on that one row: any other unverified
+# reason under --dry-run still says "would refuse", because there the dry run
+# really does know what the real publish would do.
+KV_GET_STATUS=""
+guard_direct || { guard_err; fail "the dry-run downgrade must proceed with no record at all"; }
+grep -q "would refuse" "$TD/guard.err" \
+  || { guard_err; fail "a dry run with no record must still warn with 'would refuse'"; }
+if grep -q "over REST" "$TD/guard.err"; then
+  guard_err
+  fail "a plain missing record was reported as a REST read failure"
+fi
+KV_GET_STATUS="miss"
+DRY_RUN=false
+pass "every other unverified reason under DRY_RUN keeps the 'would refuse' wording"
+
 # --- 6i. the guard arms what deploy_pages re-asserts before the upload -------
 # The guard runs in the preflight and the upload happens minutes later, so
 # deploy_pages re-checks these three before wrangler. Every path that lets the

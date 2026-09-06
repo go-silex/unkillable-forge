@@ -464,6 +464,10 @@ snapshot_guard_pass() {
 snapshot_guard() {
   local snap="$LIB_DIR/snapshot.py"
   local unverified_reason=""
+  # Set only for the one unverified row a dry run cannot turn into a verdict:
+  # a REST read the real publish would retry over wrangler OAuth. Everything
+  # else keeps the "would refuse" wording below.
+  local unverified_no_verdict=false
   local live_id=""
   SNAPSHOT_GUARD_PASSED=false
   SNAPSHOT_GUARD_LIVE_ID=""
@@ -502,12 +506,27 @@ snapshot_guard() {
       # A miss (404) is a genuine absence — the verdict decides. An unset
       # status means the caller replaced kv_get_key (test suites do), so it
       # keeps the same meaning as a miss.
+      #
+      # A dry run gets its own wording on both failure rows: kv_get_key skips
+      # the wrangler-OAuth fallback there (three spawns, possibly through
+      # `npx --yes wrangler`, possibly interactive), so a REST denial is NOT
+      # the whole story and this run cannot know the real verdict.
       case "${KV_GET_STATUS:-}" in
         denied)
-          unverified_reason="KV record read denied — the API token lacks Workers KV read, or wrangler OAuth is unavailable"
+          if $DRY_RUN; then
+            unverified_reason="KV record read denied over REST — the API token lacks Workers KV read; a real publish retries that read through wrangler OAuth, which this dry run does not invoke"
+            unverified_no_verdict=true
+          else
+            unverified_reason="KV record read denied — the API token lacks Workers KV read, or wrangler OAuth is unavailable"
+          fi
           ;;
         error)
-          unverified_reason="KV record read failed"
+          if $DRY_RUN; then
+            unverified_reason="KV record read failed over REST — a real publish retries that read through wrangler OAuth, which this dry run does not invoke"
+            unverified_no_verdict=true
+          else
+            unverified_reason="KV record read failed"
+          fi
           ;;
       esac
     fi
@@ -562,7 +581,10 @@ print("true" if d.get("verifiable") is True else "false")' 2>/dev/null) || verif
         : # fall through to unverified handling below
         ;;
       *)
+        # This reason replaces whatever the KV read left: the compare failing
+        # is a verdict a dry run CAN predict, so drop the no-verdict marker.
         unverified_reason="snapshot compare failed (exit $rc)"
+        unverified_no_verdict=false
         ;;
     esac
   fi
@@ -577,7 +599,13 @@ print("true" if d.get("verifiable") is True else "false")' 2>/dev/null) || verif
     return 0
   fi
   if $DRY_RUN; then
-    if [ -n "$unverified_reason" ]; then
+    if $unverified_no_verdict; then
+      # No "would refuse" here, deliberately. The REST read was refused, and
+      # the real publish retries it over wrangler OAuth — which this dry run
+      # skipped on purpose. Announcing a refusal the real publish may never
+      # make is what teaches operators to ignore a dry-run refusal.
+      warn "hub drift unverified ($unverified_reason) — so this dry run cannot predict the real verdict: a real deploy refuses only if that OAuth retry fails too"
+    elif [ -n "$unverified_reason" ]; then
       warn "would refuse: hub drift unverified ($unverified_reason) — a real deploy needs a synced hub or --allow-unverified"
     else
       warn "would refuse: hub drift unverified — a real deploy needs a synced hub or --allow-unverified"
@@ -1089,10 +1117,19 @@ kv_get_key() {
   if [ "$KV_GET_STATUS" = "miss" ]; then
     return 1
   fi
-  # The fallback runs under --dry-run too. A dry run is a gate, not a preview:
-  # `kv key get` (and the whoami / namespace-list probes behind it) mutate
-  # nothing, and skipping them made the dry run refuse where the real publish
-  # succeeds through OAuth — which trains operators to ignore a "would refuse".
+  # A dry run stops here, because this fallback is anything but free:
+  # kv_wrangler routes through kv_wrangler_verify, which spawns
+  # `wrangler whoami` and `wrangler kv namespace list` before the read itself
+  # — three wrangler invocations for one rehearsed read — and forge_wrangler
+  # resolves to `npx --yes wrangler` when no global wrangler is installed, so
+  # the rehearsal can go fetch a package from npm. Any of them can drop into
+  # an interactive OAuth flow and hang a run that is supposed to be cheap and
+  # predictable. A dry run therefore keeps the REST classification, and
+  # snapshot_guard reports it WITHOUT claiming a verdict: it says the read was
+  # denied over REST and that a real publish retries through wrangler OAuth.
+  if $DRY_RUN; then
+    return 1
+  fi
   local out
   if out=$(kv_wrangler kv key get "$key" 2>/dev/null); then
     KV_GET_STATUS="ok"

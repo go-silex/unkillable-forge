@@ -180,6 +180,16 @@ lacks Workers KV read, or wrangler OAuth is unavailable"* and *"KV record read
 failed"*. `--allow-unverified` is still required; the operator is told the real
 cause instead of being sent to refresh a hub that is fine.
 
+Under `--dry-run` the fallback is deliberately **not** attempted: `kv_wrangler`
+spawns `wrangler whoami` and `wrangler kv namespace list` before the read,
+`forge_wrangler` resolves to `npx --yes wrangler` when no global wrangler
+exists, and either can drop into an interactive OAuth flow and hang a
+rehearsal. So a REST-denied read makes the dry run say what it actually knows
+— the read was denied over REST, a real publish retries it through wrangler
+OAuth — and decline to predict the verdict, instead of printing a
+`would refuse` a real publish would not honour. Every other unverifiable
+reason keeps its `would refuse …` line.
+
 **Recovery from a lost record: `publish.sh --reanchor-snapshot`.**
 `snapshot_record` is best-effort, so one refused KV write after a successful
 deploy leaves the record anchored on the *previous* deployment — `untrusted` on
