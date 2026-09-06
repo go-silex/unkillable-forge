@@ -120,6 +120,122 @@ run --json --quiet
 is_json "$OUT" || fail "--json --quiet must still emit JSON only: ${OUT}"
 pass "--json --quiet prefers JSON"
 
+# ── advisory · the OG thumbnail toolchain is reported, never gated ─────────────
+# gen-og-images.sh warns and exits 0 without chrome/ffmpeg/jq, so a publish
+# from such a machine ships an artifact with no thumbnail — and since the
+# deploy is a full snapshot rebuilt from the local hub, it also drops the
+# thumbnails other machines rendered. Doctor must say so while keeping its
+# three-way exit contract intact.
+STRIP_BIN="$TD/strip-bin"
+mkdir -p "$STRIP_BIN"
+# Everything forge-doctor.sh itself needs, nothing the OG renderer needs:
+# chrome/chromium, ffmpeg and jq are deliberately absent from this PATH, and
+# $HOME (the fixture home) carries no Playwright cache either.
+for tool in sh bash dirname cat python3 uname; do
+  TOOL_PATH="$(command -v "$tool" 2>/dev/null || true)"
+  if [ -n "$TOOL_PATH" ]; then
+    ln -sf "$TOOL_PATH" "$STRIP_BIN/$tool"
+  fi
+done
+SH_ABS="$(command -v "$SH" || true)"
+[ -n "$SH_ABS" ] || fail "cannot resolve the test interpreter: $SH"
+
+# ffmpeg and jq are PATH-only, so stripping PATH always hides them. Chrome is
+# not: the renderer also accepts an absolute macOS Chrome.app, which a GitHub
+# macOS runner really has. Expect exactly what the renderer would find.
+OG_EXPECT="chrome ffmpeg jq"
+OG_MAC_CHROME=0
+if [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
+  OG_MAC_CHROME=1
+  OG_EXPECT="ffmpeg jq"
+fi
+
+# run_stripped <args...> — doctor with a PATH that has no OG toolchain.
+run_stripped() {
+  set +e
+  OUT="$(PATH="$STRIP_BIN" "$SH_ABS" "$DOCTOR" "$@" 2>"$TD/err")"
+  RC=$?
+  set -e
+  ERR="$(cat "$TD/err")"
+  ERR_LINES="$(wc -l < "$TD/err" | tr -d ' ')"
+}
+
+run_stripped
+[ "$RC" -eq 0 ] || fail "a missing OG toolchain must not change the exit code, got $RC: $OUT $ERR"
+for binary in $OG_EXPECT; do
+  echo "$OUT" | grep -q "$binary" \
+    || fail "the report must name the missing $binary, got: $OUT"
+done
+echo "$OUT" | grep -q 'thumbnail' \
+  || fail "the report must name the thumbnail consequence, got: $OUT"
+echo "$OUT" | grep -q 'full snapshot' \
+  || fail "the report must name the full-snapshot consequence (publishing from here drops other machines' thumbnails), got: $OUT"
+echo "$OUT" | grep -q '⚠' \
+  || fail "an incomplete toolchain is a warning, got: $OUT"
+if echo "$OUT" | grep -q '✗'; then
+  fail "an incomplete toolchain must not be reported as an issue, got: $OUT"
+fi
+echo "$OUT" | grep -q 'status   : OK' \
+  || fail "an incomplete toolchain must keep the status OK, got: $OUT"
+echo "$OUT" | grep -q '→ og images' \
+  || fail "the report must hand over an install line, got: $OUT"
+pass "missing OG toolchain → exit 0, warning naming the binaries and the snapshot cost"
+
+run_stripped --json
+[ "$RC" -eq 0 ] || fail "--json must stay exit 0 with no OG toolchain, got $RC"
+is_json "$OUT" || fail "--json stdout is not valid JSON: ${OUT}"
+printf '%s' "$OUT" | python3 -c \
+  'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["og_toolchain"]["ok"] is False and d["deploy_blockers"] == [] and d["ok"] is True else 1)' \
+  || fail "--json must carry og_toolchain.ok false while ok stays true and deploy_blockers stays empty, got: $OUT"
+printf '%s' "$OUT" | OG_EXPECT="$OG_EXPECT" python3 -c \
+  'import json,os,sys; m=json.load(sys.stdin)["og_toolchain"]["missing"]; sys.exit(0 if m == os.environ["OG_EXPECT"].split() else 1)' \
+  || fail "--json must list exactly the missing binaries ($OG_EXPECT), got: $OUT"
+pass "--json exposes og_toolchain without touching ok / deploy_blockers"
+
+run_stripped --quiet
+[ "$RC" -eq 0 ] || fail "--quiet must stay exit 0 with no OG toolchain, got $RC"
+[ -z "$OUT" ] || fail "--quiet must not print to stdout, got: $OUT"
+[ -z "$ERR" ] || fail "--quiet must stay silent when the toolchain is the only finding, got: $ERR"
+pass "--quiet stays silent: the toolchain is advisory, not a failure"
+
+# The install line must match the host, and name the packages that are missing.
+case "$(uname -s)" in
+  Linux)
+    run_stripped
+    echo "$OUT" | grep -q 'package manager' \
+      || fail "with no apt-get/dnf on PATH the hint must defer to the operator, got: $OUT"
+    printf '#!/bin/sh\nexit 0\n' > "$STRIP_BIN/apt-get"
+    chmod +x "$STRIP_BIN/apt-get"
+    run_stripped
+    if [ "$OG_MAC_CHROME" -eq 1 ]; then
+      echo "$OUT" | grep -q 'apt-get install -y ffmpeg jq' \
+        || fail "an apt host must get the apt-get install line, got: $OUT"
+    else
+      echo "$OUT" | grep -q 'apt-get install -y chromium' \
+        || fail "an apt host must name the chromium package, got: $OUT"
+      echo "$OUT" | grep -q 'ffmpeg jq' \
+        || fail "the install line must carry every missing package, got: $OUT"
+    fi
+    pass "install hint follows the host package manager (apt-get)"
+    ;;
+  Darwin)
+    run_stripped
+    if [ "$OG_MAC_CHROME" -eq 0 ]; then
+      echo "$OUT" | grep -q 'brew install --cask google-chrome' \
+        || fail "macOS must get the Chrome cask line, got: $OUT"
+    fi
+    echo "$OUT" | grep -q 'brew install ffmpeg jq' \
+      || fail "macOS must get the formula line for ffmpeg/jq, got: $OUT"
+    pass "install hint follows the host package manager (brew)"
+    ;;
+  *)
+    run_stripped
+    echo "$OUT" | grep -q 'ffmpeg' \
+      || fail "an unknown host must still name the binaries, got: $OUT"
+    pass "install hint names the binaries on an unknown host"
+    ;;
+esac
+
 # ── exit 2 · config fine, credentials missing → deploy blocked ─────────────────
 export FORGE_ENV="$TD/absent.env"
 [ ! -f "$TD/absent.env" ] || fail "fixture error: absent.env exists"

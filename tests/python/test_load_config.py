@@ -27,6 +27,8 @@ from load_config import (  # noqa: E402
     hub_root_candidates,
     load_config,
     main,
+    og_toolchain,
+    og_toolchain_warning,
     parse_forge_env,
     pick_forge_repo,
     resolve_hub_root,
@@ -509,6 +511,157 @@ class InferHubLayoutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             hub = Path(td)
             self.assertEqual(infer_hub_layout(hub), ("artifacts", []))
+
+
+class OgToolchainTests(unittest.TestCase):
+    """The OG probe must mirror gen-og-images.sh, and must never gate.
+
+    gen-og-images.sh is best-effort by design: a missing binary warns and
+    exits 0, so a publish silently ships an artifact with no thumbnail. The
+    probe exists to say so at setup time -- which only works if it resolves
+    chrome the way the renderer does, and if it can never turn into a gate.
+    """
+
+    def setUp(self) -> None:
+        self._td = tempfile.TemporaryDirectory()
+        self.root = Path(self._td.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        # A real machine has chrome/ffmpeg/jq on PATH, a Playwright cache
+        # under $HOME, and -- on a macOS CI runner -- a genuine
+        # /Applications/Google Chrome.app. All three inputs are redirected
+        # into the tmpdir so the verdict comes from the fixture alone.
+        self._envcm = patch.dict(
+            os.environ, {"HOME": str(self.home), "PATH": ""}, clear=False
+        )
+        self._envcm.start()
+        self._appcm = patch(
+            "load_config.OG_CHROME_MACOS_APP",
+            str(self.root / "no-Applications/Google Chrome"),
+        )
+        self._appcm.start()
+
+    def tearDown(self) -> None:
+        self._appcm.stop()
+        self._envcm.stop()
+        self._td.cleanup()
+
+    def _exe(self, path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def _minimal_cfg(self, hub_root: str) -> dict:
+        return {
+            "version": 1,
+            "hub_root": hub_root,
+            "artifacts_dir": "artifacts",
+            "public_host": "forge.example.com",
+            "forge_repo": FORGE_REPO_HTTPS,
+            "site_dir": "site",
+            "registry_dir": "registry",
+            "internal_prefix": "a",
+        }
+
+    def test_empty_path_reports_every_binary_missing(self) -> None:
+        probe = og_toolchain()
+        self.assertFalse(probe["ok"])
+        self.assertEqual(probe["missing"], ["chrome", "ffmpeg", "jq"])
+        self.assertEqual(probe["chrome"], "")
+
+    def test_binaries_on_path_report_ok(self) -> None:
+        bin_dir = self.root / "bin"
+        chrome = self._exe(bin_dir / "google-chrome")
+        self._exe(bin_dir / "ffmpeg")
+        self._exe(bin_dir / "jq")
+        os.environ["PATH"] = str(bin_dir)
+        probe = og_toolchain()
+        self.assertTrue(probe["ok"])
+        self.assertEqual(probe["missing"], [])
+        self.assertEqual(probe["chrome"], str(chrome))
+
+    def test_path_order_matches_the_renderer(self) -> None:
+        # gen-og-images.sh tries google-chrome, google-chrome-stable, chromium,
+        # chromium-browser in that order. A doctor that preferred another name
+        # would report a chrome the renderer does not use.
+        bin_dir = self.root / "bin-order"
+        chrome = self._exe(bin_dir / "google-chrome")
+        self._exe(bin_dir / "chromium")
+        os.environ["PATH"] = str(bin_dir)
+        self.assertEqual(og_toolchain()["chrome"], str(chrome))
+
+    def test_macos_chrome_app_is_honoured(self) -> None:
+        # The renderer's second stop is an absolute /Applications path, so the
+        # constant is redirected into the tmpdir rather than the real one.
+        app = self._exe(
+            self.root / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        )
+        with patch("load_config.OG_CHROME_MACOS_APP", str(app)):
+            probe = og_toolchain()
+        self.assertEqual(probe["chrome"], str(app))
+        self.assertEqual(probe["missing"], ["ffmpeg", "jq"])
+
+    def test_playwright_cache_is_the_last_resort(self) -> None:
+        cached = self._exe(
+            self.home
+            / ".cache/ms-playwright/chromium-1187/chrome-linux64/chrome"
+        )
+        self.assertEqual(og_toolchain()["chrome"], str(cached))
+
+    def test_playwright_mac_cache_layout_is_honoured(self) -> None:
+        cached = self._exe(
+            self.home
+            / ".cache/ms-playwright/chromium-1187/chrome-mac/Chromium.app"
+            / "Contents/MacOS/Chromium"
+        )
+        self.assertEqual(og_toolchain()["chrome"], str(cached))
+
+    def test_non_executable_candidate_is_not_chrome(self) -> None:
+        # The renderer tests -x on the cached path; a downloaded-but-unusable
+        # cache entry must read as missing, not as a working chrome.
+        stub = self.home / ".cache/ms-playwright/chromium-1187/chrome-linux/chrome"
+        stub.parent.mkdir(parents=True)
+        stub.write_text("not executable\n", encoding="utf-8")
+        stub.chmod(0o644)
+        self.assertEqual(og_toolchain()["chrome"], "")
+
+    def test_warning_names_the_binaries_and_the_snapshot_cost(self) -> None:
+        line = og_toolchain_warning(og_toolchain())
+        for name in ("chrome", "ffmpeg", "jq"):
+            self.assertIn(name, line)
+        self.assertIn("no thumbnail", line)
+        self.assertIn("full", line)
+        self.assertIn("snapshot", line)
+        self.assertEqual(line.count("\n"), 0)
+
+    def test_probe_is_advisory_never_a_gate(self) -> None:
+        hub = self.root / "hub"
+        (hub / "00_COCKPIT").mkdir(parents=True)
+        (hub / "01_COMPANY").mkdir()
+        (hub / "artifacts").mkdir()
+        cfg = self._minimal_cfg(str(hub))
+
+        without = doctor(cfg)
+        bin_dir = self.root / "bin"
+        self._exe(bin_dir / "google-chrome")
+        self._exe(bin_dir / "ffmpeg")
+        self._exe(bin_dir / "jq")
+        os.environ["PATH"] = str(bin_dir)
+        with_tools = doctor(cfg)
+
+        # Load-bearing: the advisory may never become a gate.
+        self.assertEqual(without["ok"], with_tools["ok"])
+        self.assertEqual(without["deploy_blockers"], with_tools["deploy_blockers"])
+        self.assertEqual(without["deploy_ready"], with_tools["deploy_ready"])
+        self.assertNotIn(
+            "og", " ".join(without["issues"] + with_tools["issues"]).split()
+        )
+
+        self.assertFalse(without["og_toolchain"]["ok"])
+        self.assertTrue(with_tools["og_toolchain"]["ok"])
+        extra = [w for w in without["warnings"] if w not in with_tools["warnings"]]
+        self.assertEqual(extra, [og_toolchain_warning(without["og_toolchain"])])
 
 
 if __name__ == "__main__":

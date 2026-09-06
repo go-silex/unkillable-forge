@@ -43,6 +43,7 @@ Reached only after the last configuration step (token) and the final
 ✅ forge-doctor.sh --online exit 0 — ready (hub OK AND deploy_ready AND online_ok)
 ⚠️ optional Shlink shortlinks — Pages SHLINK_* + local CLI (step 6b)
 ⚠️ recommended external craft plugins (step 7)
+⚠️ optional OG thumbnail toolchain — chrome + ffmpeg + jq (step 7b)
 ```
 
 An offline `forge-doctor.sh` exit 0 is **not** the criterion: it only proves the
@@ -674,6 +675,55 @@ Every harness:
 ```bash
 npx skills add alchaincyf/huashu-design
 ```
+
+## Step 7b — OG thumbnail toolchain (optional)
+
+Renders `site/a/<slug>/og.jpg` for every artifact: the **thumbnails in the
+forge catalogue**, and the **preview card** a paste of the link shows in Slack,
+LinkedIn or iMessage. Not part of the hub or the deploy credentials — doctor
+stays exit `0` without it.
+
+| Binary | Role |
+|---|---|
+| `google-chrome` / `chromium` | headless screenshot at deck native 1920×1080 |
+| `ffmpeg` | cover-crop to the 1200×630 OG card |
+| `jq` | reads the artifact registry |
+
+A Playwright chromium already cached under `~/.cache/ms-playwright/` counts as
+chrome — install nothing if `forge-doctor.sh` reports the toolchain complete.
+
+```bash
+# Debian / Ubuntu / WSL
+sudo apt-get install -y chromium-browser ffmpeg jq
+# Fedora / RHEL
+sudo dnf install -y chromium ffmpeg jq
+# macOS
+brew install --cask google-chrome && brew install ffmpeg jq
+```
+
+**Skipping is supported.** `gen-og-images.sh` is best-effort: a missing binary
+warns and exits `0`, so generate and publish keep working — the artifact simply
+goes live with no thumbnail and no preview card.
+
+**The one non-obvious consequence.** A publish deploys a **full snapshot**
+rebuilt from the local hub, so it does not only skip its own thumbnail: it also
+**removes from the live site the thumbnails other machines rendered**, silently
+and with a successful publish. Measured on 2026-09-06: 30 of 31 artifacts kept
+their thumbnail, the 31st lost the one another machine had generated. So on a
+shared forge, either every publishing machine has the toolchain, or expect
+thumbnails to come and go with whoever published last.
+
+Check (never changes the exit code):
+
+```bash
+: "${FORGE_ROOT:?run § Shell setup first}"
+bash "$FORGE_ROOT/scripts/forge-doctor.sh"
+```
+
+An incomplete toolchain prints a `⚠` line naming the missing binaries and this
+consequence, plus a `→ og images:` install line for the host. It is a warning:
+`ok`, `deploy_ready` and the exit code are untouched, `--quiet` stays silent,
+and `--json` carries `og_toolchain` (`{ok, missing, chrome}`).
 
 ## Step 8 — Final doctor (`--online`) and report
 
