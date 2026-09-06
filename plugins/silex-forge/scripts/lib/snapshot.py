@@ -19,12 +19,15 @@ Subcommands -- JSON on stdout, human-readable lines on stderr:
 
   fingerprint      per-slug sha256 of the local hub
   live-deployment  id + engine commit of the live Pages deployment
-  compare          record vs local hub -> verdict (+ exit 3 on unexpected removals)
+  compare          record vs local hub -> verdict (+ exit 3 on unexpected
+                   removals, exit 4 when the live content cannot be verified)
   record           the JSON record to store in KV after a successful deploy
 
 Exit codes: 0 = safe to deploy, 3 = unexpected removals (the caller refuses),
-1 = usage or internal error. `live-deployment` exits 0 even when the lookup
-fails: the caller decides what an unknown live deployment means.
+4 = cannot verify what is live (no/unreadable record, live lookup failed, or
+record anchored on another deployment), 1 = usage or internal error.
+`live-deployment` exits 0 even when the lookup fails: the caller decides what
+an unknown live deployment means.
 """
 from __future__ import annotations
 
@@ -55,6 +58,7 @@ SKIP_NAMES = frozenset({".DS_Store", "Thumbs.db", "__pycache__"})
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_REMOVALS = 3
+EXIT_UNVERIFIED = 4
 
 
 def _say(line: str) -> None:
@@ -283,14 +287,18 @@ def compare_record(
     local: dict[str, str],
     live_deployment_id: str,
     expected_removals: list[str],
+    live_unknown: bool = False,
 ) -> dict[str, Any]:
     """Classify the local hub against a fingerprint record.
 
-    `ok` mirrors safe-to-deploy: it is false exactly when a removal was not
-    announced by the operator. `verdict` names the strongest concern, and an
-    untrusted record outranks its own removal list in that field -- the
-    removals are still reported, because an out-of-date record plus missing
-    artifacts is the very situation that loses other people's work.
+    `verifiable` is false when the live content cannot be determined
+    (`unverified`) or the record is anchored on another deployment
+    (`untrusted`). `ok` is safe-to-deploy: false when there are unexpected
+    removals or the result is not verifiable. `verdict` names the strongest
+    concern, and an unverifiable state outranks its own removal list in that
+    field -- the removals are still reported, because an out-of-date record
+    plus missing artifacts is the very situation that loses other people's
+    work.
     """
     raw_slugs = record.get("slugs")
     recorded: dict[str, str] = {}
@@ -308,7 +316,12 @@ def compare_record(
     )
 
     if not recorded:
-        verdict = "bootstrap"
+        if (not live_unknown) and live_deployment_id == "":
+            verdict = "bootstrap"
+        else:
+            verdict = "unverified"
+    elif live_unknown:
+        verdict = "unverified"
     elif record_deployment_id != live_deployment_id:
         verdict = "untrusted"
     elif unexpected:
@@ -318,8 +331,11 @@ def compare_record(
     else:
         verdict = "match"
 
+    verifiable = verdict not in ("unverified", "untrusted")
     return {
-        "ok": not unexpected,
+        "ok": not unexpected and verifiable,
+        "verifiable": verifiable,
+        "live_unknown": bool(live_unknown),
         "verdict": verdict,
         "removals": removals,
         "unexpected_removals": unexpected,
@@ -333,7 +349,26 @@ def compare_record(
 def _narrate(result: dict[str, Any], root: Path | None) -> None:
     verdict = result["verdict"]
     if verdict == "bootstrap":
-        _say("no fingerprint record yet -- removal guard skipped (first publish, or KV record absent)")
+        _say(
+            "no fingerprint record yet -- this Pages project has no live "
+            "deployment, so there is nothing to delete"
+        )
+    if verdict == "unverified":
+        _say(
+            "! cannot determine what is live on forge "
+            "(no fingerprint record, unreadable KV, broken record, or live "
+            "deployment lookup failed)"
+        )
+        _say(
+            "! a full-snapshot deploy from this machine could therefore "
+            "delete artifacts a teammate published"
+        )
+        _say("  make sure this machine's hub copy is up to date, then re-run:")
+        _say(
+            "    1. sync the shared hub (Drive client, rclone, whatever syncs "
+            "it to {})".format(_quoted(root))
+        )
+        _say("    2. to deploy anyway, knowingly, re-run with --allow-unverified")
     if verdict == "untrusted":
         _say(
             "! record describes deployment {} but the live deployment is {}".format(
@@ -341,8 +376,20 @@ def _narrate(result: dict[str, Any], root: Path | None) -> None:
                 result["live_deployment_id"] or "(unknown)",
             )
         )
-        _say("! a rollback or an out-of-band dashboard deploy happened: this record no longer describes the live site")
-        _say("! treat its removal list as advisory and check the live site before you overwrite it")
+        _say(
+            "! a rollback or an out-of-band dashboard deploy happened: this "
+            "record no longer describes the live site"
+        )
+        _say(
+            "! refusing to deploy until the live content can be verified "
+            "(or you pass --allow-unverified)"
+        )
+        _say("  make sure this machine's hub copy is up to date, then re-run:")
+        _say(
+            "    1. sync the shared hub (Drive client, rclone, whatever syncs "
+            "it to {})".format(_quoted(root))
+        )
+        _say("    2. to deploy anyway, knowingly, re-run with --allow-unverified")
     if result["removals"]:
         _say("recorded slug(s) absent from the local hub: " + " ".join(result["removals"]))
     if result["additions"]:
@@ -360,11 +407,11 @@ def _narrate(result: dict[str, Any], root: Path | None) -> None:
         )
         _say("  the local hub is very likely behind the team copy. Fix it, then publish again:")
         _say(
-            "    1. pull the shared hub, e.g. rclone copy <drive-remote>:<hub> {}".format(
+            "    1. make sure this machine's hub copy is up to date (Drive "
+            "client, rclone, whatever syncs it to {}), then re-run".format(
                 _quoted(root)
             )
         )
-        _say("       (or let the Google Drive client finish syncing), then re-run publish")
         _say("    2. if the deletion is intended, re-run publish with --allow-removals")
 
 
@@ -384,10 +431,16 @@ def cmd_compare(args: argparse.Namespace) -> int:
         local,
         args.live_deployment_id,
         parse_expected_removals(args.expected_removals),
+        live_unknown=bool(args.live_unknown),
     )
     _emit(result)
     _narrate(result, root)
-    return EXIT_REMOVALS if result["unexpected_removals"] else EXIT_OK
+    if result["unexpected_removals"]:
+        return EXIT_REMOVALS
+    if not result["verifiable"]:
+        return EXIT_UNVERIFIED
+    return EXIT_OK
+
 
 
 # --------------------------------------------------------------------- record
@@ -440,7 +493,11 @@ def build_parser() -> argparse.ArgumentParser:
     ).set_defaults(func=cmd_live_deployment)
 
     cmp_ap = sub.add_parser(
-        "compare", help="record vs local hub; exit 3 on unexpected removals"
+        "compare",
+        help=(
+            "record vs local hub; exit 3 on unexpected removals, "
+            "exit 4 when live content cannot be verified"
+        ),
     )
     cmp_ap.add_argument(
         "--record", required=True, help="record JSON path, or - for stdin"
@@ -449,6 +506,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--live-deployment-id",
         default="",
         help="deployment id the record must match to be trusted",
+    )
+    cmp_ap.add_argument(
+        "--live-unknown",
+        action="store_true",
+        help="live deployment lookup failed; cannot anchor the record",
     )
     cmp_ap.add_argument(
         "--expected-removals",

@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+### Changed
+
+- Hub drift guard no longer proceeds when it cannot determine what is live. Missing, unreadable, or unparseable `snapshot:live` KV, a failed live-deployment lookup, or a missing `snapshot.py` used to warn and continue — the same path that, on 2026-09-06, let a first-run `bootstrap` (no record yet) deploy a hub copy missing one artifact, delete it from the live site, then baseline the 30-slug state so later runs saw a clean match. Unverifiable states now refuse with exit 4 (`unverified` / `untrusted`) unless `--allow-unverified`; `--dry-run` downgrades that refusal to a warning because it deploys nothing; a Pages project with no live deployment still bootstraps freely. Proven unexpected removals stay exit 3 / `--allow-removals`. Sync-agnostic remedy: make sure this machine's hub copy is up to date, then re-run.
+
 ## [1.15.0] - 2026-09-06
 
 ### Fixed

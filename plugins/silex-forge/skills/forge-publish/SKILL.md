@@ -78,6 +78,22 @@ Local config: `~/.config/silex/forge.config.json` (fallback plugin
 `forge.config.example.json`). `pages_project` / `public_host` live in that
 file, not in `forge.env`.
 
+## Hub drift guard
+
+Every publish is a full Pages snapshot from this machine's hub copy. The KV
+guard is the only cross-machine protection — silencing it can delete a
+teammate's deck.
+
+| Refusal | Override | Agent action |
+|---|---|---|
+| Proven unexpected removal (exit 3) | `--allow-removals` | **Stop.** Tell the operator this machine's hub may be behind; let Drive client / rclone finish, then retry. |
+| Cannot verify what is live (exit 4: no/unreadable/unparseable `snapshot:live`, failed live lookup, missing `snapshot.py`, or record from another deployment) | `--allow-unverified` | **Stop.** Same remedy — sync, then retry. |
+
+**NEVER** pass `--allow-removals` or `--allow-unverified` to get past a refusal.
+A refusal means this machine's hub copy may be behind the team copy: stop, tell
+the operator to let their sync finish (Drive client / rclone), then retry. Only
+the operator decides to delete live artifacts.
+
 ## Usage
 
 ```bash

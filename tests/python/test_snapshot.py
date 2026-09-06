@@ -208,13 +208,32 @@ class CompareTests(SnapshotCLIBase):
         )
         return proc.returncode, self._json(proc)
 
-    def test_empty_record_bootstraps(self) -> None:
+    def test_empty_record_no_live_deployment_bootstraps(self) -> None:
         self._artifact(self.artifacts, "deck-a")
-        code, payload = self._compare("-", stdin="")
-        self.assertEqual(0, code)
+        proc = self._run(
+            "compare",
+            "--record",
+            "-",
+            "--live-deployment-id",
+            "",
+            stdin="",
+        )
+        payload = self._json(proc)
+        self.assertEqual(0, proc.returncode)
         self.assertEqual("bootstrap", payload["verdict"])
         self.assertTrue(payload["ok"])
+        self.assertTrue(payload["verifiable"])
+        self.assertFalse(payload["live_unknown"])
         self.assertEqual([], payload["removals"])
+
+    def test_empty_record_with_live_deployment_is_unverified(self) -> None:
+        self._artifact(self.artifacts, "deck-a")
+        code, payload = self._compare("-", stdin="")
+        self.assertEqual(4, code)
+        self.assertEqual("unverified", payload["verdict"])
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["verifiable"])
+        self.assertFalse(payload["live_unknown"])
 
     def test_identical_tree_matches(self) -> None:
         self._artifact(self.artifacts, "deck-a")
@@ -223,8 +242,20 @@ class CompareTests(SnapshotCLIBase):
         code, payload = self._compare(str(record))
         self.assertEqual(0, code)
         self.assertEqual("match", payload["verdict"])
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["verifiable"])
         self.assertEqual([], payload["additions"])
         self.assertEqual([], payload["changed"])
+
+    def test_valid_record_with_live_unknown_is_unverified(self) -> None:
+        self._artifact(self.artifacts, "deck-a")
+        record = self._record(self._fingerprint()["slugs"])
+        code, payload = self._compare(str(record), "--live-unknown")
+        self.assertEqual(4, code)
+        self.assertEqual("unverified", payload["verdict"])
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["verifiable"])
+        self.assertTrue(payload["live_unknown"])
 
     def test_added_and_changed_slug_is_drift(self) -> None:
         self._artifact(self.artifacts, "deck-a")
@@ -256,6 +287,7 @@ class CompareTests(SnapshotCLIBase):
         self.assertEqual(3, proc.returncode)
         self.assertEqual("removals", payload["verdict"])
         self.assertFalse(payload["ok"])
+        self.assertTrue(payload["verifiable"])
         self.assertEqual(["teammate-deck"], payload["removals"])
         self.assertEqual(["teammate-deck"], payload["unexpected_removals"])
         self.assertIn("--allow-removals", proc.stderr)
@@ -294,8 +326,22 @@ class CompareTests(SnapshotCLIBase):
         self.assertEqual(["teammate-deck"], payload["unexpected_removals"])
         self.assertEqual("dep-rolled-back", payload["record_deployment_id"])
         self.assertEqual(self.LIVE, payload["live_deployment_id"])
+        self.assertFalse(payload["verifiable"])
+        self.assertFalse(payload["ok"])
+        # Precedence: proven removals (exit 3) outrank unverifiable (exit 4).
         self.assertEqual(3, proc.returncode)
         self.assertIn("dep-rolled-back", proc.stderr)
+        self.assertIn("--allow-unverified", proc.stderr)
+
+    def test_untrusted_record_without_removals_exits_unverified(self) -> None:
+        self._artifact(self.artifacts, "deck-a")
+        record = self._record(self._fingerprint()["slugs"], deployment_id="dep-rolled-back")
+        code, payload = self._compare(str(record))
+        self.assertEqual(4, code)
+        self.assertEqual("untrusted", payload["verdict"])
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["verifiable"])
+        self.assertEqual([], payload["unexpected_removals"])
 
     def test_unreadable_record_path_is_an_error_not_a_bootstrap(self) -> None:
         self._artifact(self.artifacts, "deck-a")

@@ -108,7 +108,9 @@ done
 
 # curl: classify by HTTP method. Anything that can change remote state lands in
 # $REC; a plain GET lands in $REC_READ and returns an empty body, which the
-# guard reads as "no snapshot record" (warn, proceed).
+# guard reads as "no snapshot record". With no verifiable live anchor that is
+# now an unverified refusal — and under DRY_RUN it becomes a "would refuse"
+# warning so the dry run still completes.
 cat > "$TD/bin/curl" <<EOS
 #!/usr/bin/env bash
 _args="\$*"
@@ -348,6 +350,8 @@ grep -q '^  host    : forge.test.invalid$' "$out" \
   || fail "plan does not report the config's public host"
 grep -q 'dry run OK — nothing deployed' "$out" \
   || fail "plan does not end with the dry-run OK line"
+grep -q 'would refuse' "$out" \
+  || fail "dry-run unverified guard must warn with 'would refuse' (empty KV record)"
 refute 'wrangler pages deploy' "$out" "dry run announced a wrangler deploy"
 grep -q 'PUBLIC_HOST' "$WORK/repo/wrangler.toml" \
   || fail "wrangler.toml was not patched locally during the dry run"

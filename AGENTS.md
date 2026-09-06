@@ -87,23 +87,39 @@ shortlink is minted.
 Every deploy is a **full** snapshot of the Pages project built from the
 **local** hub, and the hub is a Drive copy shared across the team. A local copy
 that is behind therefore publishes a snapshot that **deletes** the artifacts
-other people added — the live site has no other source of truth, and the
-`.forge-locks` lockfile gives no cross-machine exclusion over Drive.
+other people added — the live site has no other source of truth. A local
+lockfile can give **no** cross-machine exclusion: teammates sync with the Drive
+desktop client, rclone, or nothing at all. This KV guard is the only
+protection.
 
 `preflight_before_live` fingerprints the hub (`lib/snapshot.py`, sha256 per slug
 over sorted relative path + bytes, so digests compare across machines), reads
 the `snapshot:live` KV record written after the last successful deploy, and
-refuses when the deploy would remove a recorded slug. It sits in the preflight,
-not in `deploy_pages`, because `cmd_remove` clears KV and `rm -rf`s the hub
-artifact **before** the deploy — a guard further down would abort after the
-destruction it exists to prevent.
+refuses when the deploy would remove a recorded slug — or when it cannot tell
+what is live. It sits in the preflight, not in `deploy_pages`, because
+`cmd_remove` clears KV and `rm -rf`s the hub artifact **before** the deploy — a
+guard further down would abort after the destruction it exists to prevent.
 
 |Situation|Behaviour|
 |---|---|
-|Unexpected removal|**refuses** — pull the hub, or `--allow-removals`|
+|Unexpected removal (proven)|**refuses** — exit 3 — unless `--allow-removals`|
 |`cmd_remove`'s own slug|passes (`EXPECTED_REMOVALS`)|
-|No record · KV unreadable · compare fails|warns, proceeds (pre-guard behaviour)|
-|Record from another deployment|`untrusted` on stderr, removals still checked|
+|No record AND the Pages project has no live deployment (fresh forge)|proceeds — verdict `bootstrap`, nothing live to lose|
+|No record / unreadable KV / unparseable record / compare failure / `snapshot.py` missing, while a live deployment exists or the live lookup itself failed|**refuses** — exit 4, verdict `unverified` — unless `--allow-unverified`|
+|Record anchored on another deployment id (rollback, dashboard deploy)|**refuses** — exit 4, verdict `untrusted` — removals still named; unless `--allow-unverified`|
+|`--dry-run`|exit 4 downgrades to a warning ("would refuse …") because a dry run deploys nothing; exit 3 stays fatal|
+
+This fail-closed rule exists because of a real loss on 2026-09-06. The guard's
+first run found no `snapshot:live` key yet, took verdict `bootstrap`, and
+skipped the check. A hub copy missing one artifact then deployed a full
+snapshot that deleted it live, and `snapshot_record` baselined the 30-slug
+state so later runs saw a clean "match". An unverifiable state therefore
+refuses and needs an explicit operator override.
+
+`snapshot.py compare` exit codes: `0` safe · `3` proven removals · `4` cannot
+verify · `1` usage/internal. Precedence: exit 3 outranks exit 4 outranks 0.
+The guard distinguishes "the project has no deployment" from "the live lookup
+failed" (`--live-unknown`): conflating them would re-open the hole offline.
 
 The record is anchored on `latest_deployment.id`: the Pages API exposes no
 per-file manifest, so the record is our own bookkeeping and would otherwise lie

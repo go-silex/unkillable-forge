@@ -59,6 +59,7 @@ PUBLISH_LOCK_DIR=""
 # snapshot holds and the local hub does not is unexpected drift.
 EXPECTED_REMOVALS=""
 ALLOW_REMOVALS=false
+ALLOW_UNVERIFIED=false
 SNAPSHOT_KV_KEY="snapshot:live"
 cleanup() {
   if [ -n "${PUBLISH_LOCK_FD:-}" ]; then
@@ -116,6 +117,12 @@ Usage:
               are live but absent from the local hub. Without it, that case
               refuses — a hub copy behind the shared Drive vault would
               otherwise silently remove other people's artifacts.
+
+  --allow-unverified : proceed even when the guard cannot verify what is
+              live (no/unreadable KV record, live lookup failed, or a
+              record anchored on another deployment). Without it, that
+              case refuses — a full-snapshot deploy from an unverified
+              hub can delete a teammate's artifact.
 
   SSOT   : \$ARTIFACTS_ROOT/<slug>/  (hub, forge.config)
   Deploy : wrangler pages deploy (token ~/.config/silex/forge.env)
@@ -353,51 +360,109 @@ preflight_before_live() {
 # rm -rf's the hub artifact well before it reaches deploy_pages, so a guard
 # sitting there would abort after the destruction it was meant to prevent.
 #
-# Degradation is deliberate. No record, unreadable KV or a failing compare all
-# warn and proceed: that is exactly today's behaviour, and turning a token
-# scope problem into a publish outage would be worse than the drift it guards.
-# Only a *proven* unexpected removal refuses.
+# A full-snapshot deploy that cannot see what is live can delete a teammate's
+# artifact. The 2026-09-06 loss happened exactly through the old bootstrap
+# branch (no KV record yet → warn and proceed → wipe baselined). Unverifiable
+# states therefore fail closed; --allow-unverified is the explicit override.
+live_deployment_json() {
+  PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 "$LIB_DIR/snapshot.py" live-deployment
+}
+
 snapshot_guard() {
   local snap="$LIB_DIR/snapshot.py"
-  [ -f "$snap" ] || { warn "snapshot.py missing — hub drift unverified"; return 0; }
+  local unverified_reason=""
   [ -n "${ARTIFACTS_ROOT:-}" ] || return 0
 
-  local record
-  record=$(kv_get_key "$SNAPSHOT_KV_KEY" 2>/dev/null) || record=""
-  if [ -z "$record" ]; then
-    warn "no snapshot record in KV — hub drift unverified (first run, or this token cannot read KV)"
-    return 0
-  fi
+  if [ ! -f "$snap" ]; then
+    unverified_reason="snapshot.py missing from the plugin"
+  else
+    local record
+    record=$(kv_get_key "$SNAPSHOT_KV_KEY" 2>/dev/null) || record=""
 
-  local live live_id
-  live=$(PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 "$snap" live-deployment 2>/dev/null) || live=""
-  live_id=$(printf '%s' "$live" | python3 -c 'import json, sys
+    local live="" live_id="" live_ok="false" live_kind="" live_unknown=false live_unknown_flag=""
+    if ! live=$(live_deployment_json 2>/dev/null); then
+      live="${live:-}"
+    fi
+    live_ok=$(printf '%s' "$live" | python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print("true" if d.get("ok") is True else "false")' 2>/dev/null) || live_ok="false"
+    live_id=$(printf '%s' "$live" | python3 -c 'import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
 sys.stdout.write(str(d.get("deployment_id") or ""))' 2>/dev/null) || live_id=""
+    live_kind=$(printf '%s' "$live" | python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+sys.stdout.write(str(d.get("error_kind") or ""))' 2>/dev/null) || live_kind=""
+    # live_deployment() returns ok:false/error_kind=no_deployment when the
+    # Pages project exists but has never been deployed — that is a known-empty
+    # live state, not a failed lookup. Conflating the two would refuse the
+    # first publish of a new forge (the 2026-09-06 hole, inverted).
+    if [ "$live_ok" = "true" ]; then
+      live_unknown=false
+    elif [ "$live_kind" = "no_deployment" ]; then
+      live_unknown=false
+      live_id=""
+    else
+      live_unknown=true
+    fi
+    if $live_unknown; then
+      live_unknown_flag="--live-unknown"
+    fi
 
-  local rc=0
-  printf '%s' "$record" | PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-    python3 "$snap" compare \
-      --record - \
-      --live-deployment-id "$live_id" \
-      --expected-removals "$EXPECTED_REMOVALS" >/dev/null || rc=$?
-  case "$rc" in
-    0) return 0 ;;
-    3)
-      if $ALLOW_REMOVALS; then
-        warn "hub drift: removing live artifacts because --allow-removals was passed"
-        return 0
-      fi
-      die "hub drift — this deploy would remove artifacts that are live. Pull the hub (rclone) and retry, or pass --allow-removals to delete them on purpose"
-      ;;
-    *)
-      warn "snapshot compare failed (exit $rc) — hub drift unverified"
-      return 0
-      ;;
-  esac
+    local rc=0
+    # shellcheck disable=SC2086  # live_unknown_flag is empty or one flag
+    printf '%s' "$record" | PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+      python3 "$snap" compare \
+        --record - \
+        --live-deployment-id "$live_id" \
+        --expected-removals "$EXPECTED_REMOVALS" \
+        $live_unknown_flag >/dev/null || rc=$?
+    case "$rc" in
+      0) return 0 ;;
+      3)
+        if $ALLOW_REMOVALS; then
+          warn "hub drift: removing live artifacts because --allow-removals was passed"
+          return 0
+        fi
+        die "hub drift — this deploy would remove artifacts that are live. Make sure this machine's hub copy is up to date (Drive client, rclone, whatever syncs it), then re-run; or pass --allow-removals to delete them on purpose"
+        ;;
+      4)
+        : # fall through to unverified handling below
+        ;;
+      *)
+        unverified_reason="snapshot compare failed (exit $rc)"
+        ;;
+    esac
+  fi
+
+  if $ALLOW_UNVERIFIED; then
+    if [ -n "$unverified_reason" ]; then
+      warn "hub drift unverified ($unverified_reason) — proceeding because --allow-unverified was passed"
+    else
+      warn "hub drift unverified — proceeding because --allow-unverified was passed"
+    fi
+    return 0
+  fi
+  if $DRY_RUN; then
+    if [ -n "$unverified_reason" ]; then
+      warn "would refuse: hub drift unverified ($unverified_reason) — a real deploy needs a synced hub or --allow-unverified"
+    else
+      warn "would refuse: hub drift unverified — a real deploy needs a synced hub or --allow-unverified"
+    fi
+    return 0
+  fi
+  if [ -n "$unverified_reason" ]; then
+    die "hub drift unverified ($unverified_reason) — make sure this machine's hub copy is up to date (Drive client, rclone, whatever syncs it), then re-run; or pass --allow-unverified to deploy anyway"
+  fi
+  die "hub drift unverified — make sure this machine's hub copy is up to date (Drive client, rclone, whatever syncs it), then re-run; or pass --allow-unverified to deploy anyway"
 }
 
 # Record the snapshot AFTER a successful deploy, keyed on the deployment the
@@ -1358,14 +1423,15 @@ if [ -n "${FORGE_PUBLISH_LIB_ONLY:-}" ]; then
 fi
 source_cf_credentials
 
-# --dry-run and --allow-removals are global: accepted anywhere in argv, for
-# every command. Strip them here, before the dispatch, so no per-command parser
-# ever sees them.
+# --dry-run, --allow-removals and --allow-unverified are global: accepted
+# anywhere in argv, for every command. Strip them here, before the dispatch,
+# so no per-command parser ever sees them.
 _dry_run_args=()
 for _arg in "$@"; do
   case "$_arg" in
     --dry-run) DRY_RUN=true ;;
     --allow-removals) ALLOW_REMOVALS=true ;;
+    --allow-unverified) ALLOW_UNVERIFIED=true ;;
     *) _dry_run_args+=("$_arg") ;;
   esac
 done

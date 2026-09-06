@@ -6,15 +6,17 @@
 # team. A local copy that is behind therefore publishes a snapshot that silently
 # DELETES the artifacts other people added.
 #
-# Why it must degrade: no record, unreadable KV or a failing compare all warn and
-# proceed — that is today's behaviour, and turning a token scope problem into a
-# publish outage would be worse than the drift. Only a proven unexpected removal
-# refuses. Both halves are asserted here.
+# Fail-closed: no record, unreadable KV, a broken record, a failed live lookup,
+# or a record anchored on another deployment all REFUSE unless the operator
+# passes --allow-unverified. A proven unexpected removal refuses unless
+# --allow-removals. Only a fresh Pages project (no live deployment, no record)
+# bootstraps. The 2026-09-06 loss was the old "bootstrap when no record" path.
 #
 # Isolation: FORGE_CONFIG + FORGE_ENV point into mktemp -d and no Cloudflare
-# credential is exported, so `snapshot.py live-deployment` fails on auth_missing
-# without ever opening a socket. kv_get_key is redefined after the lib-only
-# source, so the record is test-controlled. No network, no real hub.
+# credential is exported, so the REAL `snapshot.py live-deployment` fails on
+# auth_missing without ever opening a socket (offline proof below). After the
+# lib-only source, kv_get_key and live_deployment_json are redefined so the
+# record and live state are test-controlled. No network, no real hub.
 # bash 3.2-safe (no mapfile, no declare -A, no ${x^^}).
 set -euo pipefail
 
@@ -131,6 +133,14 @@ kv_get_key() {
   cat "$KV_RECORD"
 }
 
+# Test-controlled live state. Default: a trusted live deployment matching the
+# record fixture, so case 2 still proves "a matching hub deploys".
+LIVE_JSON='{"ok":true,"deployment_id":"dep-live-1","engine_commit":"abc1234"}'
+live_deployment_json() {
+  printf '%s\n' "$LIVE_JSON"
+  return 0
+}
+
 guard() {
   # snapshot_guard calls die on refusal, which exits — run it in a subshell so
   # this suite survives and can assert on the exit status.
@@ -139,15 +149,27 @@ guard() {
 
 guard_err() { cat "$TD/guard.err"; }
 
-# --- 1. no record: warn, proceed --------------------------------------------
+# --- 1. no record: refuse (live content exists) ------------------------------
 KV_RECORD=""
-guard || fail "an unreadable KV must not block the deploy"
-grep -q "hub drift unverified" "$TD/guard.err" \
-  || { guard_err; fail "missing record should warn about unverified drift"; }
-pass "no KV record -> warning, deploy proceeds (degrades to pre-guard behaviour)"
+ALLOW_UNVERIFIED=false
+ALLOW_REMOVALS=false
+DRY_RUN=false
+if guard; then
+  guard_err
+  fail "no KV record with a live deployment must refuse"
+fi
+grep -q -- "--allow-unverified" "$TD/guard.err" \
+  || { guard_err; fail "refusal must name --allow-unverified"; }
+ALLOW_UNVERIFIED=true
+guard || { guard_err; fail "--allow-unverified must let a missing record through"; }
+grep -q "allow-unverified" "$TD/guard.err" \
+  || { guard_err; fail "the override must still warn"; }
+ALLOW_UNVERIFIED=false
+pass "no KV record -> refuses; --allow-unverified proceeds with a warning"
 
 # --- 2. hub matches the record: proceed silently -----------------------------
 KV_RECORD="$RECORD"
+LIVE_JSON='{"ok":true,"deployment_id":"dep-live-1","engine_commit":"abc1234"}'
 guard || { guard_err; fail "a hub matching the record must deploy"; }
 if grep -q "hub drift —" "$TD/guard.err"; then
   guard_err
@@ -187,14 +209,84 @@ grep -q 'EXPECTED_REMOVALS="\$slug"' "$PUBLISH" \
   || fail "cmd_remove no longer declares its expected removal"
 pass "cmd_remove declares its slug as an expected removal"
 
-# --- 6. an unusable record degrades to a warning -----------------------------
+# --- 6. an unusable record refuses ------------------------------------------
 EXPECTED_REMOVALS=""
+ALLOW_UNVERIFIED=false
 echo 'not json at all' > "$TD/broken.json"
 KV_RECORD="$TD/broken.json"
-guard || { guard_err; fail "a broken record must warn, not block"; }
-grep -q "unverified" "$TD/guard.err" \
-  || { guard_err; fail "a broken record should warn about unverified drift"; }
-pass "unparseable record -> warning, deploy proceeds"
+if guard; then
+  guard_err
+  fail "an unparseable record must refuse"
+fi
+grep -q -- "--allow-unverified" "$TD/guard.err" \
+  || { guard_err; fail "broken-record refusal must name --allow-unverified"; }
+ALLOW_UNVERIFIED=true
+guard || { guard_err; fail "--allow-unverified must let a broken record through"; }
+grep -q "allow-unverified" "$TD/guard.err" \
+  || { guard_err; fail "broken-record override must still warn"; }
+ALLOW_UNVERIFIED=false
+pass "unparseable record -> refuses; --allow-unverified proceeds with a warning"
+
+# Restore the slug removed in case 3 so later unverifiable cases are not
+# masked by a proven removal (exit 3 outranks exit 4).
+mkdir -p "$TD/hub/artifacts/gone"
+echo '<html><head><title>Gone</title></head><body>gone</body></html>' \
+  > "$TD/hub/artifacts/gone/index.html"
+
+# --- 6b. live lookup failing with a valid record refuses ---------------------
+KV_RECORD="$RECORD"
+LIVE_JSON='{"ok":false,"reason":"api_error"}'
+if guard; then
+  guard_err
+  fail "a failed live lookup must refuse even with a valid record"
+fi
+grep -q -- "--allow-unverified" "$TD/guard.err" \
+  || { guard_err; fail "live-lookup refusal must name --allow-unverified"; }
+pass "live lookup ok:false with valid record refuses"
+
+# --- 6c. fresh project (no live deployment, no record) bootstraps ------------
+KV_RECORD=""
+LIVE_JSON='{"ok":true,"deployment_id":"","engine_commit":""}'
+guard || { guard_err; fail "a fresh project with no live deployment must bootstrap"; }
+pass "fresh project (empty deployment id, no record) proceeds"
+
+# --- 6c2. the real live-deployment payload for a fresh project ---------------
+# live_deployment() never emits ok:true with an empty id. A Pages project
+# with no deployment yet returns ok:false, error_kind=no_deployment. Treating
+# that as a failed lookup would refuse the first publish of a new forge.
+KV_RECORD=""
+LIVE_JSON='{"ok":false,"error_kind":"no_deployment","error":"Pages project forge-test-project has no deployment yet"}'
+guard || { guard_err; fail "error_kind=no_deployment must bootstrap, not refuse as unverified"; }
+pass "fresh project (real no_deployment payload, no record) proceeds"
+
+# --- 6d. DRY_RUN turns unverified refusal into a warning ---------------------
+KV_RECORD=""
+LIVE_JSON='{"ok":true,"deployment_id":"dep-live-1","engine_commit":"abc1234"}'
+DRY_RUN=true
+ALLOW_UNVERIFIED=false
+guard || { guard_err; fail "DRY_RUN must not hard-refuse an unverified deploy"; }
+grep -q "would refuse" "$TD/guard.err" \
+  || { guard_err; fail "DRY_RUN unverified path must warn with 'would refuse'"; }
+pass "DRY_RUN + unverified -> would refuse warning, proceeds"
+
+# --- 6e. DRY_RUN + proven removal still refuses ------------------------------
+KV_RECORD="$RECORD"
+LIVE_JSON='{"ok":true,"deployment_id":"dep-live-1","engine_commit":"abc1234"}'
+rm -rf "$TD/hub/artifacts/gone"
+DRY_RUN=true
+ALLOW_REMOVALS=false
+if guard; then
+  guard_err
+  fail "DRY_RUN must still refuse a proven unexpected removal"
+fi
+grep -q "gone" "$TD/guard.err" \
+  || { guard_err; fail "DRY_RUN removal refusal must still name the slug"; }
+DRY_RUN=false
+pass "DRY_RUN + proven removal still refuses"
+
+# Restore a trusted live default for the write-back half.
+LIVE_JSON='{"ok":true,"deployment_id":"dep-live-1","engine_commit":"abc1234"}'
+KV_RECORD="$RECORD"
 
 # --- 7. the guard runs before any mutation -----------------------------------
 # cmd_remove clears KV and rm -rf's the hub artifact before it ever reaches
