@@ -31,6 +31,32 @@ forge.gosilex.com
 One Cloudflare account (via `forge.env`) + one hub + one host.  
 Publish = doctor exit `0` (hub config sound **and** deploy credentials present).
 
+## Sharing the artifacts directory
+
+`$artifacts_dir` (under `hub_root`, from `forge.config.json`) **must be shared
+between everyone who publishes to the same forge**. Every publish deploys a
+**full** Pages snapshot rebuilt from that local copy, so publishing from a copy
+that is behind **deletes** the artifacts the copy lacks — the live site has no
+other source of truth (the Pages API exposes no per-file manifest).
+
+How it is shared is the operator's choice: Google Drive, OneDrive, Dropbox,
+Syncthing, rclone against any remote, a network share, … The repo assumes no
+mechanism and talks to none of them.
+
+None of them gives cross-machine exclusion, and a local lockfile cannot either.
+The `snapshot:live` KV record is the enforcement point: it fingerprints the
+local copy after each successful deploy, and the next publish refuses when it
+would remove a recorded slug or cannot tell what is live. Refusal matrix and
+overrides: `AGENTS.md` § Hub drift guard.
+
+Two publishes from two machines can therefore overlap: a run spends minutes
+building (engine clone, thumbnail rendering) between the guard's check and the
+upload, and nothing serializes the two. The guard re-asserts the live
+deployment id immediately before the upload, so an overlapping publish
+**refuses** rather than deploying its older snapshot over the artifact the
+other run just added. Publishing at the same time as a teammate is safe to
+attempt — the loser simply re-runs.
+
 ## Machine config
 
 ```

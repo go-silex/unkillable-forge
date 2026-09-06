@@ -85,30 +85,143 @@ shortlink is minted.
 ## Hub drift guard
 
 Every deploy is a **full** snapshot of the Pages project built from the
-**local** hub, and the hub is a Drive copy shared across the team. A local copy
-that is behind therefore publishes a snapshot that **deletes** the artifacts
-other people added — the live site has no other source of truth, and the
-`.forge-locks` lockfile gives no cross-machine exclusion over Drive.
+**local** hub, and that hub must be a directory **shared between everyone who
+publishes to this forge** — by whatever sync mechanism the operator chose (see
+`docs/artifacts-config.md` § Sharing the artifacts directory; the repo assumes
+none). A local copy that is behind therefore publishes a snapshot that
+**deletes** the artifacts other people added — the live site has no other
+source of truth. A local lockfile can give **no** cross-machine exclusion, and
+no sync tool provides one either. This KV guard is the only protection.
 
 `preflight_before_live` fingerprints the hub (`lib/snapshot.py`, sha256 per slug
 over sorted relative path + bytes, so digests compare across machines), reads
 the `snapshot:live` KV record written after the last successful deploy, and
-refuses when the deploy would remove a recorded slug. It sits in the preflight,
-not in `deploy_pages`, because `cmd_remove` clears KV and `rm -rf`s the hub
-artifact **before** the deploy — a guard further down would abort after the
-destruction it exists to prevent.
+refuses when the deploy would remove a recorded slug — or when it cannot tell
+what is live. It sits in the preflight, not in `deploy_pages`, because
+`cmd_remove` clears KV and `rm -rf`s the hub artifact **before** the deploy — a
+guard further down would abort after the destruction it exists to prevent.
 
 |Situation|Behaviour|
 |---|---|
-|Unexpected removal|**refuses** — pull the hub, or `--allow-removals`|
+|Unexpected removal (proven) on a verifiable record|**refuses** — exit 3 — unless `--allow-removals`|
+|Unexpected removal (proven) on an `unverified` / `untrusted` record|**refuses** — exit 3 — unless **both** `--allow-removals` **and** `--allow-unverified`|
 |`cmd_remove`'s own slug|passes (`EXPECTED_REMOVALS`)|
-|No record · KV unreadable · compare fails|warns, proceeds (pre-guard behaviour)|
-|Record from another deployment|`untrusted` on stderr, removals still checked|
+|No record AND the Pages project has **confirmed** no live deployment (fresh forge)|proceeds — verdict `bootstrap`, nothing live to lose|
+|No record / unreadable KV / unparseable record / compare failure / `snapshot.py` missing, while a live deployment exists or the live lookup itself failed|**refuses** — exit 4, verdict `unverified` — unless `--allow-unverified`|
+|`snapshot:live` read **denied or failed** (`KV_GET_STATUS` = `denied` / `error`, wrangler fallback included)|**refuses** — exit 4, `unverified`, reason names the KV read — unless `--allow-unverified`|
+|Record anchored on another deployment id (rollback, dashboard deploy)|**refuses** — exit 4, verdict `untrusted` — removals still named; unless `--allow-unverified`|
+|The live deployment id changed between the guard and the upload (a teammate deployed mid-run)|**refuses** in `deploy_pages`, before `wrangler`, naming both ids — no flag lifts it; re-run|
+|The guard itself never observed live (its lookup failed, or it was skipped for an unresolved artifacts root)|**refuses** in `deploy_pages` (`hub drift unverified`) — unless `--allow-unverified`; never claims a teammate deployed|
+|The live deployment id cannot be re-resolved at the upload|**refuses** in `deploy_pages` (`hub drift unverified`) — unless `--allow-unverified`|
+|`--dry-run`|exit 4 downgrades to a warning ("would refuse …") because a dry run deploys nothing; exit 3 stays fatal|
+
+This fail-closed rule exists because of a real loss on 2026-09-06. The guard's
+first run found no `snapshot:live` key yet, took verdict `bootstrap`, and
+skipped the check. A hub copy missing one artifact then deployed a full
+snapshot that deleted it live, and `snapshot_record` baselined the 30-slug
+state so later runs saw a clean "match". An unverifiable state therefore
+refuses and needs an explicit operator override.
+
+`snapshot.py compare` exit codes: `0` safe · `3` proven removals · `4` cannot
+verify · `1` usage/internal. Precedence: exit 3 outranks exit 4 outranks 0.
+The guard distinguishes "the project has no deployment" from "the live lookup
+failed" (`--live-unknown`): conflating them would re-open the hole offline.
+
+**A proven removal on an unverifiable record takes both flags.** Because exit 3
+outranks exit 4, `--allow-removals` alone used to wave through a record that no
+longer describes the live site — strictly more dangerous than the zero-removal
+case, and it took the weaker flag. The guard keeps the compare payload instead
+of discarding it and reads `verifiable`: when that is false, the override
+requires `--allow-removals` **and** `--allow-unverified`. The zero-removal
+`unverified` / `untrusted` refusal is unchanged.
+
+**The guard is re-asserted at the upload.** The check runs in the preflight, but
+`wrangler pages deploy` happens minutes later — engine git clone,
+`build_from_hub`, OG rendering for every slug on `--rebuild-index`. So
+`snapshot_guard` publishes `SNAPSHOT_GUARD_PASSED` (`true`/`false`) and
+`SNAPSHOT_GUARD_LIVE_ID` (the live deployment id) plus `SNAPSHOT_GUARD_LIVE_UNKNOWN`
+on every proceed path, and `deploy_pages` re-asserts them immediately before
+`wrangler pages deploy`: an unset or `false` sentinel is an internal error (no
+code path may reach the upload unguarded), an id that has moved is a refusal
+naming both ids, and a re-resolution that itself fails refuses unless
+`--allow-unverified`. The id is empty in two different situations and the
+`LIVE_UNKNOWN` sentinel is what separates them: a **confirmed-empty** deployment
+list is a real observation, so live gaining an id since then IS a teammate's
+deploy and refuses unconditionally, whereas a guard that **never saw** live has
+nothing to compare against — that refuses as `unverified` (overridable) and
+never accuses anyone of deploying. A teammate who publishes inside that
+window now makes this run refuse instead of deleting their artifact — the loser
+re-runs. `acquire_publish_lock` cannot cover this: it is per-slug, so two
+people publishing different slugs never contend at all, and `flock` is a
+kernel-local advisory lock on an inode in **each machine's own copy** of the
+shared directory — no sync mechanism propagates lock state. There is no
+cross-machine serialization anywhere; the KV record plus this re-assert are the
+entire enforcement.
+
+**The re-assert is detection, not exclusion — the residual race is accepted.**
+It shrinks the window from "the whole build" to "the upload itself": a deploy
+landing between the re-read and the end of `wrangler pages deploy` is still
+overwritten. Closing that completely needs a lock Cloudflare does not offer
+(Pages Direct Upload has no compare-and-swap on the deployment id), so the
+honest posture is a narrow window plus a record that makes the next run see
+the drift. A re-resolution that itself fails refuses rather than proceeding:
+unlike the KV-read deadlock, that state is transient — the preflight already
+reached the API, so the remedy is to re-run, not to override.
+
+**A KV read failure is named, not dressed up as a stale hub.**
+`preflight_mutations` runs with `require_kv=False` on purpose — a token whose
+KV REST read is denied is admitted because the write paths fall back to
+wrangler OAuth — so such a token does reach the guard. `kv_get_key` therefore
+has the same wrangler fallback as the put/delete paths and classifies the read
+in `KV_GET_STATUS` (`ok` · `miss` · `denied` · `error`). A `miss` is a genuine
+404: empty record, the verdict decides as before. `denied` and `error` refuse
+as `unverified` with the cause named — *"KV record read denied — the API token
+lacks Workers KV read, or wrangler OAuth is unavailable"* and *"KV record read
+failed"*. `--allow-unverified` is still required; the operator is told the real
+cause instead of being sent to refresh a hub that is fine.
+
+Under `--dry-run` the fallback is deliberately **not** attempted: `kv_wrangler`
+spawns `wrangler whoami` and `wrangler kv namespace list` before the read, and
+`forge_wrangler` resolves to `npx --yes wrangler` when no global wrangler
+exists — three npm-routed invocations, measured at ~8 s each, for one
+rehearsed read. It does not hang (a logged-out `wrangler whoami` prints *"You
+are not authenticated"* and never opens a browser — verified), it just buys
+nothing: the fallback can only confirm what the message already states. So a
+REST-denied read makes the dry run say what it actually knows — the read was
+denied over REST, a real publish retries it through wrangler OAuth — and
+decline to predict the verdict, instead of printing a `would refuse` a real
+publish would not honour. Every other unverifiable reason keeps its
+`would refuse …` line. The dry-run suite pins the boundary: zero wrangler
+invocations, in either recording log.
+
+**Recovery from a lost record: `publish.sh --reanchor-snapshot`.**
+`snapshot_record` is best-effort, so one refused KV write after a successful
+deploy leaves the record anchored on the *previous* deployment — `untrusted` on
+every publish afterwards. Without a re-anchor the only exit was
+`--allow-unverified`, which overwrites the baseline from a possibly-stale hub:
+that is the 2026-09-06 loss, byte for byte. `--reanchor-snapshot` reads the
+record, rewrites **only** `deployment_id` and `at` (`snapshot.py reanchor`,
+`slugs` and `by` preserved verbatim) and writes it back to KV. It never builds
+and never deploys, it honours `--dry-run` (prints the record it would write,
+mutates nothing), and it dies rather than fabricate anything: no record to
+re-anchor means the operator must publish, and a failed live lookup or a failed
+KV write is fatal. It is deliberately **not** gated by the guard it repairs —
+that refusal is the reason you are running it — which is sound only because it
+touches no artifact, no build and no deploy.
 
 The record is anchored on `latest_deployment.id`: the Pages API exposes no
 per-file manifest, so the record is our own bookkeeping and would otherwise lie
 after a rollback or a dashboard deploy. The same payload yields the live
 deploy's engine commit (`deployment_trigger.metadata.commit_hash`).
+
+`bootstrap` is the only verdict that lets an unrestricted full-snapshot deploy
+through with no record, so "the project has no deployment" is a
+**verified-empty** claim rather than an inference from one nullable field: when
+`latest_deployment.id` is absent, `live_deployment()` confirms against the
+deployments-list endpoint and keeps `error_kind="no_deployment"` only for a
+list that is genuinely empty. A non-empty or unreadable list yields a different
+`error_kind`, which `publish.sh` maps to `live_unknown=true` — unknown, not
+empty — so the verdict is `unverified`, not `bootstrap`.
 
 Pages Direct Upload already dedupes by content hash
 (`blake3(base64(content) + extension)`, per project, server-side) — so a deploy

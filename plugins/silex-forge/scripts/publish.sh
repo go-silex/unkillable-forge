@@ -59,7 +59,29 @@ PUBLISH_LOCK_DIR=""
 # snapshot holds and the local hub does not is unexpected drift.
 EXPECTED_REMOVALS=""
 ALLOW_REMOVALS=false
+ALLOW_UNVERIFIED=false
 SNAPSHOT_KV_KEY="snapshot:live"
+# The guard runs in the preflight; the upload happens minutes later (engine
+# clone, OG rendering). deploy_pages re-asserts all three of these immediately
+# before wrangler: PASSED makes "no deploy without the guard" machine-checked
+# instead of a convention across five call sites, and LIVE_ID catches a
+# teammate who deployed inside that window (no flock serializes two machines
+# that each hold their own copy of the shared hub). LIVE_ID is empty in three
+# different situations and LIVE_UNKNOWN is what tells them apart: a project
+# whose deployment list is confirmed empty is a real observation (live moving
+# off it is a provable race), while a failed lookup and a skipped guard
+# observed nothing at all, so no id can be compared against them.
+SNAPSHOT_GUARD_PASSED=false
+SNAPSHOT_GUARD_LIVE_ID=""
+SNAPSHOT_GUARD_LIVE_UNKNOWN=false
+# Outcome of the last kv_get_key: ok | miss | denied | error. A denied read is
+# not a missing record — telling the operator their hub is stale when the token
+# simply cannot read KV refuses every publish forever, for the wrong reason.
+KV_GET_STATUS=""
+# Live deployment resolved by resolve_live_deployment (globals: command
+# substitution would lose them in a subshell).
+LIVE_RESOLVED_ID=""
+LIVE_RESOLVED_UNKNOWN=true
 cleanup() {
   if [ -n "${PUBLISH_LOCK_FD:-}" ]; then
     # Only GNU flock was used to take this FD (see acquire_publish_lock).
@@ -107,6 +129,7 @@ Usage:
   publish.sh --share <slug>
   publish.sh --unshare <slug>
   publish.sh --list | --remove <slug> | --rebuild-index
+  publish.sh --reanchor-snapshot
 
   --dry-run : accepted anywhere in argv, for every command — builds and
               validates everything (engine, hub snapshot, wrangler.toml)
@@ -114,8 +137,24 @@ Usage:
 
   --allow-removals : proceed even when the deploy would delete artifacts that
               are live but absent from the local hub. Without it, that case
-              refuses — a hub copy behind the shared Drive vault would
-              otherwise silently remove other people's artifacts.
+              refuses — a hub copy behind the shared artifacts directory
+              would otherwise silently remove other people's artifacts.
+
+  --allow-unverified : proceed even when the guard cannot verify what is
+              live (no/unreadable KV record, live lookup failed, or a
+              record anchored on another deployment). Without it, that
+              case refuses — a full-snapshot deploy from an unverified
+              hub can delete a teammate's artifact. Also required on top
+              of --allow-removals when the record no longer describes the
+              live site: an unanchored record cannot list every removal.
+
+  --reanchor-snapshot : re-point the KV snapshot record at the deployment the
+              live site is serving, keeping its slug set verbatim. The
+              recovery when a post-deploy record write failed and the guard
+              now refuses as "record anchored on another deployment": it
+              builds nothing, deploys nothing, and never rebuilds the slug
+              set from the local hub (which is what --allow-unverified does,
+              and how the 2026-09-06 loss was baselined).
 
   SSOT   : \$ARTIFACTS_ROOT/<slug>/  (hub, forge.config)
   Deploy : wrangler pages deploy (token ~/.config/silex/forge.env)
@@ -344,60 +383,240 @@ preflight_before_live() {
 # Hub drift guard.
 #
 # Every deploy is a FULL snapshot of the Pages project built from the LOCAL
-# hub, and the hub is a Google Drive copy shared across the team. A local copy
-# that is behind therefore publishes a snapshot which silently DELETES the
-# artifacts other people added — the live site has no other source of truth.
+# hub, and that hub must be a directory shared between everyone who publishes
+# to this forge — by whatever sync mechanism the operator chose, none of which
+# gives cross-machine locking. A local copy that is behind therefore publishes
+# a snapshot which silently DELETES the artifacts other people added — the
+# live site has no other source of truth.
 #
 # This runs in the preflight, not in deploy_pages, because the preflight is the
 # one point every command reaches BEFORE any mutation: cmd_remove clears KV and
 # rm -rf's the hub artifact well before it reaches deploy_pages, so a guard
 # sitting there would abort after the destruction it was meant to prevent.
 #
-# Degradation is deliberate. No record, unreadable KV or a failing compare all
-# warn and proceed: that is exactly today's behaviour, and turning a token
-# scope problem into a publish outage would be worse than the drift it guards.
-# Only a *proven* unexpected removal refuses.
-snapshot_guard() {
-  local snap="$LIB_DIR/snapshot.py"
-  [ -f "$snap" ] || { warn "snapshot.py missing — hub drift unverified"; return 0; }
-  [ -n "${ARTIFACTS_ROOT:-}" ] || return 0
+# A full-snapshot deploy that cannot see what is live can delete a teammate's
+# artifact. The 2026-09-06 loss happened exactly through the old bootstrap
+# branch (no KV record yet → warn and proceed → wipe baselined). Unverifiable
+# states therefore fail closed; --allow-unverified is the explicit override.
+live_deployment_json() {
+  PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 "$LIB_DIR/snapshot.py" live-deployment
+}
 
-  local record
-  record=$(kv_get_key "$SNAPSHOT_KV_KEY" 2>/dev/null) || record=""
-  if [ -z "$record" ]; then
-    warn "no snapshot record in KV — hub drift unverified (first run, or this token cannot read KV)"
-    return 0
+# Resolve the live deployment into two facts — is it known, and which id — in
+# LIVE_RESOLVED_UNKNOWN / LIVE_RESOLVED_ID. Globals rather than stdout: the
+# pre-upload re-assert in deploy_pages needs the same two facts the guard
+# decided on, and a command substitution would compute them in a subshell.
+#
+# live_deployment() returns ok:false/error_kind=no_deployment only for a Pages
+# project whose deployment list is confirmed empty — a known-empty live state,
+# not a failed lookup. Conflating the two would refuse the first publish of a
+# new forge (the 2026-09-06 hole, inverted). Every other ok:false is unknown,
+# including a missing latest_deployment.id the list could not confirm.
+resolve_live_deployment() {
+  local live="" live_ok="false" live_kind="" live_id=""
+  LIVE_RESOLVED_ID=""
+  LIVE_RESOLVED_UNKNOWN=true
+  if ! live=$(live_deployment_json 2>/dev/null); then
+    live="${live:-}"
   fi
-
-  local live live_id
-  live=$(PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 "$snap" live-deployment 2>/dev/null) || live=""
+  live_ok=$(printf '%s' "$live" | python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print("true" if d.get("ok") is True else "false")' 2>/dev/null) || live_ok="false"
   live_id=$(printf '%s' "$live" | python3 -c 'import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
 sys.stdout.write(str(d.get("deployment_id") or ""))' 2>/dev/null) || live_id=""
+  live_kind=$(printf '%s' "$live" | python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+sys.stdout.write(str(d.get("error_kind") or ""))' 2>/dev/null) || live_kind=""
+  if [ "$live_ok" = "true" ]; then
+    LIVE_RESOLVED_UNKNOWN=false
+    LIVE_RESOLVED_ID="$live_id"
+  elif [ "$live_kind" = "no_deployment" ]; then
+    LIVE_RESOLVED_UNKNOWN=false
+    LIVE_RESOLVED_ID=""
+  else
+    LIVE_RESOLVED_UNKNOWN=true
+    LIVE_RESOLVED_ID=""
+  fi
+}
 
-  local rc=0
-  printf '%s' "$record" | PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-    python3 "$snap" compare \
-      --record - \
-      --live-deployment-id "$live_id" \
-      --expected-removals "$EXPECTED_REMOVALS" >/dev/null || rc=$?
-  case "$rc" in
-    0) return 0 ;;
-    3)
-      if $ALLOW_REMOVALS; then
-        warn "hub drift: removing live artifacts because --allow-removals was passed"
+# Arm what deploy_pages re-asserts immediately before the upload. $1 = the live
+# deployment id this decision was made against, $2 = whether the live state was
+# UNKNOWN when the decision was taken ("true" / "false"). Both facts, never the
+# id alone: an empty id means "this project verifiably has no deployment" on
+# one path and "live could not be read" on another, and only the first turns a
+# later non-empty live state into a provable race.
+snapshot_guard_pass() {
+  SNAPSHOT_GUARD_PASSED=true
+  SNAPSHOT_GUARD_LIVE_ID="${1-}"
+  SNAPSHOT_GUARD_LIVE_UNKNOWN="${2-false}"
+}
+
+snapshot_guard() {
+  local snap="$LIB_DIR/snapshot.py"
+  local unverified_reason=""
+  # Set only for the one unverified row a dry run cannot turn into a verdict:
+  # a REST read the real publish would retry over wrangler OAuth. Everything
+  # else keeps the "would refuse" wording below.
+  local unverified_no_verdict=false
+  local live_id=""
+  SNAPSHOT_GUARD_PASSED=false
+  SNAPSHOT_GUARD_LIVE_ID=""
+  SNAPSHOT_GUARD_LIVE_UNKNOWN=false
+  # Nothing observed yet. The snapshot.py-missing branch below never reaches
+  # resolve_live_deployment and falls through to the shared unverified
+  # handling, which arms the sentinels from these two: "unknown" is the only
+  # honest starting value, and re-setting them here keeps a previous call in
+  # the same process from lending it a live state it never looked at.
+  LIVE_RESOLVED_ID=""
+  LIVE_RESOLVED_UNKNOWN=true
+  if [ -z "${ARTIFACTS_ROOT:-}" ]; then
+    # Returning silently here was indistinguishable from a clean pass in the
+    # logs. build_from_hub dies later (build-site-from-hub.py resolves the
+    # artifacts root itself), but the skip is named where it happens.
+    warn "hub drift guard skipped — artifacts root unresolved, so there is no local hub to compare against the live site"
+    # Unknown, not known-empty: this path never looked at live at all.
+    snapshot_guard_pass "" true
+    return 0
+  fi
+
+  if [ ! -f "$snap" ]; then
+    unverified_reason="snapshot.py missing from the plugin"
+  else
+    local record="" rec_tmp
+    # Redirect, not a command substitution: kv_get_key classifies the read in
+    # KV_GET_STATUS and a subshell would discard it, which is what made a
+    # token denied Workers KV read look exactly like "no record yet" and
+    # refuse every publish with a stale-hub story that was not true.
+    rec_tmp=$(mktemp)
+    if kv_get_key "$SNAPSHOT_KV_KEY" >"$rec_tmp" 2>/dev/null; then
+      record=$(cat "$rec_tmp")
+    fi
+    rm -f "$rec_tmp"
+    if [ -z "$record" ]; then
+      # A miss (404) is a genuine absence — the verdict decides. An unset
+      # status means the caller replaced kv_get_key (test suites do), so it
+      # keeps the same meaning as a miss.
+      #
+      # A dry run gets its own wording on both failure rows: kv_get_key skips
+      # the wrangler-OAuth fallback there (three spawns, possibly through
+      # `npx --yes wrangler`, possibly interactive), so a REST denial is NOT
+      # the whole story and this run cannot know the real verdict.
+      case "${KV_GET_STATUS:-}" in
+        denied)
+          if $DRY_RUN; then
+            unverified_reason="KV record read denied over REST — the API token lacks Workers KV read; a real publish retries that read through wrangler OAuth, which this dry run does not invoke"
+            unverified_no_verdict=true
+          else
+            unverified_reason="KV record read denied — the API token lacks Workers KV read, or wrangler OAuth is unavailable"
+          fi
+          ;;
+        error)
+          if $DRY_RUN; then
+            unverified_reason="KV record read failed over REST — a real publish retries that read through wrangler OAuth, which this dry run does not invoke"
+            unverified_no_verdict=true
+          else
+            unverified_reason="KV record read failed"
+          fi
+          ;;
+      esac
+    fi
+
+    resolve_live_deployment
+    live_id="$LIVE_RESOLVED_ID"
+    local live_unknown_flag=""
+    if $LIVE_RESOLVED_UNKNOWN; then
+      live_unknown_flag="--live-unknown"
+    fi
+
+    local rc=0 cmp_json="" verifiable="false"
+    # shellcheck disable=SC2086  # live_unknown_flag is empty or one flag
+    cmp_json=$(printf '%s' "$record" | PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+      python3 "$snap" compare \
+        --record - \
+        --live-deployment-id "$live_id" \
+        --expected-removals "$EXPECTED_REMOVALS" \
+        $live_unknown_flag) || rc=$?
+    # The payload, not just the exit code: compare returns 3 on a non-empty
+    # removal list whether or not the record is anchored on what is live, so
+    # reading only the code let --allow-removals clear an untrusted record.
+    # Unparseable output counts as NOT verifiable — fail closed.
+    verifiable=$(printf '%s' "$cmp_json" | python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print("true" if d.get("verifiable") is True else "false")' 2>/dev/null) || verifiable="false"
+    [ -n "$verifiable" ] || verifiable="false"
+    case "$rc" in
+      0)
+        snapshot_guard_pass "$live_id" "$LIVE_RESOLVED_UNKNOWN"
         return 0
-      fi
-      die "hub drift — this deploy would remove artifacts that are live. Pull the hub (rclone) and retry, or pass --allow-removals to delete them on purpose"
-      ;;
-    *)
-      warn "snapshot compare failed (exit $rc) — hub drift unverified"
-      return 0
-      ;;
-  esac
+        ;;
+      3)
+        if $ALLOW_REMOVALS && { [ "$verifiable" = "true" ] || $ALLOW_UNVERIFIED; }; then
+          if [ "$verifiable" = "true" ]; then
+            warn "hub drift: removing live artifacts because --allow-removals was passed"
+          else
+            warn "hub drift: removing live artifacts because --allow-removals was passed, and accepting an unanchored record because --allow-unverified was passed — the record no longer describes the live site, so live artifacts it never listed can be deleted without being named"
+          fi
+          snapshot_guard_pass "$live_id" "$LIVE_RESOLVED_UNKNOWN"
+          return 0
+        fi
+        if $ALLOW_REMOVALS; then
+          die "hub drift — the record no longer describes the live site, so the removal list cannot be trusted: live artifacts absent from both the record and this hub would be deleted without ever being named. Refresh this machine's copy of the shared artifacts directory, then re-run; or pass --allow-unverified in addition to --allow-removals"
+        fi
+        die "hub drift — this deploy would remove artifacts that are live. Refresh this machine's copy of the shared artifacts directory (whatever syncs it), then re-run; or pass --allow-removals to delete them on purpose"
+        ;;
+      4)
+        : # fall through to unverified handling below
+        ;;
+      *)
+        # This reason replaces whatever the KV read left: the compare failing
+        # is a verdict a dry run CAN predict, so drop the no-verdict marker.
+        unverified_reason="snapshot compare failed (exit $rc)"
+        unverified_no_verdict=false
+        ;;
+    esac
+  fi
+
+  if $ALLOW_UNVERIFIED; then
+    if [ -n "$unverified_reason" ]; then
+      warn "hub drift unverified ($unverified_reason) — proceeding because --allow-unverified was passed"
+    else
+      warn "hub drift unverified — proceeding because --allow-unverified was passed"
+    fi
+    snapshot_guard_pass "$live_id" "$LIVE_RESOLVED_UNKNOWN"
+    return 0
+  fi
+  if $DRY_RUN; then
+    if $unverified_no_verdict; then
+      # No "would refuse" here, deliberately. The REST read was refused, and
+      # the real publish retries it over wrangler OAuth — which this dry run
+      # skipped on purpose. Announcing a refusal the real publish may never
+      # make is what teaches operators to ignore a dry-run refusal.
+      warn "hub drift unverified ($unverified_reason) — so this dry run cannot predict the real verdict: a real deploy refuses only if that OAuth retry fails too"
+    elif [ -n "$unverified_reason" ]; then
+      warn "would refuse: hub drift unverified ($unverified_reason) — a real deploy needs a synced hub or --allow-unverified"
+    else
+      warn "would refuse: hub drift unverified — a real deploy needs a synced hub or --allow-unverified"
+    fi
+    snapshot_guard_pass "$live_id" "$LIVE_RESOLVED_UNKNOWN"
+    return 0
+  fi
+  if [ -n "$unverified_reason" ]; then
+    die "hub drift unverified ($unverified_reason) — refresh this machine's copy of the shared artifacts directory (whatever syncs it), then re-run; or pass --allow-unverified to deploy anyway"
+  fi
+  die "hub drift unverified — refresh this machine's copy of the shared artifacts directory (whatever syncs it), then re-run; or pass --allow-unverified to deploy anyway"
 }
 
 # Record the snapshot AFTER a successful deploy, keyed on the deployment the
@@ -555,6 +774,43 @@ deploy_pages() {
   info "wrangler pages deploy site → ${project} (${acct:0:8}…)"
   local wr_cmd
   wr_cmd=$(forge_wrangler) || die "wrangler / npx missing — npm i -g wrangler (or install Node so npx wrangler works), then retry"
+  # Re-assert the guard immediately before the upload. It ran in the preflight,
+  # minutes ago: the engine clone, the OG rendering and (on --rebuild-index)
+  # every slug's images sit in between, and acquire_publish_lock cannot help —
+  # flock is per-slug and kernel-local, so two machines holding their own copy
+  # of the shared hub never contend. Without this, a teammate deploying inside
+  # that window has their artifact deleted by this older snapshot, and
+  # snapshot_record then re-baselines the loss.
+  #
+  # An empty SNAPSHOT_GUARD_LIVE_ID is NOT automatically "unknown", which is
+  # why the guard reports the two separately: a Pages project whose deployment
+  # list was confirmed empty (bootstrap) is a real observation, so live turning
+  # into a deployment id since then IS a teammate's deploy and must refuse. A
+  # guard that never saw live is the opposite case — comparing its empty id
+  # against a live id proves nothing, and claiming "someone else deployed"
+  # there is a fabricated accusation that no flag could override.
+  [ "${SNAPSHOT_GUARD_PASSED:-false}" = true ] || die \
+    "internal error — deploy reached wrangler without snapshot_guard: every deploy_pages caller must run preflight_before_live first"
+  if [ "${SNAPSHOT_GUARD_LIVE_UNKNOWN:-false}" = true ]; then
+    # Nothing to compare against: re-resolving live cannot tell a deploy inside
+    # the window from the state the guard already could not see.
+    if $ALLOW_UNVERIFIED; then
+      warn "hub drift unverified — the guard never observed the live deployment, so a deploy inside this window cannot be ruled out; proceeding because --allow-unverified was passed"
+    else
+      die "hub drift unverified — the hub drift guard could not see the live deployment when it ran, so there is no id to compare the current live state against and a deploy inside this window cannot be ruled out. Re-run when the Pages API answers (and with a resolved artifacts root); or pass --allow-unverified to deploy anyway"
+    fi
+  else
+    resolve_live_deployment
+    if $LIVE_RESOLVED_UNKNOWN; then
+      if $ALLOW_UNVERIFIED; then
+        warn "hub drift unverified — the live deployment could not be re-checked before the upload; proceeding because --allow-unverified was passed"
+      else
+        die "hub drift unverified — the live deployment could not be re-checked immediately before the upload (the guard saw '${SNAPSHOT_GUARD_LIVE_ID:-<none>}'), so a deploy inside this window cannot be ruled out. Re-run when the Pages API answers; or pass --allow-unverified to deploy anyway"
+      fi
+    elif [ "$LIVE_RESOLVED_ID" != "$SNAPSHOT_GUARD_LIVE_ID" ]; then
+      die "hub drift — the live deployment changed while this publish was building (the guard checked '${SNAPSHOT_GUARD_LIVE_ID:-<none>}', live is now '${LIVE_RESOLVED_ID:-<none>}'): someone else deployed, so this snapshot no longer describes the live site and would delete their artifacts. Refresh this machine's copy of the shared artifacts directory, then re-run"
+    fi
+  fi
   # shellcheck disable=SC2086
   $wr_cmd pages deploy site \
     --project-name="$project" \
@@ -820,32 +1076,70 @@ kv_api_success() {
   python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("success") else 1)' 2>/dev/null
 }
 
+# Reads a KV value on stdout; non-zero when no value was obtained. The outcome
+# is also classified in KV_GET_STATUS (ok | miss | denied | error) because the
+# hub drift guard READS snapshot:live through here: collapsing a 403 into the
+# same failure as a 404 told the operator their hub was stale — and refused
+# every publish forever — when the token simply lacks Workers KV read.
+#
+# Pages deploy tokens routinely lack that scope, which is why the preflight
+# admits them with a warning; the OAuth fallback that warning promises has to
+# exist on the read path too, not only in kv_put_value / kv_delete_key.
 kv_get_key() {
   local key="$1"
   local acct="${CLOUDFLARE_ACCOUNT_ID:-}"
   local ns="${FORGE_SHARES_KV_ID:-}"
-  local url tmp http_code
+  local url tmp http_code=""
+  KV_GET_STATUS="error"
   tmp=$(mktemp)
   url="https://api.cloudflare.com/client/v4/accounts/${acct}/storage/kv/namespaces/${ns}/values/${key}"
   if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
-    http_code=$(curl -sS -o "$tmp" -w '%{http_code}' -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" "$url" 2>/dev/null) || {
-      rm -f "$tmp"
-      return 1
-    }
-  else
+    http_code=$(curl -sS -o "$tmp" -w '%{http_code}' -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" "$url" 2>/dev/null) || http_code=""
+  elif [ -n "${CLOUDFLARE_API_KEY:-}" ] && [ -n "${CLOUDFLARE_EMAIL:-}" ]; then
     http_code=$(curl -sS -o "$tmp" -w '%{http_code}' \
       -H "X-Auth-Email: ${CLOUDFLARE_EMAIL}" -H "X-Auth-Key: ${CLOUDFLARE_API_KEY}" \
-      "$url" 2>/dev/null) || {
-      rm -f "$tmp"
-      return 1
-    }
+      "$url" 2>/dev/null) || http_code=""
   fi
-  if [ "$http_code" != "200" ]; then
-    rm -f "$tmp"
+  case "$http_code" in
+    200)
+      KV_GET_STATUS="ok"
+      cat "$tmp"
+      rm -f "$tmp"
+      return 0
+      ;;
+    404) KV_GET_STATUS="miss" ;;
+    401|403) KV_GET_STATUS="denied" ;;
+    *) KV_GET_STATUS="error" ;;
+  esac
+  rm -f "$tmp"
+  # A 404 is the API answering: the key is not there, and no other credential
+  # can find it. Only a denial or a failure is worth a second opinion.
+  if [ "$KV_GET_STATUS" = "miss" ]; then
     return 1
   fi
-  cat "$tmp"
-  rm -f "$tmp"
+  # A dry run stops here, because this fallback is anything but free:
+  # kv_wrangler routes through kv_wrangler_verify, which spawns
+  # `wrangler whoami` and `wrangler kv namespace list` before the read itself
+  # — three wrangler invocations for one rehearsed read — and forge_wrangler
+  # resolves to `npx --yes wrangler` when no global wrangler is installed, so
+  # the rehearsal goes through npm: measured at ~8 s per invocation on a
+  # machine with no global binary. It does not hang (a logged-out
+  # `wrangler whoami` prints "You are not authenticated" and never opens a
+  # browser — verified), it is simply a cost with no payoff: the fallback can
+  # only tell the dry run what snapshot_guard already says without it. So a
+  # dry run keeps the REST classification and reports it WITHOUT claiming a
+  # verdict: the read was denied over REST, and a real publish retries it
+  # through wrangler OAuth.
+  if $DRY_RUN; then
+    return 1
+  fi
+  local out
+  if out=$(kv_wrangler kv key get "$key" 2>/dev/null); then
+    KV_GET_STATUS="ok"
+    printf '%s' "$out"
+    return 0
+  fi
+  return 1
 }
 
 _KV_WRANGLER_OK=0
@@ -1121,6 +1415,73 @@ PY
   done
 }
 
+# Re-anchor the KV snapshot record on the deployment the live site is serving,
+# keeping its slug set verbatim.
+#
+# snapshot_record is best-effort: the deploy already succeeded, so one refused
+# KV write leaves the record anchored on the PREVIOUS deployment while live has
+# moved on. The guard then reads that as untrusted and refuses — and the only
+# other way out is --allow-unverified, which rebuilds the record from this
+# machine's possibly-stale hub. That is exactly how the 2026-09-06 loss was
+# baselined. The record conflates two independent facts, WHAT is live and WHICH
+# deployment it describes, and only the second one broke; this rewrites only
+# that one.
+cmd_reanchor_snapshot() {
+  require_forge_config
+  source_cf_credentials
+  # preflight_cf_mutations, NOT preflight_before_live: this command is the
+  # recovery from a guard refusal, so it must not be gated by the guard it
+  # repairs. It builds nothing, deploys nothing, and writes one KV key.
+  preflight_cf_mutations
+  local snap="$LIB_DIR/snapshot.py"
+  [ -f "$snap" ] || die "snapshot.py missing from the plugin — cannot re-anchor the record"
+  local record="" rec_tmp
+  rec_tmp=$(mktemp)
+  if kv_get_key "$SNAPSHOT_KV_KEY" >"$rec_tmp" 2>/dev/null; then
+    record=$(cat "$rec_tmp")
+  fi
+  rm -f "$rec_tmp"
+  if [ -z "$record" ]; then
+    case "${KV_GET_STATUS:-}" in
+      denied)
+        die "snapshot record read denied — the API token lacks Workers KV read and wrangler OAuth is unavailable; fix the credentials (forge-doctor.sh), then re-run"
+        ;;
+      error)
+        die "snapshot record read failed — re-anchoring cannot rewrite a record it could not read; retry when KV answers"
+        ;;
+      *)
+        die "no snapshot record in KV (${SNAPSHOT_KV_KEY}) — there is nothing to re-anchor: publish once so the record is created"
+        ;;
+    esac
+  fi
+  resolve_live_deployment
+  if $LIVE_RESOLVED_UNKNOWN; then
+    die "live deployment lookup failed — re-anchoring needs the deployment the live site is serving; retry when the Pages API answers"
+  fi
+  [ -n "$LIVE_RESOLVED_ID" ] || die \
+    "the Pages project has no deployment — there is no anchor to move the record to: publish once first"
+  local old_id payload
+  old_id=$(printf '%s' "$record" | python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+sys.stdout.write(str(d.get("deployment_id") or ""))' 2>/dev/null) || old_id=""
+  # snapshot.py reanchor never invents a record: an empty, null or slug-less
+  # one is exit 1, so a failure here leaves KV untouched.
+  payload=$(printf '%s' "$record" | PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 "$snap" reanchor --record - --deployment-id "$LIVE_RESOLVED_ID") \
+    || die "snapshot reanchor refused — the KV record was left untouched"
+  [ -n "$payload" ] || die "snapshot reanchor produced an empty record — refusing to write it to KV"
+  if $DRY_RUN; then
+    info "dry run — would re-anchor ${SNAPSHOT_KV_KEY} from deployment ${old_id:-<none>} to ${LIVE_RESOLVED_ID} (slug set unchanged, no KV mutation)"
+    return 0
+  fi
+  kv_put_value "$SNAPSHOT_KV_KEY" "$payload" \
+    || die "snapshot record re-anchor not written to KV — set a token with Workers KV Edit (or wrangler login), then re-run"
+  ok "snapshot record re-anchored: ${old_id:-<none>} → ${LIVE_RESOLVED_ID} (slug set preserved)"
+}
+
 cmd_remove() {
   local slug="$1"
   validate_slug "$slug"
@@ -1358,14 +1719,15 @@ if [ -n "${FORGE_PUBLISH_LIB_ONLY:-}" ]; then
 fi
 source_cf_credentials
 
-# --dry-run and --allow-removals are global: accepted anywhere in argv, for
-# every command. Strip them here, before the dispatch, so no per-command parser
-# ever sees them.
+# --dry-run, --allow-removals and --allow-unverified are global: accepted
+# anywhere in argv, for every command. Strip them here, before the dispatch,
+# so no per-command parser ever sees them.
 _dry_run_args=()
 for _arg in "$@"; do
   case "$_arg" in
     --dry-run) DRY_RUN=true ;;
     --allow-removals) ALLOW_REMOVALS=true ;;
+    --allow-unverified) ALLOW_UNVERIFIED=true ;;
     *) _dry_run_args+=("$_arg") ;;
   esac
 done
@@ -1384,6 +1746,7 @@ case "${1-}" in
     cmd_unshare "$2"
     ;;
   --rebuild-index) cmd_rebuild_index ;;
+  --reanchor-snapshot) cmd_reanchor_snapshot ;;
   --share)
     if [ -n "${2-}" ] && [ -z "${3-}" ]; then
       cmd_share_only "$2"

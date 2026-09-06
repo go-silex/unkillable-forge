@@ -19,6 +19,10 @@ ROOT = Path(__file__).resolve().parents[2]
 LIB = ROOT / "plugins" / "silex-forge" / "scripts" / "lib"
 SNAPSHOT = LIB / "snapshot.py"
 
+sys.path.insert(0, str(LIB))
+
+import snapshot as snap  # noqa: E402
+
 
 class SnapshotCLIBase(unittest.TestCase):
     def setUp(self) -> None:
@@ -208,13 +212,32 @@ class CompareTests(SnapshotCLIBase):
         )
         return proc.returncode, self._json(proc)
 
-    def test_empty_record_bootstraps(self) -> None:
+    def test_empty_record_no_live_deployment_bootstraps(self) -> None:
         self._artifact(self.artifacts, "deck-a")
-        code, payload = self._compare("-", stdin="")
-        self.assertEqual(0, code)
+        proc = self._run(
+            "compare",
+            "--record",
+            "-",
+            "--live-deployment-id",
+            "",
+            stdin="",
+        )
+        payload = self._json(proc)
+        self.assertEqual(0, proc.returncode)
         self.assertEqual("bootstrap", payload["verdict"])
         self.assertTrue(payload["ok"])
+        self.assertTrue(payload["verifiable"])
+        self.assertFalse(payload["live_unknown"])
         self.assertEqual([], payload["removals"])
+
+    def test_empty_record_with_live_deployment_is_unverified(self) -> None:
+        self._artifact(self.artifacts, "deck-a")
+        code, payload = self._compare("-", stdin="")
+        self.assertEqual(4, code)
+        self.assertEqual("unverified", payload["verdict"])
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["verifiable"])
+        self.assertFalse(payload["live_unknown"])
 
     def test_identical_tree_matches(self) -> None:
         self._artifact(self.artifacts, "deck-a")
@@ -223,8 +246,20 @@ class CompareTests(SnapshotCLIBase):
         code, payload = self._compare(str(record))
         self.assertEqual(0, code)
         self.assertEqual("match", payload["verdict"])
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["verifiable"])
         self.assertEqual([], payload["additions"])
         self.assertEqual([], payload["changed"])
+
+    def test_valid_record_with_live_unknown_is_unverified(self) -> None:
+        self._artifact(self.artifacts, "deck-a")
+        record = self._record(self._fingerprint()["slugs"])
+        code, payload = self._compare(str(record), "--live-unknown")
+        self.assertEqual(4, code)
+        self.assertEqual("unverified", payload["verdict"])
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["verifiable"])
+        self.assertTrue(payload["live_unknown"])
 
     def test_added_and_changed_slug_is_drift(self) -> None:
         self._artifact(self.artifacts, "deck-a")
@@ -256,6 +291,7 @@ class CompareTests(SnapshotCLIBase):
         self.assertEqual(3, proc.returncode)
         self.assertEqual("removals", payload["verdict"])
         self.assertFalse(payload["ok"])
+        self.assertTrue(payload["verifiable"])
         self.assertEqual(["teammate-deck"], payload["removals"])
         self.assertEqual(["teammate-deck"], payload["unexpected_removals"])
         self.assertIn("--allow-removals", proc.stderr)
@@ -294,8 +330,22 @@ class CompareTests(SnapshotCLIBase):
         self.assertEqual(["teammate-deck"], payload["unexpected_removals"])
         self.assertEqual("dep-rolled-back", payload["record_deployment_id"])
         self.assertEqual(self.LIVE, payload["live_deployment_id"])
+        self.assertFalse(payload["verifiable"])
+        self.assertFalse(payload["ok"])
+        # Precedence: proven removals (exit 3) outrank unverifiable (exit 4).
         self.assertEqual(3, proc.returncode)
         self.assertIn("dep-rolled-back", proc.stderr)
+        self.assertIn("--allow-unverified", proc.stderr)
+
+    def test_untrusted_record_without_removals_exits_unverified(self) -> None:
+        self._artifact(self.artifacts, "deck-a")
+        record = self._record(self._fingerprint()["slugs"], deployment_id="dep-rolled-back")
+        code, payload = self._compare(str(record))
+        self.assertEqual(4, code)
+        self.assertEqual("untrusted", payload["verdict"])
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["verifiable"])
+        self.assertEqual([], payload["unexpected_removals"])
 
     def test_unreadable_record_path_is_an_error_not_a_bootstrap(self) -> None:
         self._artifact(self.artifacts, "deck-a")
@@ -351,6 +401,137 @@ class RecordTests(SnapshotCLIBase):
         return proc.returncode, self._json(proc)
 
 
+class ReanchorTests(SnapshotCLIBase):
+    """`reanchor` moves the anchor only -- the slug baseline must survive.
+
+    A refused KV write after a successful deploy leaves the record anchored on
+    the previous deployment. Rebuilding it with `record` would re-derive the
+    slug set from a hub that may itself be behind, which is the deletion this
+    whole guard exists to prevent, so recovery must keep the baseline.
+    """
+
+    STALE = {
+        "deployment_id": "dep-old",
+        "engine_commit": "abc1234",
+        "by": "teammate",
+        "at": "2020-01-01T00:00:00Z",
+        "slugs": {"deck-a": "a" * 64, "deck-b": "b" * 64},
+    }
+
+    def _reanchor(self, record: str, deployment_id: str = "dep-new") -> tuple[int, dict]:
+        proc = self._run(
+            "reanchor",
+            "--record",
+            "-",
+            "--deployment-id",
+            deployment_id,
+            stdin=record,
+        )
+        return proc.returncode, self._json(proc)
+
+    def test_replaces_only_the_anchor(self) -> None:
+        code, out = self._reanchor(json.dumps(self.STALE))
+        self.assertEqual(0, code)
+        self.assertEqual("dep-new", out["deployment_id"])
+        self.assertEqual(self.STALE["slugs"], out["slugs"])
+        self.assertEqual("teammate", out["by"])
+        self.assertEqual("abc1234", out["engine_commit"])
+        self.assertNotEqual(self.STALE["at"], out["at"])
+        self.assertTrue(out["at"].endswith("Z"))
+        self.assertEqual(
+            {"deployment_id", "engine_commit", "by", "at", "slugs"}, set(out)
+        )
+
+    def test_never_fingerprints_the_local_hub(self) -> None:
+        """The hub holds a different slug set; the record's must come through."""
+        self._artifact(self.artifacts, "only-local")
+        code, out = self._reanchor(json.dumps(self.STALE))
+        self.assertEqual(0, code)
+        self.assertEqual(self.STALE["slugs"], out["slugs"])
+        self.assertNotIn("only-local", out["slugs"])
+
+    def test_unknown_key_is_preserved(self) -> None:
+        record = dict(self.STALE, shares={"deck-a": "k1"})
+        code, out = self._reanchor(json.dumps(record))
+        self.assertEqual(0, code)
+        self.assertEqual({"deck-a": "k1"}, out["shares"])
+
+    def test_empty_record_is_an_error_not_an_empty_slug_set(self) -> None:
+        proc = self._run("reanchor", "--record", "-", "--deployment-id", "dep-new")
+        self.assertEqual(1, proc.returncode)
+        payload = self._json(proc)
+        self.assertFalse(payload["ok"])
+        self.assertNotIn("slugs", payload)
+        self.assertTrue(payload["error"])
+
+    def test_null_record_is_an_error(self) -> None:
+        code, payload = self._reanchor("null")
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"])
+        self.assertNotIn("slugs", payload)
+
+    def test_json_array_record_is_an_error(self) -> None:
+        code, payload = self._reanchor('[{"deployment_id": "dep-old"}]')
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"])
+
+    def test_non_dict_slugs_is_an_error(self) -> None:
+        code, payload = self._reanchor(
+            json.dumps(dict(self.STALE, slugs=["deck-a", "deck-b"]))
+        )
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"])
+
+    def test_empty_deployment_id_is_an_error(self) -> None:
+        code, payload = self._reanchor(json.dumps(self.STALE), deployment_id="   ")
+        self.assertEqual(1, code)
+        self.assertFalse(payload["ok"])
+
+    def test_reanchor_turns_untrusted_back_into_match(self) -> None:
+        """The point of the subcommand: recover without --allow-unverified.
+
+        The record is correct about what is live; only its anchor is stale
+        because the KV write after the last deploy was refused.
+        """
+        self._artifact(self.artifacts, "deck-a", extra={"meta.json": '{"title":"A"}'})
+        self._artifact(self.artifacts, "deck-b")
+        proc = self._run(
+            "record",
+            "--deployment-id",
+            "dep-old",
+            "--engine-commit",
+            "deadbee",
+            "--by",
+            "mickael",
+        )
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        stale = proc.stdout.strip()
+
+        code, payload = self._compare_stdin(stale, "dep-new")
+        self.assertEqual(4, code)
+        self.assertEqual("untrusted", payload["verdict"])
+
+        proc = self._run(
+            "reanchor", "--record", "-", "--deployment-id", "dep-new", stdin=stale
+        )
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        fixed = proc.stdout.strip()
+        self.assertEqual(1, len(fixed.splitlines()))
+
+        code, payload = self._compare_stdin(fixed, "dep-new")
+        self.assertEqual(0, code)
+        self.assertEqual("match", payload["verdict"])
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["verifiable"])
+        self.assertEqual([], payload["removals"])
+
+    def _compare_stdin(self, record_line: str, live: str) -> tuple[int, dict]:
+        proc = self._run(
+            "compare", "--record", "-", "--live-deployment-id", live, stdin=record_line
+        )
+        return proc.returncode, self._json(proc)
+
+
 class LiveDeploymentTests(SnapshotCLIBase):
     def test_missing_token_reports_auth_missing_without_network(self) -> None:
         proc = self._run("live-deployment")
@@ -359,6 +540,110 @@ class LiveDeploymentTests(SnapshotCLIBase):
         self.assertFalse(payload["ok"])
         self.assertEqual("auth_missing", payload["error_kind"])
         self.assertNotIn("deployment_id", payload)
+
+
+class LiveDeploymentBranchTests(unittest.TestCase):
+    """`no_deployment` is a verified-empty claim, not one nullable field.
+
+    `no_deployment` is the only live state the caller may bootstrap from, and
+    bootstrap is the only verdict that lets an unrestricted full-snapshot
+    deploy through with no record at all. So it must be confirmed against the
+    deployments list; anything else is unknown live content.
+
+    In-process against the module loaded from LIB, with `_cf_api` stubbed: no
+    socket is ever opened.
+    """
+
+    CFG = {"pages_project": "silex-forge"}
+    PROJECT_NO_LATEST = {"success": True, "result": {"latest_deployment": None}}
+
+    def setUp(self) -> None:
+        self.calls: list[str] = []
+        self._real_api = snap._cf_api
+        self._real_token = snap.resolve_api_token
+        self._real_acct = snap.resolved_account_id
+        snap.resolve_api_token = lambda: "tok-test"  # type: ignore[assignment]
+        snap.resolved_account_id = lambda cfg=None: "acct-test"  # type: ignore[assignment]
+
+    def tearDown(self) -> None:
+        snap._cf_api = self._real_api  # type: ignore[assignment]
+        snap.resolve_api_token = self._real_token  # type: ignore[assignment]
+        snap.resolved_account_id = self._real_acct  # type: ignore[assignment]
+
+    def _stub(self, deployments: tuple[int, dict | None, str]) -> None:
+        project = self.PROJECT_NO_LATEST
+
+        def fake(method: str, path: str, token: str, **kw: object):
+            self.calls.append(path)
+            if path.endswith("/deployments?per_page=1"):
+                return deployments
+            return 200, project, ""
+
+        snap._cf_api = fake  # type: ignore[assignment]
+
+    def test_missing_latest_with_empty_list_is_verified_empty(self) -> None:
+        self._stub((200, {"success": True, "result": []}, ""))
+        result = snap.live_deployment(dict(self.CFG))
+        self.assertFalse(result["ok"])
+        self.assertEqual("no_deployment", result["error_kind"])
+        self.assertTrue(
+            any(p.endswith("/deployments?per_page=1") for p in self.calls),
+            self.calls,
+        )
+
+    def test_missing_latest_with_deployments_present_is_unresolved(self) -> None:
+        self._stub((200, {"success": True, "result": [{"id": "dep-1"}]}, ""))
+        result = snap.live_deployment(dict(self.CFG))
+        self.assertFalse(result["ok"])
+        self.assertEqual("live_unresolved", result["error_kind"])
+        self.assertIn("deployments", result["error"])
+
+    def test_missing_latest_with_unreadable_list_is_unresolved(self) -> None:
+        self._stub((403, {"success": False, "errors": [{"message": "denied"}]}, ""))
+        result = snap.live_deployment(dict(self.CFG))
+        self.assertFalse(result["ok"])
+        self.assertEqual("live_unresolved", result["error_kind"])
+
+    def test_missing_latest_with_unreachable_list_is_unresolved(self) -> None:
+        self._stub((0, None, "connection refused"))
+        result = snap.live_deployment(dict(self.CFG))
+        self.assertFalse(result["ok"])
+        self.assertEqual("live_unresolved", result["error_kind"])
+
+    def test_resolvable_latest_keeps_the_payload_shape_and_asks_once(self) -> None:
+        def fake(method: str, path: str, token: str, **kw: object):
+            self.calls.append(path)
+            return 200, {
+                "success": True,
+                "result": {
+                    "latest_deployment": {
+                        "id": "dep-live",
+                        "deployment_trigger": {"metadata": {"commit_hash": "cafe123"}},
+                    }
+                },
+            }, ""
+
+        snap._cf_api = fake  # type: ignore[assignment]
+        result = snap.live_deployment(dict(self.CFG))
+        self.assertEqual(
+            {"ok": True, "deployment_id": "dep-live", "engine_commit": "cafe123"},
+            result,
+        )
+        self.assertEqual(1, len(self.calls), self.calls)
+
+    def test_auth_missing_short_circuits_before_any_request(self) -> None:
+        def explode(*a: object, **kw: object):
+            raise AssertionError("live_deployment opened a request without a token")
+
+        snap._cf_api = explode  # type: ignore[assignment]
+        snap.resolve_api_token = lambda: ""  # type: ignore[assignment]
+        result = snap.live_deployment(dict(self.CFG))
+        self.assertEqual("auth_missing", result["error_kind"])
+
+        snap.resolve_api_token = lambda: "tok-test"  # type: ignore[assignment]
+        snap.resolved_account_id = lambda cfg=None: ""  # type: ignore[assignment]
+        result = snap.live_deployment(dict(self.CFG))
+        self.assertEqual("auth_missing", result["error_kind"])
 
 
 if __name__ == "__main__":
