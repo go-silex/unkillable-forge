@@ -2,10 +2,12 @@
 """Fingerprint the local artifact hub and guard a forge deploy against stale-hub deletions.
 
 Why this exists: a forge publish deploys a FULL snapshot of the Pages project,
-built from the LOCAL artifact hub -- a Google Drive copy shared across the team.
+built from the LOCAL artifact hub -- a directory that must be shared between
+everyone who publishes to this forge, by whatever sync mechanism the operator
+chose. No mechanism is assumed, and none of them gives cross-machine locking.
 A hub copy that is behind therefore deploys a site missing the artifacts a
-teammate published in the meantime, and Pages replaces the whole site, so those
-artifacts silently disappear from production.
+teammate published in the meantime, and Pages replaces the whole site, so
+those artifacts silently disappear from production.
 
 The Cloudflare Pages API exposes no per-file manifest for a deployment (the
 project payload carries `canonical_deployment` / `latest_deployment` and nothing
@@ -23,12 +25,25 @@ Subcommands -- JSON on stdout, human-readable lines on stderr:
   compare          record vs local hub -> verdict (+ exit 3 on unexpected
                    removals, exit 4 when the live content cannot be verified)
   record           the JSON record to store in KV after a successful deploy
+  reanchor         re-point an existing record at another deployment id,
+                   keeping its slug set verbatim
+
+`reanchor` exists because the record conflates two independent facts: WHAT is
+live (the slug set) and WHICH deployment it describes (the anchor). A refused
+KV write after a successful deploy breaks only the anchor, and rebuilding the
+record with `record` would re-derive the slug set from a hub that may itself
+be behind -- exactly the deletion this guard exists to prevent. Re-anchoring
+keeps the baseline and costs one command instead of `--allow-unverified`.
 
 Exit codes: 0 = safe to deploy, 3 = unexpected removals (the caller refuses),
 4 = cannot verify what is live (no/unreadable record, live lookup failed, or
-record anchored on another deployment), 1 = usage or internal error.
+record anchored on another deployment), 1 = usage or internal error -- which
+for `reanchor` also covers a record it refuses to invent (empty, not an
+object, or carrying no slug map) and an empty deployment id.
 `live-deployment` exits 0 even when the lookup fails: the caller decides what
-an unknown live deployment means.
+an unknown live deployment means. It claims `no_deployment` only for a project
+whose deployment list is confirmed empty; an unresolvable latest deployment is
+`live_unresolved`, which the caller must read as unknown, never as empty.
 """
 from __future__ import annotations
 
@@ -174,6 +189,49 @@ def cmd_fingerprint(_args: argparse.Namespace) -> int:
 # ------------------------------------------------------------ live deployment
 
 
+def _confirm_no_deployment(acct: str, project: str, token: str) -> dict[str, Any]:
+    """Verify that a project without a `latest_deployment.id` is genuinely empty.
+
+    `no_deployment` is the one live state the caller may bootstrap from, and
+    bootstrap is the one verdict that lets an unrestricted full-snapshot deploy
+    through with no record at all. Inferring it from a single nullable field in
+    the project payload makes the blast radius of one absent field total, so
+    confirm emptiness against the deployments list instead. Anything the list
+    does not prove empty -- deployments present, or a list we cannot read -- is
+    an unresolved live deployment, which the caller must treat as unknown.
+    """
+    code, data, err = _cf_api(
+        "GET",
+        f"/accounts/{acct}/pages/projects/{project}/deployments?per_page=1",
+        token,
+    )
+    if code == 200 and data and data.get("success"):
+        result = data.get("result")
+        if isinstance(result, list) and not result:
+            return {
+                "ok": False,
+                "error_kind": "no_deployment",
+                "error": f"Pages project {project} has no deployment yet",
+            }
+        return {
+            "ok": False,
+            "error_kind": "live_unresolved",
+            "error": (
+                f"Pages project {project} has deployments but no resolvable "
+                "latest one -- live content cannot be assumed empty"
+            ),
+        }
+    detail = err or f"HTTP {code}"
+    return {
+        "ok": False,
+        "error_kind": "live_unresolved",
+        "error": (
+            f"Pages project {project} reports no latest deployment and its "
+            f"deployment list is unreadable ({detail})"
+        ),
+    }
+
+
 def live_deployment(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     """Live Pages deployment id + engine commit, or a structured failure.
 
@@ -218,11 +276,7 @@ def live_deployment(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     meta = trigger.get("metadata") or {}
     commit = str(meta.get("commit_hash") or "")
     if not dep_id:
-        return {
-            "ok": False,
-            "error_kind": "no_deployment",
-            "error": f"Pages project {project} has no deployment yet",
-        }
+        return _confirm_no_deployment(acct, project, token)
     return {"ok": True, "deployment_id": dep_id, "engine_commit": commit}
 
 
@@ -366,8 +420,8 @@ def _narrate(result: dict[str, Any], root: Path | None) -> None:
         )
         _say("  make sure this machine's hub copy is up to date, then re-run:")
         _say(
-            "    1. sync the shared hub (Drive client, rclone, whatever syncs "
-            "it to {})".format(_quoted(root))
+            "    1. refresh this machine's copy of the shared artifacts "
+            "directory {}, whatever syncs it".format(_quoted(root))
         )
         _say("    2. to deploy anyway, knowingly, re-run with --allow-unverified")
     if verdict == "untrusted":
@@ -387,8 +441,8 @@ def _narrate(result: dict[str, Any], root: Path | None) -> None:
         )
         _say("  make sure this machine's hub copy is up to date, then re-run:")
         _say(
-            "    1. sync the shared hub (Drive client, rclone, whatever syncs "
-            "it to {})".format(_quoted(root))
+            "    1. refresh this machine's copy of the shared artifacts "
+            "directory {}, whatever syncs it".format(_quoted(root))
         )
         _say("    2. to deploy anyway, knowingly, re-run with --allow-unverified")
     if result["removals"]:
@@ -408,8 +462,8 @@ def _narrate(result: dict[str, Any], root: Path | None) -> None:
         )
         _say("  the local hub is very likely behind the team copy. Fix it, then publish again:")
         _say(
-            "    1. make sure this machine's hub copy is up to date (Drive "
-            "client, rclone, whatever syncs it to {}), then re-run".format(
+            "    1. refresh this machine's copy of the shared artifacts "
+            "directory {}, whatever syncs it, then re-run".format(
                 _quoted(root)
             )
         )
@@ -447,6 +501,10 @@ def cmd_compare(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------- record
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def build_record(
     deployment_id: str, engine_commit: str, by: str, slugs: dict[str, str]
 ) -> dict[str, Any]:
@@ -454,7 +512,7 @@ def build_record(
         "deployment_id": deployment_id,
         "engine_commit": engine_commit,
         "by": by,
-        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "at": _utc_now(),
         "slugs": slugs,
     }
 
@@ -467,6 +525,56 @@ def cmd_record(args: argparse.Namespace) -> int:
         return EXIT_ERROR
     _emit(build_record(args.deployment_id, args.engine_commit, args.by, slugs))
     _say(f"record for deployment {args.deployment_id}: {len(slugs)} slug(s)")
+    return EXIT_OK
+
+
+# ------------------------------------------------------------------- reanchor
+
+
+def reanchor_record(
+    record: dict[str, Any], deployment_id: str
+) -> tuple[dict[str, Any], str]:
+    """(re-anchored record, error). Only the anchor moves; the slug set is kept.
+
+    Every other key -- `slugs`, `by`, and anything a future writer adds -- is
+    carried over verbatim. The record is never invented: an operator recovering
+    from a lost KV write must not be handed an empty slug set, because the next
+    compare would then read the whole live site as an addition-free match and
+    authorise a full-snapshot deploy that wipes it.
+    """
+    dep = deployment_id.strip()
+    if not dep:
+        return {}, "--deployment-id is empty"
+    if not record:
+        return {}, (
+            "no record to re-anchor: KV holds no snapshot for this project, "
+            "so publish once to create one"
+        )
+    if not isinstance(record.get("slugs"), dict):
+        return {}, (
+            "record has no slugs object: refusing to re-anchor a record whose "
+            "slug set is unknown"
+        )
+    out = dict(record)
+    out["deployment_id"] = dep
+    out["at"] = _utc_now()
+    return out, ""
+
+
+def cmd_reanchor(args: argparse.Namespace) -> int:
+    record, err = load_record(args.record)
+    if not err:
+        record, err = reanchor_record(record, args.deployment_id)
+    if err:
+        _say(f"✗ {err}")
+        _emit({"ok": False, "error": err})
+        return EXIT_ERROR
+    _emit(record)
+    _say(
+        "re-anchored on deployment {}: {} slug(s) preserved".format(
+            record["deployment_id"], len(record["slugs"])
+        )
+    )
     return EXIT_OK
 
 
@@ -525,6 +633,23 @@ def build_parser() -> argparse.ArgumentParser:
     rec_ap.add_argument("--engine-commit", required=True)
     rec_ap.add_argument("--by", required=True, help="who published")
     rec_ap.set_defaults(func=cmd_record)
+
+    ra_ap = sub.add_parser(
+        "reanchor",
+        help=(
+            "re-point an existing record at a deployment id, keeping its "
+            "slug set verbatim"
+        ),
+    )
+    ra_ap.add_argument(
+        "--record", required=True, help="record JSON path, or - for stdin"
+    )
+    ra_ap.add_argument(
+        "--deployment-id",
+        required=True,
+        help="deployment id the record should be anchored on",
+    )
+    ra_ap.set_defaults(func=cmd_reanchor)
 
     return ap
 

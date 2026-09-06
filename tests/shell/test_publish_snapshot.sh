@@ -2,21 +2,36 @@
 # Behavioral tests for the hub drift guard and the stripped hub write-back.
 #
 # Why the guard exists: every deploy is a FULL snapshot of the Pages project
-# built from the LOCAL hub, and the hub is a Google Drive copy shared across the
-# team. A local copy that is behind therefore publishes a snapshot that silently
-# DELETES the artifacts other people added.
+# built from the LOCAL hub, and that hub must be a directory shared between
+# everyone who publishes to the forge, by whatever sync mechanism the operator
+# chose. A local copy that is behind therefore publishes a snapshot that
+# silently DELETES the artifacts other people added.
 #
-# Fail-closed: no record, unreadable KV, a broken record, a failed live lookup,
-# or a record anchored on another deployment all REFUSE unless the operator
-# passes --allow-unverified. A proven unexpected removal refuses unless
-# --allow-removals. Only a fresh Pages project (no live deployment, no record)
-# bootstraps. The 2026-09-06 loss was the old "bootstrap when no record" path.
+# Fail-closed: no record, a KV read that was denied or failed, a broken record,
+# a failed live lookup, or a record anchored on another deployment all REFUSE
+# unless the operator passes --allow-unverified. A proven unexpected removal
+# refuses unless --allow-removals — and when the record is not anchored on what
+# is live, the removal list cannot be complete, so BOTH flags are required:
+# --allow-removals alone used to clear an untrusted record because the shell
+# read the compare exit code and discarded the `verifiable` payload. Only a
+# fresh Pages project (no live deployment, no record) bootstraps. The
+# 2026-09-06 loss was the old "bootstrap when no record" path.
+#
+# The guard also arms what deploy_pages re-asserts immediately before the
+# upload: SNAPSHOT_GUARD_PASSED and SNAPSHOT_GUARD_LIVE_ID. The guard runs in
+# the preflight and the upload happens minutes later, so a teammate deploying
+# inside that window has to be caught there (the per-slug flock is
+# kernel-local: it never serializes two machines).
+#
+# A denied KV read is not a stale hub: the refusal must name the denial, or the
+# operator is sent to re-sync a hub that was never the problem.
 #
 # Isolation: FORGE_CONFIG + FORGE_ENV point into mktemp -d and no Cloudflare
 # credential is exported, so the REAL `snapshot.py live-deployment` fails on
 # auth_missing without ever opening a socket (offline proof below). After the
 # lib-only source, kv_get_key and live_deployment_json are redefined so the
-# record and live state are test-controlled. No network, no real hub.
+# record and live state are test-controlled — KV_GET_STATUS is then set by
+# hand, exactly as the real kv_get_key would. No network, no real hub.
 # bash 3.2-safe (no mapfile, no declare -A, no ${x^^}).
 set -euo pipefail
 
@@ -126,8 +141,11 @@ ARTIFACTS_ROOT="$TD/hub/artifacts"
 INTERNAL_PREFIX="a"
 DRY_RUN=false
 
-# Test-controlled KV: $KV_RECORD is the value snapshot_guard reads.
+# Test-controlled KV: $KV_RECORD is the value snapshot_guard reads, and
+# $KV_GET_STATUS is the classification the real kv_get_key would have set
+# (ok | miss | denied | error). Default: a plain miss, i.e. today's behaviour.
 KV_RECORD=""
+KV_GET_STATUS="miss"
 kv_get_key() {
   [ -n "$KV_RECORD" ] || return 1
   cat "$KV_RECORD"
@@ -145,6 +163,16 @@ guard() {
   # snapshot_guard calls die on refusal, which exits — run it in a subshell so
   # this suite survives and can assert on the exit status.
   ( snapshot_guard ) 2>"$TD/guard.err"
+}
+
+guard_direct() {
+  # snapshot_guard in THIS shell: SNAPSHOT_GUARD_PASSED / _LIVE_ID are globals
+  # and the subshell in guard() would discard them. Only for paths that return
+  # 0 — a die() here exits the suite. The pre-set values are deliberately wrong
+  # so an assertion cannot pass on a leftover from an earlier case.
+  SNAPSHOT_GUARD_PASSED=false
+  SNAPSHOT_GUARD_LIVE_ID="never-set"
+  snapshot_guard 2>"$TD/guard.err"
 }
 
 guard_err() { cat "$TD/guard.err"; }
@@ -244,16 +272,11 @@ grep -q -- "--allow-unverified" "$TD/guard.err" \
   || { guard_err; fail "live-lookup refusal must name --allow-unverified"; }
 pass "live lookup ok:false with valid record refuses"
 
-# --- 6c. fresh project (no live deployment, no record) bootstraps ------------
-KV_RECORD=""
-LIVE_JSON='{"ok":true,"deployment_id":"","engine_commit":""}'
-guard || { guard_err; fail "a fresh project with no live deployment must bootstrap"; }
-pass "fresh project (empty deployment id, no record) proceeds"
-
-# --- 6c2. the real live-deployment payload for a fresh project ---------------
-# live_deployment() never emits ok:true with an empty id. A Pages project
-# with no deployment yet returns ok:false, error_kind=no_deployment. Treating
-# that as a failed lookup would refuse the first publish of a new forge.
+# --- 6c. fresh project (no live deployment, no record) bootstraps -----------
+# The real payload, and the only one: live_deployment() never emits ok:true
+# with an empty deployment id. A Pages project whose deployment list is
+# confirmed empty returns ok:false, error_kind=no_deployment. Treating that as
+# a failed lookup would refuse the first publish of a new forge.
 KV_RECORD=""
 LIVE_JSON='{"ok":false,"error_kind":"no_deployment","error":"Pages project forge-test-project has no deployment yet"}'
 guard || { guard_err; fail "error_kind=no_deployment must bootstrap, not refuse as unverified"; }
@@ -283,6 +306,227 @@ grep -q "gone" "$TD/guard.err" \
   || { guard_err; fail "DRY_RUN removal refusal must still name the slug"; }
 DRY_RUN=false
 pass "DRY_RUN + proven removal still refuses"
+
+# --- 6f. an untrusted record needs BOTH flags to remove ----------------------
+# A proven removal (exit 3) outranks an unverifiable state (exit 4), so a
+# record anchored on another deployment lands in the removals branch. Reading
+# only that exit code let --allow-removals clear the unanchored record: the
+# strictly MORE dangerous state took the WEAKER flag. It is more dangerous
+# because the removal list is differenced against the record, so live slugs a
+# stale record never listed are invisible to it — the full-snapshot deploy
+# deletes them without ever naming them.
+KV_RECORD="$RECORD"
+LIVE_JSON='{"ok":true,"deployment_id":"dep-live-2","engine_commit":"abc1234"}'
+rm -rf "$TD/hub/artifacts/gone"
+DRY_RUN=false
+ALLOW_UNVERIFIED=false
+ALLOW_REMOVALS=true
+if guard; then
+  guard_err
+  fail "--allow-removals alone must not clear a record that is not anchored on the live deployment"
+fi
+grep -q "hub drift" "$TD/guard.err" \
+  || { guard_err; fail "the refusal must keep the hub drift prefix"; }
+grep -q -- "--allow-unverified" "$TD/guard.err" \
+  || { guard_err; fail "the refusal must name --allow-unverified as required in addition"; }
+grep -q "cannot be trusted" "$TD/guard.err" \
+  || { guard_err; fail "the refusal must say the removal list cannot be trusted"; }
+pass "untrusted record + proven removal + --allow-removals only -> refuses"
+
+ALLOW_UNVERIFIED=true
+guard || { guard_err; fail "--allow-removals with --allow-unverified must let the removal through"; }
+grep -q -- "--allow-removals was passed" "$TD/guard.err" \
+  || { guard_err; fail "the double override must still warn about the removal"; }
+grep -q "unanchored record" "$TD/guard.err" \
+  || { guard_err; fail "the double override must say the record is unanchored, not just that artifacts are removed"; }
+ALLOW_UNVERIFIED=false
+ALLOW_REMOVALS=false
+pass "untrusted record + both flags -> proceeds, naming the unanchored record"
+
+# --- 6g. a verifiable record still takes --allow-removals alone --------------
+KV_RECORD="$RECORD"
+LIVE_JSON='{"ok":true,"deployment_id":"dep-live-1","engine_commit":"abc1234"}'
+ALLOW_REMOVALS=true
+guard || { guard_err; fail "a verifiable record must still proceed on --allow-removals alone"; }
+grep -q -- "--allow-removals was passed" "$TD/guard.err" \
+  || { guard_err; fail "the override must still warn"; }
+if grep -q "unanchored record" "$TD/guard.err"; then
+  guard_err
+  fail "a record anchored on the live deployment must not be reported as unanchored"
+fi
+ALLOW_REMOVALS=false
+pass "verifiable record + removal + --allow-removals -> proceeds (no regression)"
+
+mkdir -p "$TD/hub/artifacts/gone"
+echo '<html><head><title>Gone</title></head><body>gone</body></html>' \
+  > "$TD/hub/artifacts/gone/index.html"
+
+# --- 6h. a denied KV read is not a stale hub ---------------------------------
+# kv_get_key collapsed 403 into the same failure as 404, so a token without
+# Workers KV read produced "no record" — and the refusal told the operator to
+# re-sync a hub that was never the problem, on every publish, forever.
+KV_RECORD=""
+LIVE_JSON='{"ok":true,"deployment_id":"dep-live-1","engine_commit":"abc1234"}'
+KV_GET_STATUS="denied"
+if guard; then
+  guard_err
+  fail "a denied KV read with live content must still refuse"
+fi
+grep -q "read denied" "$TD/guard.err" \
+  || { guard_err; fail "the refusal must name the denied KV read"; }
+grep -q "Workers KV" "$TD/guard.err" \
+  || { guard_err; fail "the refusal must name the missing Workers KV read scope"; }
+pass "denied KV read -> refusal names the denial, not a stale hub"
+
+KV_GET_STATUS="error"
+if guard; then guard_err; fail "a failed KV read must refuse"; fi
+grep -q "read failed" "$TD/guard.err" \
+  || { guard_err; fail "a failed KV read must be named as such" ; }
+pass "failed KV read -> refusal names the read failure"
+
+# An unset status is what every caller that replaces kv_get_key produces; it
+# must keep meaning "no record", never fail closed with a KV story.
+KV_GET_STATUS=""
+if guard; then guard_err; fail "an empty record must still refuse when live content exists"; fi
+if grep -q "KV record read" "$TD/guard.err"; then
+  guard_err
+  fail "an unset KV_GET_STATUS was reported as a KV read failure"
+fi
+KV_GET_STATUS="miss"
+pass "unset KV_GET_STATUS behaves exactly as a miss"
+
+# --- 6i. the guard arms what deploy_pages re-asserts before the upload -------
+# The guard runs in the preflight and the upload happens minutes later, so
+# deploy_pages re-checks these two before wrangler. Every path that lets the
+# deploy proceed must set them, or the deploy dies as an internal error.
+KV_RECORD="$RECORD"
+LIVE_JSON='{"ok":true,"deployment_id":"dep-live-1","engine_commit":"abc1234"}'
+ALLOW_REMOVALS=false
+ALLOW_UNVERIFIED=false
+DRY_RUN=false
+guard_direct || { guard_err; fail "a matching hub must deploy"; }
+[ "$SNAPSHOT_GUARD_PASSED" = true ] \
+  || { guard_err; fail "a clean pass did not arm SNAPSHOT_GUARD_PASSED"; }
+[ "$SNAPSHOT_GUARD_LIVE_ID" = "dep-live-1" ] \
+  || { guard_err; fail "clean pass recorded live id '$SNAPSHOT_GUARD_LIVE_ID', expected dep-live-1"; }
+pass "clean pass arms SNAPSHOT_GUARD_PASSED + the live id it checked"
+
+LIVE_JSON='{"ok":true,"deployment_id":"dep-live-9","engine_commit":"abc1234"}'
+ALLOW_UNVERIFIED=true
+guard_direct || { guard_err; fail "--allow-unverified must proceed on an untrusted record"; }
+[ "$SNAPSHOT_GUARD_PASSED" = true ] \
+  || { guard_err; fail "an override did not arm SNAPSHOT_GUARD_PASSED"; }
+[ "$SNAPSHOT_GUARD_LIVE_ID" = "dep-live-9" ] \
+  || { guard_err; fail "override recorded live id '$SNAPSHOT_GUARD_LIVE_ID', expected dep-live-9"; }
+ALLOW_UNVERIFIED=false
+pass "--allow-unverified arms the sentinels with the id the override was granted against"
+
+KV_RECORD=""
+LIVE_JSON='{"ok":true,"deployment_id":"dep-live-1","engine_commit":"abc1234"}'
+DRY_RUN=true
+guard_direct || { guard_err; fail "the dry-run downgrade must proceed"; }
+grep -q "would refuse" "$TD/guard.err" \
+  || { guard_err; fail "the dry-run downgrade must still warn"; }
+[ "$SNAPSHOT_GUARD_PASSED" = true ] \
+  || { guard_err; fail "the dry-run downgrade did not arm SNAPSHOT_GUARD_PASSED"; }
+[ "$SNAPSHOT_GUARD_LIVE_ID" = "dep-live-1" ] \
+  || { guard_err; fail "dry-run downgrade recorded live id '$SNAPSHOT_GUARD_LIVE_ID'"; }
+DRY_RUN=false
+pass "dry-run downgrade arms the sentinels too"
+
+# --- 6j. a skipped guard must not look like a clean pass ---------------------
+SAVED_ART="$ARTIFACTS_ROOT"
+ARTIFACTS_ROOT=""
+guard_direct || { guard_err; fail "an unresolved artifacts root must not fail the publish here"; }
+grep -q "guard skipped" "$TD/guard.err" \
+  || { guard_err; fail "a skipped guard must say so — silence is indistinguishable from a clean pass"; }
+grep -q "artifacts root" "$TD/guard.err" \
+  || { guard_err; fail "the skip must name the unresolved artifacts root"; }
+[ "$SNAPSHOT_GUARD_PASSED" = true ] \
+  || { guard_err; fail "the skipped path must still arm the sentinel, or every deploy dies as an internal error"; }
+[ -z "$SNAPSHOT_GUARD_LIVE_ID" ] \
+  || { guard_err; fail "a skipped guard must not claim a live id, got '$SNAPSHOT_GUARD_LIVE_ID'"; }
+ARTIFACTS_ROOT="$SAVED_ART"
+pass "guard skipped (artifacts root unresolved) warns and claims no live id"
+
+# --- 6k. --reanchor-snapshot: the recovery that keeps the baseline -----------
+# snapshot_record is best-effort, so one refused KV write after a successful
+# deploy leaves the record anchored on the PREVIOUS deployment while live has
+# moved on — which the guard reads as untrusted. The only sanctioned exit used
+# to be --allow-unverified, i.e. rebuilding the record from this machine's
+# possibly-stale hub: byte for byte the 2026-09-06 loss. Re-anchoring must move
+# the anchor and nothing else, and must never invent a record.
+REANCHOR_DIR="$TD/reanchor"
+mkdir -p "$REANCHOR_DIR"
+STALE_RECORD='{"deployment_id":"dep-OLD","engine_commit":"eng-old","by":"teammate@example.invalid","at":"2026-01-01T00:00:00Z","slugs":{"kept":"h-kept","teammate-only":"h-teammate"}}'
+reanchor_case() {
+  # $1 = DRY_RUN, $2 = the live-deployment payload. A subshell: it redefines
+  # the KV and live stubs the rest of this file relies on, and
+  # cmd_reanchor_snapshot dies (exits) on every refusal.
+  RE_LIVE="$2"
+  rm -f "$REANCHOR_DIR/written.json"
+  (
+    require_forge_config() { :; }
+    preflight_cf_mutations() { :; }
+    source_cf_credentials() { :; }
+    kv_get_key() { [ -s "$REANCHOR_DIR/record.json" ] || return 1; cat "$REANCHOR_DIR/record.json"; }
+    kv_put_value() { printf '%s' "$2" > "$REANCHOR_DIR/written.json"; }
+    live_deployment_json() { printf '%s\n' "$RE_LIVE"; }
+    DRY_RUN="$1"
+    cmd_reanchor_snapshot
+  ) > "$REANCHOR_DIR/out" 2>&1
+}
+reanchor_out() { cat "$REANCHOR_DIR/out"; }
+
+printf '%s' "$STALE_RECORD" > "$REANCHOR_DIR/record.json"
+reanchor_case true '{"ok":true,"deployment_id":"dep-NEW","engine_commit":"eng-new"}' \
+  || { reanchor_out; fail "--reanchor-snapshot --dry-run must not fail"; }
+[ ! -f "$REANCHOR_DIR/written.json" ] \
+  || { reanchor_out; fail "--reanchor-snapshot --dry-run wrote to KV"; }
+grep -q "dep-OLD" "$REANCHOR_DIR/out" \
+  || { reanchor_out; fail "the dry run must name the anchor it would leave"; }
+grep -q "dep-NEW" "$REANCHOR_DIR/out" \
+  || { reanchor_out; fail "the dry run must name the anchor it would write"; }
+pass "--reanchor-snapshot --dry-run prints the anchor change and mutates nothing"
+
+reanchor_case false '{"ok":true,"deployment_id":"dep-NEW","engine_commit":"eng-new"}' \
+  || { reanchor_out; fail "--reanchor-snapshot must re-anchor a stale record"; }
+[ -f "$REANCHOR_DIR/written.json" ] \
+  || { reanchor_out; fail "--reanchor-snapshot wrote no record to KV"; }
+python3 - "$REANCHOR_DIR/written.json" <<'PY' || fail "the re-anchored record is not the old record with a new anchor"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["deployment_id"] == "dep-NEW", d
+assert sorted(d["slugs"]) == ["kept", "teammate-only"], d
+assert d["slugs"]["teammate-only"] == "h-teammate", d
+assert d["by"] == "teammate@example.invalid", d
+assert d["engine_commit"] == "eng-old", d
+assert d["at"] != "2026-01-01T00:00:00Z", d
+PY
+pass "--reanchor-snapshot moves only the anchor (slug set, author, engine commit survive)"
+
+if reanchor_case false '{"ok":false,"reason":"api_error"}'; then
+  reanchor_out
+  fail "a failed live lookup must not re-anchor the record on a guessed deployment"
+fi
+[ ! -f "$REANCHOR_DIR/written.json" ] \
+  || { reanchor_out; fail "KV was written despite a failed live lookup"; }
+pass "--reanchor-snapshot refuses when the live deployment is unknown"
+
+: > "$REANCHOR_DIR/record.json"
+if reanchor_case false '{"ok":true,"deployment_id":"dep-NEW","engine_commit":"eng-new"}'; then
+  reanchor_out
+  fail "an absent record must not be re-anchored — an invented slug set authorises a full wipe"
+fi
+grep -q "nothing to re-anchor" "$REANCHOR_DIR/out" \
+  || { reanchor_out; fail "the refusal must say there is nothing to re-anchor"; }
+[ ! -f "$REANCHOR_DIR/written.json" ] \
+  || { reanchor_out; fail "KV was written although there was no record to re-anchor"; }
+pass "--reanchor-snapshot with no record refuses instead of inventing one"
+
+grep -q -- '--reanchor-snapshot) cmd_reanchor_snapshot' "$PUBLISH" \
+  || fail "--reanchor-snapshot is not wired into the command dispatch"
+pass "--reanchor-snapshot is reachable from the CLI"
 
 # Restore a trusted live default for the write-back half.
 LIVE_JSON='{"ok":true,"deployment_id":"dep-live-1","engine_commit":"abc1234"}'

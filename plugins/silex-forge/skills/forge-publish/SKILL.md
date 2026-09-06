@@ -81,18 +81,37 @@ file, not in `forge.env`.
 ## Hub drift guard
 
 Every publish is a full Pages snapshot from this machine's hub copy. The KV
-guard is the only cross-machine protection — silencing it can delete a
-teammate's deck.
+guard, plus the re-assert `deploy_pages` runs immediately before `wrangler`,
+are the only cross-machine protection — nothing serializes two machines, so
+silencing either can delete a teammate's deck.
 
 | Refusal | Override | Agent action |
 |---|---|---|
-| Proven unexpected removal (exit 3) | `--allow-removals` | **Stop.** Tell the operator this machine's hub may be behind; let Drive client / rclone finish, then retry. |
-| Cannot verify what is live (exit 4: no/unreadable/unparseable `snapshot:live`, failed live lookup, missing `snapshot.py`, or record from another deployment) | `--allow-unverified` | **Stop.** Same remedy — sync, then retry. |
+| Proven unexpected removal (exit 3), record verifiable | `--allow-removals` | **Stop.** Tell the operator this machine's hub may be behind; let whatever syncs the shared artifacts directory finish, then retry. |
+| Proven unexpected removal on a record that cannot be verified (exit 3 while the verdict is `unverified` / `untrusted`) | `--allow-removals` **and** `--allow-unverified` — both, or the run refuses | **Stop.** Do **not** reach for `--allow-removals`: the record no longer describes the live site, so the named slug is not the whole story — other live artifacts may be invisible to the check. Same remedy: refresh this machine's copy, then retry. |
+| Cannot verify what is live (exit 4: no/unreadable/unparseable `snapshot:live`, a **denied or failed** KV read, failed live lookup, missing `snapshot.py`, or a record from another deployment) | `--allow-unverified` | **Stop.** Same remedy — refresh this machine's copy, then retry. If the message names a refused `snapshot:live` **read**, the hub is not the problem: report the token's missing Workers KV read scope to the operator. If it names a **lost snapshot record** (still anchored on a previous deployment), propose `--reanchor-snapshot` below. |
+| The live deployment changed during this publish (a teammate deployed while this run was building) | none — no flag lifts it | **Re-run** the publish. This is the guard working: the other publish won, and re-running rebuilds against the current state. Never override. |
 
-**NEVER** pass `--allow-removals` or `--allow-unverified` to get past a refusal.
-A refusal means this machine's hub copy may be behind the team copy: stop, tell
-the operator to let their sync finish (Drive client / rclone), then retry. Only
-the operator decides to delete live artifacts.
+**NEVER** pass `--allow-removals` or `--allow-unverified` to get past a refusal
+— not on their own, and not together when the refusal asks for both.
+A refusal means this machine's hub copy may be behind the shared copy: stop,
+tell the operator to let their sync finish — whatever mechanism syncs the
+artifacts directory — then retry. Only the operator decides to delete live
+artifacts.
+
+The one recovery command an agent may propose:
+
+```bash
+publish.sh --reanchor-snapshot --dry-run   # shows the record it would write
+publish.sh --reanchor-snapshot             # operator runs the real one
+```
+
+It is **not** an override. It rewrites only the snapshot record's
+`deployment_id` / `at`, preserving the recorded slug set, for the one case where
+a deploy succeeded but the record's KV write was refused — which leaves every
+later publish `untrusted`. It never builds and never deploys, so it cannot
+touch the live site; it repairs bookkeeping. Propose it (with `--dry-run`
+first) and let the operator run it.
 
 ## Usage
 
