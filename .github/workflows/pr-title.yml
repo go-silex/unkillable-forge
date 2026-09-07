@@ -1,0 +1,57 @@
+name: PR title
+
+# Advisory consistency check — not a required status check (ruleset PR_Main
+# requires `check` and `test` only). Authored commits in this repo already
+# follow Conventional Commits; merge commits (`Merge pull request #N`) do not,
+# and this workflow never sees them. The PR title is what a reviewer reads in
+# `gh pr list` and carries into the CHANGELOG by hand. No tool consumes it —
+# `check_plugin_versions.py --print-notes` reads CHANGELOG.md, and
+# release-plugin.sh builds the Release title from the tag (`silex-forge vX.Y.Z`).
+# Hand-rolled instead of a third-party action: no pinned SHA to audit.
+
+on:
+  pull_request:
+    branches: [main]
+    # No `synchronize`: a push cannot change the title, so it would only
+    # re-run a check whose input is unchanged.
+    types: [opened, edited, reopened, ready_for_review]
+
+permissions: {}
+
+jobs:
+  title:
+    runs-on: ubuntu-latest
+    steps:
+      # The title is untrusted input: it goes through the environment, never
+      # interpolated into the shell (`${{ }}` inside run: is a script
+      # injection). Newlines are stripped before any match or log, so a
+      # multi-line title cannot (a) inject a workflow command via `::` at
+      # column 0 or (b) pass the gate on its first line alone.
+      - name: Conventional Commits subject
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -eu
+          title=$(printf '%s' "$TITLE" | tr -d '\r\n')
+          printf 'title: %s\n' "$title"
+
+          # GitHub's Revert button produces `Revert "…"`, which is a
+          # legitimate title and not a Conventional Commit.
+          case "$title" in
+            'Revert "'*) echo ok; exit 0 ;;
+          esac
+
+          types='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert'
+          if ! printf '%s' "$title" \
+            | grep -qE "^(${types})(\([a-z0-9._/-]+\))?!?: .+"; then
+            echo "::error::title must be '<type>(<scope>)?: <subject>' with type in ${types} (or GitHub's Revert \"…\")"
+            exit 1
+          fi
+
+          # `subject-full-stop` is a @commitlint/config-conventional rule.
+          # No length floor: the `.+` in the pattern is what requires a subject.
+          case "$title" in
+            *.) echo "::error::drop the trailing period"; exit 1 ;;
+          esac
+
+          echo "ok"

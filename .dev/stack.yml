@@ -1,0 +1,138 @@
+# .dev/stack.yml — repo contract read by the dev-core skills. COMMITTED, no secrets.
+#
+# Hand-written, NOT copied from stack.yml.example: that template assumes
+# bun + nestjs + tanstack-start + turbo + biome + vercel. None of it applies here.
+#
+# This repo is a publishing engine: bash (scripts) + Python 3.9 stdlib (lib/ + unittest)
+# + a tiny TS surface (functions/ Cloudflare Pages, vitest).
+#
+# WHAT COMMITTING THIS FILE TURNS ON. Its mere presence is the dev-core project
+# contract (omp/index.ts `hasProjectContract`), so for anyone working here with
+# that plugin loaded:
+#   · `bun test` is denied — we run npm/vitest, so this never fires;
+#   · switching the principal worktree off main is denied. Use `git worktree add`
+#     (CONTRIBUTING § Making changes step 1), or the DEV_CORE_ALLOW_PRINCIPAL_SWITCH=1
+#     hatch;
+#   · every write/edit payload is scanned by hooks/lib/security-patterns.cjs, which
+#     BLOCKS a `token|secret|password|api_key = "<8+ chars>"` shape. That is exactly
+#     the fake-credential fixtures in tests/ that ci.yml deliberately exempts
+#     (":!tests/** fake tokens / contract fixtures"), and the OMP path has no
+#     escape hatch: author such lines with a shell heredoc, not with write/edit;
+#   · the format hook runs `build.formatter_fix_cmd` after each edit — inert only
+#     while it stays empty below. Keep it empty; there is no formatter here.
+#
+# Neutralised on purpose (present, but set to nothing):
+#   hooks.tool: none      → validation lives in CI (5 jobs), not in a pre-commit hook
+#   build.formatter*      → no formatter in this repo; keeps the format hook inert
+#   deploy.platform: none → deploys go through publish.sh → wrangler, never CI
+# Absent on purpose:
+#   quality_gates         → its scripts hardcode QG_FILE_ROOT=src/; no src/ here
+
+schema_version: "1.0"
+
+runtime: node
+package_manager: npm
+
+backend:
+  framework: none
+  # Pages Functions are the server surface (Access middleware, /api/*, /s/*):
+  # R-backend-dev is the right reviewer for them, not R-frontend-dev.
+  path: functions
+
+frontend:
+  framework: none
+  path: ""
+
+build:
+  orchestrator: none
+  formatter: none
+  formatter_fix_cmd: ""
+
+testing:
+  unit: vitest
+  e2e: none
+
+hooks:
+  tool: none
+
+lsp:
+  enabled: true
+
+deploy:
+  platform: none
+  secrets_cmd: ""
+
+# Descriptive only — no dev-core skill releases this repo. Tagging is
+# scripts/release-plugin.sh, run by the ci.yml `release` job on merge to main
+# (Convention A, silex-forge/vX.Y.Z), with versions stamped across 9 manifests +
+# CHANGELOG by scripts/check_plugin_versions.py ⇒ version_files stays empty.
+#
+# `model` is omitted on purpose. `trunk` would make /R-dev-checkup emit a
+# permanent hard fail (`release-model:auto-release`) because
+# auto-release.yml is absent, and satisfying that fail with /R-ci-setup
+# would install a second tagger racing release-plugin.sh. `staging-train`
+# would describe a promotion flow and a staging branch this repo does not
+# have. Absent, the N11 gate stays inert (`stack.release?.model === 'trunk'`
+# only). The truth lives in this comment, in `component`, and in ci.yml.
+release:
+  class: NONE
+  component: silex-forge
+  version_files: []
+
+docs:
+  framework: none
+  path: docs
+  format: md
+
+commands:
+  # The three test suites CI runs (jobs `test` and `test-py39`):
+  # run-os-script-tests.sh already contains `python3 -m unittest discover -s tests/python`.
+  # Needs `npm ci` first in a fresh clone or a new worktree.
+  test: "npm test && bash tests/shell/run-os-script-tests.sh && bash tests/shell/test_release_plugin.sh"
+  typecheck: npm run typecheck
+  # ShellCheck is this repo's linter; this mirrors the ci.yml `check` job step
+  # (publish.sh keeps its two documented exclusions). Declared because an unset
+  # commands.lint makes R-fixer refuse to apply any review finding.
+  lint: 'for f in plugins/silex-forge/scripts/*.sh; do case "$f" in */publish.sh) shellcheck -e SC1091,SC2086 "$f" ;; *) shellcheck "$f" ;; esac; done && shellcheck scripts/release-plugin.sh tests/shell/test_release_plugin.sh'
+  install: npm ci
+  # The rest of the `check` job (py_compile, check_plugin_versions.py, the
+  # patch_wrangler smoke, the no-committed-HTML and secret/infra-ID scans) has no
+  # local entrypoint and stays CI-only.
+
+review:
+  roster:
+    max_agents: 4
+    verify_below_confidence: 90
+    recall_min_delta: 50
+    agents:
+      R-adversarial: default
+      R-security-auditor: default
+      R-tester: default
+      # No frontend app: zero .tsx/.jsx/.vue/.svelte/.css/.scss files here, so
+      # FE_EXT_RE (roster.ts:113) matches nothing today — `.ts` is not in it.
+      # `never` locks the future case: an empty frontend.path makes feHit fall
+      # back to that extension match, so one .css added under site/ would
+      # convoke a frontend agent on a repo that has no frontend.
+      R-frontend-dev: never
+      R-backend-dev: default
+      R-devops: default
+      R-architect: default
+      # Structural gate AXIAL_RE = ^(infrastructure|adapters|domains|stages)/ —
+      # none of those directories exist here, so this agent stays no-path-hit
+      # whatever the value. ADR 0001 is enforced by tests and review, not by it.
+      R-axial-adr-review: default
+
+artifacts:
+  brainstorms: artifacts/brainstorms
+  analyses: artifacts/analyses
+  specs: artifacts/specs
+  frames: artifacts/frames
+  plans: artifacts/plans
+
+# No docs/standards/ here: the hard conventions live in AGENTS.md
+# (§ Agent rules, § Hub drift guard) and the architecture docs in docs/.
+standards:
+  architecture: docs/
+  code_review: AGENTS.md
+  testing: AGENTS.md
+  contributing: CONTRIBUTING.md

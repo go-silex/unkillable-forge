@@ -1,0 +1,48 @@
+# Dependency updates. Two ecosystems only: the JS test toolchain (vitest,
+# typescript, @cloudflare/workers-types) and the GitHub Actions in ci.yml.
+# Those actions are pinned to mutable major tags (`@v4`, `@v5`), not SHAs —
+# this file tracks tag bumps, it does not create a SHA-pinning posture.
+# The Python side is stdlib-only (3.9 floor asserted in CI) — nothing to track.
+#
+# No `labels:` key: an explicit list of labels that do not exist in the repo
+# is silently dropped (Dependabot docs). Omitting the key lets Dependabot
+# auto-create its default `dependencies` label.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+    groups:
+      # One PR for the whole minor/patch wave: the suite is fast (16 s) and
+      # every dep here is dev-only, so per-package PRs are pure noise.
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      # Majors land alone: checkout v4→v5 changes the runner Node baseline
+      # and is not a chore.
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
