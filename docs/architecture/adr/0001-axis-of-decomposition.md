@@ -80,6 +80,19 @@ Drift class: `target-axis-trap` (a concern re-implemented per sibling command).
 Three-strikes rule: a concern appearing in 3+ `cmd_*` bodies is promoted to a
 stage.
 
+## Enforcement — the greps and review, not an automatic agent
+
+The `axial: true` marker makes this ADR discoverable, but the dev-core reviewer
+it feeds (`R-axial-adr-review`) is gated on a **structural** path match:
+`AXIAL_RE = /^(infrastructure|adapters|domains|stages)\//`. This repo has none
+of those directories — its planes are `plugins/`, `functions/`, `site/`,
+`scripts/` — so that agent stays `no-path-hit` regardless of this file. Do not
+expect it to catch drift here.
+
+What enforces the decision: the five greps above (cheap enough for a reviewer or
+a future CI step), and the review reflex of asking where a new concern lands
+before a `cmd_*` grows its own copy.
+
 ## Expected debt
 
 Accepted, and it does bite:
