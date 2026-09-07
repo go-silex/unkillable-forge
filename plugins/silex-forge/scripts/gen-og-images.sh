@@ -12,6 +12,8 @@
 #
 # Regeneration is keyed on sha256(canonical source HTML) + sha256(og.jpg),
 # recorded together in og.src (unless --force). See is_stale.
+# A hub-side og.keep pins a slug's published card: never re-rendered, even
+# under --force. See the pin block in the main loop.
 # Best-effort: missing python3/og_render.py → exit 0 + warn (publish continues).
 # A failed render never fails the batch. Token absence is not a startup abort:
 # digest/staleness still run; render fails per slug.
@@ -49,8 +51,14 @@ warn() { forge_warn "$@"; }
 usage() {
   cat <<EOF
 Usage: gen-og-images.sh [--slug SLUG] [--force] [--quality N] [--dry-run]
+  --force    re-render even when og.src matches (og.keep still wins)
   --quality  JPEG quality 1..100 (default 80)
   --dry-run  compute staleness and print counts; do not render
+
+Pin a card: touch \$hub/<artifacts>/<slug>/og.keep — that slug is never
+re-rendered. For artifacts the inline payload cannot reproduce (a third-party
+embed needing a real origin, a fetch() path built at runtime). Delete the file
+to un-pin.
 EOF
 }
 
@@ -181,6 +189,7 @@ rendered=0
 failed=0
 up_to_date=0
 would_render=0
+pinned=0
 total_kb=0
 
 shopt -s nullglob
@@ -215,6 +224,27 @@ for reg in "$REG"/*.json; do
   if [ "$DRY_RUN" -eq 0 ]; then
     rm -f "$src_proof"
   fi
+
+  # og.keep in the HUB artifact directory pins the published card: this slug is
+  # never re-rendered, and --force does not override it. Removing the file is
+  # the only way to un-pin, which is what makes the pin trustworthy.
+  #
+  # It exists because the payload form cannot reproduce every artifact. The
+  # page is rendered from an inline HTML string, so it has an opaque origin and
+  # no base URL: a third-party embed needing a real origin degrades, and a path
+  # built at runtime (a fetch() argument) cannot be rewritten. For those, a
+  # capture taken while the pipeline still could is better than a fresh one.
+  #
+  # The marker lives in the hub so the decision travels to every publisher, and
+  # no proof is written while pinned: og.src keeps describing the generation
+  # that produced the kept image, so un-pinning reads as stale and re-renders.
+  if [ -n "${ARTIFACTS:-}" ] && [ -f "${ARTIFACTS}/${slug}/og.keep" ]; then
+    if [ -f "$jpg" ]; then
+      pinned=$((pinned + 1))
+      continue
+    fi
+    warn "$slug: og.keep is set but there is no thumbnail to keep — rendering"
+  fi
   if [ "$FORCE" -eq 0 ] \
       && ! is_stale "$html" "$jpg" "$slug" "$source_digest" "$image_digest"; then
     [ "$DRY_RUN" -eq 1 ] || record_source_proof "$src_proof" "$source_digest" "$image_digest"
@@ -239,9 +269,13 @@ done
 
 avg=0
 [ "$rendered" -gt 0 ] && avg=$((total_kb / rendered))
+# Only mentioned when it happened: a permanent ", 0 pinned" would be noise on
+# every line, and the counts above are what the operator scans for.
+pinned_note=""
+[ "$pinned" -eq 0 ] || pinned_note=", ${pinned} pinned"
 if [ "$DRY_RUN" -eq 1 ]; then
-  echo "og-images — dry run: ${would_render} would render, ${up_to_date} up-to-date (nothing posted)"
+  echo "og-images — dry run: ${would_render} would render, ${up_to_date} up-to-date${pinned_note} (nothing posted)"
 else
-  echo "og-images — ${rendered} rendered (~${avg} kb avg), ${up_to_date} up-to-date, ${failed} failed (browser-run pipeline)"
+  echo "og-images — ${rendered} rendered (~${avg} kb avg), ${up_to_date} up-to-date${pinned_note}, ${failed} failed (browser-run pipeline)"
 fi
 exit 0

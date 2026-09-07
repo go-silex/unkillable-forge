@@ -257,4 +257,47 @@ esac
 [ ! -f "$SRC" ] || fail "dry-run created og.src"
 pass "--dry-run reports would-render and writes nothing"
 
+# --- 9. og.keep pins the published card, even against --force ---------------
+# The inline payload cannot reproduce every artifact: a third-party embed
+# needing a real origin degrades, and a fetch() path built at runtime cannot be
+# rewritten. og.keep is the escape hatch, so it has to beat the strongest
+# re-render signal there is, or it is not a pin at all.
+KEEP="$TD/hub/artifacts/$SLUG/og.keep"
+sync_deploy
+printf 'PINNED_CARD' > "$JPG"
+: > "$KEEP"
+
+# A craft change plus --force: the render that would normally happen must not.
+printf '%s\n' '<html><head><title>One</title></head><body>craft v9</body></html>' > "$HUB_HTML"
+sync_deploy
+printf 'PINNED_CARD' > "$JPG"
+out=$(cd "$TD/repo" && bash "$GEN" --force 2>&1)
+case "$out" in
+  *"1 pinned"*) ;;
+  *) note "$out"; fail "og.keep: summary must report the pinned slug" ;;
+esac
+[ "$(cat "$JPG")" = "PINNED_CARD" ] \
+  || fail "og.keep: --force re-rendered a pinned card"
+[ ! -f "$SRC" ] \
+  || fail "og.keep: a pinned slug must not write a freshness proof"
+pass "og.keep pins the card and --force does not override it"
+
+# Un-pinning must make the changed craft stale again — otherwise the pin would
+# be a one-way door.
+rm -f "$KEEP"
+out=$(cd "$TD/repo" && bash "$GEN" 2>&1)
+assert_counts "$out" 1 0 "after un-pinning"
+[ "$(cat "$JPG")" != "PINNED_CARD" ] || fail "og.keep: removal did not re-render"
+pass "removing og.keep re-renders the changed craft"
+
+# A pin with nothing to keep must still render: preserving a card that does not
+# exist would ship no card at all.
+rm -f "$JPG" "$SRC"
+: > "$KEEP"
+out=$(cd "$TD/repo" && bash "$GEN" 2>&1)
+assert_counts "$out" 1 0 "pin without a thumbnail"
+[ -f "$JPG" ] || fail "og.keep with no thumbnail must not block the render"
+rm -f "$KEEP"
+pass "og.keep with no thumbnail to keep still renders"
+
 echo "all og staleness checks passed"
