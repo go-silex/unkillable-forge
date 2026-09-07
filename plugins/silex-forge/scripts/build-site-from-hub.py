@@ -27,32 +27,8 @@ if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 from load_config import artifacts_root, load_config  # noqa: E402
-from og_render import OgRenderError, canonical_digest  # noqa: E402
 
 SKIP_NAMES = {".DS_Store", "Thumbs.db", "__pycache__"}
-
-
-def _og_jpg_matches_source(slug_dir: Path) -> bool:
-    """True when hub og.src source-digest matches canonical_digest(index.html).
-
-    persist_og_to_hub writes `source_digest image_digest`. Missing, malformed,
-    or a source-half mismatch means the JPEG is not proven against this HTML.
-    """
-    proof = slug_dir / "og.src"
-    html = slug_dir / "index.html"
-    if not proof.is_file() or not html.is_file():
-        return False
-    try:
-        parts = proof.read_text(encoding="utf-8").split()
-    except (OSError, UnicodeError):
-        return False
-    if len(parts) < 2:
-        return False
-    try:
-        digest = canonical_digest(html)
-    except OgRenderError:
-        return False
-    return parts[0] == digest
 
 
 def _inject_share_bar(html_path: Path, slug: str) -> None:
@@ -173,15 +149,11 @@ def build(
             # shipping it would add a file per slug and expose nothing useful.
             if item.name == "og.src":
                 continue
-            # Copy og.jpg only when og.src's source half matches the kernel
-            # digest of this slug's index.html. A failed render used to leave
-            # the previous JPEG in the hub; copying it unconditionally then
-            # shipped a stale card forever (gen-og-images.sh is_stale saw a
-            # present jpg). Missing, malformed, or mismatched og.src → skip
-            # the jpg so the deploy tree has no card and the next render sees
-            # it as stale. The hub copy is left untouched.
-            if item.name == "og.jpg" and not _og_jpg_matches_source(src):
-                continue
+            # Always copy hub og.jpg. A full-snapshot deploy plus a single-slug
+            # re-render means skipping a hub og.jpg deletes the live thumbnails
+            # of every other artifact. A stale card is recoverable; a deleted
+            # one is not. is_stale in gen-og-images.sh re-renders a changed
+            # artifact.
             target = dest / item.name
             if item.is_dir():
                 if target.exists():
@@ -194,11 +166,15 @@ def build(
             # Overlay on the deploy tree only — hub remains craft SSOT.
             #
             # Restore the hub mtime afterwards. copy2 carried it over, then the
-            # injection rewrote the file and stamped it with "now". That mtime
-            # relationship is still the fallback when gen-og-images.sh has no
-            # hub (is_stale degrades to html -nt jpg). It is not how we decide
-            # whether to copy the jpg: a mismatched proof is the silent
-            # stale-card bug, and skipping the jpg is what fixes it.
+            # injection rewrote the file and stamped it with "now", which made
+            # index.html newer than the og.jpg copied beside it — so
+            # gen-og-images.sh considered EVERY thumbnail stale and re-rendered
+            # all of them through headless Chrome on every publish (~55 s), even
+            # though no craft content had changed. Some decks animate, so their
+            # capture is not byte-reproducible: those re-renders then uploaded
+            # thumbnails that were only different, never newer. Keeping the hub's
+            # mtime relationship makes staleness mean what it says — the craft
+            # HTML actually changed.
             src_html = src / "index.html"
             st = src_html.stat() if src_html.is_file() else None
             _inject_share_bar(html_dest, slug)
