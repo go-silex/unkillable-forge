@@ -48,8 +48,9 @@ jobs:
       - name: Shell syntax (test_release_plugin.sh)
         run: bash -n tests/shell/test_release_plugin.sh
 
-      - name: ShellCheck (test_release_plugin.sh)
-        run: shellcheck tests/shell/test_release_plugin.sh
+      # ShellCheck for this file now runs inside scripts/lint-shell.sh, with
+      # `-x` so the sourced tests/shell/lib/git-env-guard.sh is followed instead
+      # of reported as SC1091. A second bare invocation here would contradict it.
 
       - name: Plugin versions consistent (Claude/Grok/OMP/Codex + CHANGELOG)
         run: python3 scripts/check_plugin_versions.py
@@ -153,6 +154,10 @@ jobs:
       # .dev/stack.yml commands.test call. Do not inline the suites here.
       - name: Test suites (vitest + python/shell + release plugin)
         run: bash scripts/test-all.sh
+
+      # The GIT_DIR-immunity regression lives in the suite itself
+      # (tests/shell/test_git_env_isolation.sh), so it also runs in test-os and
+      # test-bash32 and on a contributor's machine — no CI-only variant here.
 
   # macOS stock bash is /bin/bash 3.2. GHA PATH often has brew bash 5 first —
   # env bash would false-green. Windows native is not supported (python3);

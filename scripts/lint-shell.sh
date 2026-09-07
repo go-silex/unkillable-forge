@@ -24,6 +24,13 @@ for f in plugins/silex-forge/scripts/*.sh; do
   esac
 done
 
-shellcheck scripts/*.sh tests/shell/test_release_plugin.sh
+# `-x` follows the sourced tests/shell/lib/git-env-guard.sh instead of reporting
+# SC1091 on it — and lints the guard itself.
+# ci.yml's scope plus scripts/ and the two test files this change owns end to
+# end. NOT tests/shell/*.sh: the older suites carry pre-existing SC2317/SC2034
+# findings, and clearing those is its own change, not a mechanical move.
+shellcheck -x scripts/*.sh \
+  tests/shell/test_release_plugin.sh \
+  tests/shell/test_git_env_isolation.sh
 
 echo "lint-shell: clean"
