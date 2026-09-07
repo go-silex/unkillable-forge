@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import stat
 import sys
 import urllib.error
@@ -763,74 +762,13 @@ def doctor_online(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
-# OG thumbnail toolchain — resolved exactly like the deps block of
-# gen-og-images.sh (same command names in the same order, same macOS app path,
-# same Playwright cache globs). A doctor that resolved chrome its own way would
-# either promise a renderer that then warns and skips, or hide one that works.
-OG_CHROME_COMMANDS = (
-    "google-chrome",
-    "google-chrome-stable",
-    "chromium",
-    "chromium-browser",
-)
-OG_CHROME_MACOS_APP = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-OG_CHROME_PLAYWRIGHT_GLOBS = (
-    ".cache/ms-playwright/chromium-*/chrome-linux*/chrome",
-    ".cache/ms-playwright/chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium",
-)
-OG_TOOLCHAIN_COMMANDS = ("ffmpeg", "jq")
-
-
-def _is_executable_file(path: Path) -> bool:
-    try:
-        return path.is_file() and os.access(str(path), os.X_OK)
-    except OSError:
-        return False
-
-
-def resolve_og_chrome() -> str:
-    """Chrome/Chromium path gen-og-images.sh would pick, or "" when it finds none."""
-    for name in OG_CHROME_COMMANDS:
-        found = shutil.which(name)
-        if found:
-            return found
-    if _is_executable_file(Path(OG_CHROME_MACOS_APP)):
-        return OG_CHROME_MACOS_APP
-    home = _safe_home()
-    if home is not None:
-        for pattern in OG_CHROME_PLAYWRIGHT_GLOBS:
-            try:
-                cands = sorted(home.glob(pattern))
-            except OSError:
-                cands = []
-            for cand in cands:
-                if _is_executable_file(cand):
-                    return str(cand)
-    return ""
-
-
 def og_toolchain() -> dict[str, Any]:
-    """Advisory probe of the OG thumbnail stack: {ok, missing, chrome}.
+    """Stable doctor key: {ok: True, missing: []}.
 
-    Thumbnails are not required to deploy — gen-og-images.sh warns and exits 0
-    without them — so this probe never gates anything: it is reported, never
-    turned into an issue or a deploy blocker.
+    The OG renderer is Cloudflare Browser Run via the publish token, so
+    there is nothing extra to probe. Never networks.
     """
-    chrome = resolve_og_chrome()
-    missing = [] if chrome else ["chrome"]
-    missing.extend(name for name in OG_TOOLCHAIN_COMMANDS if not shutil.which(name))
-    return {"ok": not missing, "missing": missing, "chrome": chrome}
-
-
-def og_toolchain_warning(probe: dict[str, Any]) -> str:
-    """One warning line for an incomplete toolchain (names the real cost)."""
-    return (
-        "OG thumbnail toolchain incomplete (missing: %s) — artifacts published "
-        "from this machine get no thumbnail, and because every deploy is a full "
-        "snapshot rebuilt from the local hub, publishing from here also drops "
-        "thumbnails other machines generated (advisory: publish still works)"
-        % ", ".join(probe.get("missing") or [])
-    )
+    return {"ok": True, "missing": []}
 
 
 def doctor(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -910,12 +848,10 @@ def doctor(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     if not perm["ok"] and perm.get("issue"):
         warnings.append(perm["issue"])
 
-    # Advisory: thumbnails are cosmetic for the deploy, so an incomplete
-    # toolchain is a warning and a payload key — never an issue, never a
-    # deploy blocker. Neither ok nor deploy_ready may move because of it.
+    # Stable payload key. The OG renderer is Browser Run via the publish
+    # token, so there is nothing extra to probe. Never networks. Neither
+    # ok nor deploy_ready may move because of it.
     og = og_toolchain()
-    if not og["ok"]:
-        warnings.append(og_toolchain_warning(og))
 
     deploy_blockers: list[str] = []
     if not has_token:

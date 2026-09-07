@@ -125,9 +125,10 @@ PY
   exit $?
 fi
 
-# Human report. Python emits three machine lines first (status + blockers + the
-# advisory OG toolchain), then the report; the shell owns the blocker → command
-# map and the per-OS install hint below.
+# Human report. Python emits three machine lines first (status + blockers +
+# the OG toolchain line), then the report; the shell owns the blocker →
+# command map. The og: line stays so the STATUS/BLOCKER/OG header parse
+# does not shift.
 DOCTOR_OUT=$(python3 - <<PY
 import sys
 from load_config import doctor, doctor_online
@@ -141,9 +142,9 @@ blockers = d.get("deploy_blockers") or []
 
 print("%d %d %d %s" % (ok, deploy, online_ok, d.get("forge_env") or ""))
 print("blockers:" + "".join(" " + b for b in blockers))
-# Advisory only: an incomplete OG toolchain never moves ok/deploy_ready, so it
-# travels on its own line instead of through blockers. Missing key (a truncated
-# payload) reads as nothing to report.
+# The og: line stays for header-parse stability. The OG renderer is Browser
+# Run via the publish token, so missing is always empty; a truncated payload
+# still reads as nothing to report.
 og = d.get("og_toolchain") or {}
 og_missing = [] if og.get("ok", True) else (og.get("missing") or [])
 print("og:" + "".join(" " + m for m in og_missing))
@@ -208,7 +209,6 @@ ENV_PATH=""
 read -r D_OK D_DEPLOY D_ONLINE ENV_PATH <<<"$STATUS_LINE"
 [ -n "$ENV_PATH" ] || ENV_PATH="$HOME/.config/silex/forge.env"
 BLOCKERS=${BLOCKER_LINE#blockers:}
-OG_MISSING=${OG_LINE#og:}
 
 # deploy_blockers code → the command that fixes it (load_config.doctor codes).
 # No public_host case on purpose: an empty public_host is also a config issue,
@@ -233,59 +233,7 @@ blocker_hint() {
   esac
 }
 
-# Advisory OG toolchain → the install command for this host. The ⚠ line in the
-# report already named the missing binaries and what they cost (no thumbnail
-# from this machine, and a full-snapshot deploy from here also drops the
-# thumbnails other machines rendered), so this only adds the command. It never
-# touches the exit code: gen-og-images.sh warns and exits 0 without the stack,
-# so a publish from here succeeds — silently thumbnail-less.
-og_install_hint() {
-  # $1 = space-separated missing codes ("chrome ffmpeg jq"). "chrome" means no
-  # google-chrome/chromium on PATH, no macOS Chrome.app, no Playwright cache.
-  local names="" pkgs="" install="" chrome_pkg=""
-  case " $1 " in *" chrome "*) names="chrome (or chromium)" ;; esac
-  case " $1 " in *" ffmpeg "*) names="${names:+$names, }ffmpeg" ;; esac
-  case " $1 " in *" jq "*) names="${names:+$names, }jq" ;; esac
-  [ -n "$names" ] || return 0
-
-  case "$(uname -s 2>/dev/null || echo unknown)" in
-    Darwin)
-      # Chrome is a cask, ffmpeg/jq are formulae: two invocations, not one.
-      case " $1 " in
-        *" chrome "*) echo "→ og images: brew install --cask google-chrome" ;;
-      esac
-      case " $1 " in *" ffmpeg "*) pkgs="ffmpeg" ;; esac
-      case " $1 " in *" jq "*) pkgs="${pkgs:+$pkgs }jq" ;; esac
-      [ -z "$pkgs" ] || echo "→ og images: brew install ${pkgs}"
-      ;;
-    Linux)
-      if command -v apt-get >/dev/null 2>&1; then
-        install="sudo apt-get install -y"
-        chrome_pkg="chromium-browser"
-      elif command -v dnf >/dev/null 2>&1; then
-        install="sudo dnf install -y"
-        chrome_pkg="chromium"
-      fi
-      if [ -n "$install" ]; then
-        case " $1 " in *" chrome "*) pkgs="$chrome_pkg" ;; esac
-        case " $1 " in *" ffmpeg "*) pkgs="${pkgs:+$pkgs }ffmpeg" ;; esac
-        case " $1 " in *" jq "*) pkgs="${pkgs:+$pkgs }jq" ;; esac
-        echo "→ og images: ${install} ${pkgs}"
-      else
-        echo "→ og images: no apt-get/dnf here — install ${names} with this distribution's package manager"
-      fi
-      ;;
-    *)
-      echo "→ og images: unknown package manager on $(uname -s 2>/dev/null || echo this host) — install ${names} by hand"
-      ;;
-  esac
-}
-
 echo "$REPORT"
-
-if [ -n "$OG_MISSING" ]; then
-  og_install_hint "$OG_MISSING"
-fi
 
 if [ "$D_OK" -eq 1 ] && [ "$D_DEPLOY" -eq 1 ] && [ "$D_ONLINE" -eq 1 ] && [ "$ONLINE" -eq 0 ]; then
   # Offline checks only prove the values are filled in: a revoked token or a
