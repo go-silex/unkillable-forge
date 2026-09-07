@@ -67,14 +67,14 @@ deploy:
 # (Convention A, silex-forge/vX.Y.Z), with versions stamped across 9 manifests +
 # CHANGELOG by scripts/check_plugin_versions.py ⇒ version_files stays empty.
 #
-# KNOWN CONSEQUENCE: `model: trunk` makes /R-dev-checkup emit a hard fail
-# (`release-model:auto-release`) because .github/workflows/auto-release.yml is
-# absent. Do NOT satisfy it with /R-ci-setup — that installs a second tagger
-# racing release-plugin.sh. `trunk` is kept because it is the truth (release at
-# merge to main); the alternative value, staging-train, would describe a
-# promotion flow and a staging branch this repo does not have.
+# `model` is omitted on purpose. `trunk` would make /R-dev-checkup emit a
+# permanent hard fail (`release-model:auto-release`) because
+# auto-release.yml is absent, and satisfying that fail with /R-ci-setup
+# would install a second tagger racing release-plugin.sh. `staging-train`
+# would describe a promotion flow and a staging branch this repo does not
+# have. Absent, the N11 gate stays inert (`stack.release?.model === 'trunk'`
+# only). The truth lives in this comment, in `component`, and in ci.yml.
 release:
-  model: trunk
   class: NONE
   component: silex-forge
   version_files: []
