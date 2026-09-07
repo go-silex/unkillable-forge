@@ -6,6 +6,11 @@
 # which is why there is no separate Python invocation here.
 set -euo pipefail
 
+# One definition, sourced by every consumer — see the file's header for the
+# incident it prevents.
+# shellcheck source=tests/shell/lib/git-env-guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../tests/shell/lib/git-env-guard.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 

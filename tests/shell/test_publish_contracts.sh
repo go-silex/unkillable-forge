@@ -3,6 +3,9 @@
 # isolated fixtures (does not mutate publish.sh).
 set -euo pipefail
 
+# shellcheck source=tests/shell/lib/git-env-guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/git-env-guard.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PUBLISH="$ROOT/plugins/silex-forge/scripts/publish.sh"
 LIB="$ROOT/plugins/silex-forge/scripts/lib"
