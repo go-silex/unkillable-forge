@@ -90,7 +90,9 @@ When changing behavior, update **skills** if user-facing workflows change.
 
 ## Making changes
 
-1. **Fork** and create a branch: `feat/…`, `fix/…`, or `docs/…`
+1. **Fork** and create a branch: `feat/…`, `fix/…`, or `docs/…`. If you work with the
+   dev-core plugin loaded, do this in a worktree (`git worktree add ../silex-forge-… -b feat/… main`),
+   not with `git checkout -b` on the principal clone — the plugin blocks switching the principal off `main`.
 2. **Edit** engine code or docs (English for user-facing text)
 3. **Run checks** locally — one entrypoint per gate, the same files CI runs:
 
@@ -147,12 +149,14 @@ PR titles and commits follow [Conventional Commits](https://www.conventionalcomm
 `feat` `fix` `docs` `style` `refactor` `perf` `test` `build` `ci` `chore` `revert`,
 and no trailing period. `!` marks a breaking change (`feat(share)!: …`).
 
-Checked by `.github/workflows/pr-title.yml`. The reason is a readable history,
-not wiring: every commit in this repo already follows the convention, and the PR
-title is what a reviewer reads in `gh pr list` and what you carry into the
-CHANGELOG section by hand. No tool parses it — `--print-notes` reads
-`CHANGELOG.md`, and the Release title comes from the tag
-(`silex-forge X.Y.Z`).
+Checked by `.github/workflows/pr-title.yml` (advisory — not a required status
+check; ruleset `PR_Main` requires `check` and `test` only). The reason is a
+readable history, not wiring: authored commits already follow the convention
+(GitHub merge commits `Merge pull request #N` do not, and the workflow never
+sees them). The PR title is what a reviewer reads in `gh pr list` and what you
+carry into the CHANGELOG section by hand. No tool parses it — `--print-notes`
+reads `CHANGELOG.md`, and the Release title comes from the tag
+(`silex-forge vX.Y.Z`). GitHub's Revert button (`Revert "…"`) is accepted.
 
 Reviewers may ask you to update skills, docs, or CHANGELOG.
 

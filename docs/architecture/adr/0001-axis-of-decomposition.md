@@ -46,41 +46,16 @@ Consequences, already load-bearing in the code:
   sentinels (`SNAPSHOT_GUARD_PASSED`, `SNAPSHOT_GUARD_LIVE_ID`,
   `SNAPSHOT_GUARD_LIVE_UNKNOWN`) are re-asserted there, so no command can reach
   the upload unguarded.
-- On the edge plane, an ACL decision belongs to `functions/_lib/access.ts`;
-  routes (`_middleware.ts`, `api/*`, `s/[[path]].ts`) consume it.
+- Authorization (can this request *see* this slug?) belongs to
+  `functions/_lib/access.ts`. Mutation of visibility state
+  (`POST /api/visibility`) is a command, not an ACL decision — it lives in
+  the route on purpose.
 
 This is not a preference: the 2026-09-06 artifact loss was a path that reached a
 full-snapshot deploy without the guard. Duplication along axis A is how that
 happens.
 
-## Anti-pattern signals (grep-able)
-
-Run from the repo root; each expectation holds at the time of writing.
-
-```bash
-S=plugins/silex-forge/scripts/publish.sh
-
-# 1. exactly ONE real deploy invocation (other hits are comments / info strings)
-grep -n 'pages deploy' "$S"                     # code hit: `$wr_cmd pages deploy site`, once
-
-# 2. no cmd_* may mutate KV directly — only the kv_* helpers may
-grep -nE 'kv_curl|curl .*storage/kv' "$S"       # expected: inside kv_* helpers only
-
-# 3. the guard sentinels must be re-asserted at the upload
-grep -c 'SNAPSHOT_GUARD_PASSED' "$S"            # expected: >= 4, incl. deploy_pages
-
-# 4. one resolution point for the inlined share bar
-grep -rn 'share-bar\.js' plugins/silex-forge/scripts/*.sh   # expected: comments only
-
-# 5. no ACL decision outside functions/_lib/
-grep -rn 'vis:' functions/ | grep -v '_lib/'    # expected: doc comments only
-```
-
-Drift class: `target-axis-trap` (a concern re-implemented per sibling command).
-Three-strikes rule: a concern appearing in 3+ `cmd_*` bodies is promoted to a
-stage.
-
-## Enforcement — the greps and review, not an automatic agent
+## Enforcement — the tests, not the greps, not an automatic agent
 
 The `axial: true` marker makes this ADR discoverable, but the dev-core reviewer
 it feeds (`R-axial-adr-review`) is gated on a **structural** path match:
@@ -89,9 +64,40 @@ of those directories — its planes are `plugins/`, `functions/`, `site/`,
 `scripts/` — so that agent stays `no-path-hit` regardless of this file. Do not
 expect it to catch drift here.
 
-What enforces the decision: the five greps above (cheap enough for a reviewer or
-a future CI step), and the review reflex of asking where a new concern lands
-before a `cmd_*` grows its own copy.
+What actually enforces the decision is the existing contract suite:
+
+| Invariant | Test |
+|---|---|
+| Guard re-asserted at the upload; unset sentinel is an internal error | `tests/shell/` deploy_pages cases in `run-os-script-tests.sh` |
+| Unexpected hub removal refuses (the 2026-09-06 shape) | `tests/python/test_snapshot.py` |
+| Share-bar inject is idempotent; strip is the exact inverse | `tests/python/test_inject_share_bar.py` |
+| Authorization lives in `_lib/access.ts` | `tests/access.test.ts` |
+
+Grep smells, useful in review, **not** CI-grade. Each one has a hole:
+
+```bash
+S=plugins/silex-forge/scripts/publish.sh
+
+# 1. one real deploy invocation — also matches comments / info strings
+grep -n 'pages deploy' "$S"
+
+# 2. REST KV writes stay in kv_* helpers — misses the wrangler fallback
+#    (kv_wrangler), which AGENTS.md itself documents as the second path
+grep -nE 'kv_curl|curl .*storage/kv' "$S"
+
+# 3. sentinel mentioned — a count, not a location. Deleting the re-assert
+#    in deploy_pages and adding a mention elsewhere still greps green.
+#    The tests above are what actually pin the re-assert.
+grep -n 'SNAPSHOT_GUARD_PASSED' "$S"
+
+# 4. share-bar.js in shell — the injectors are Python
+#    (inject-share-bar.py). Grep *.sh never sees them.
+grep -rn 'share-bar\.js' plugins/silex-forge/scripts/
+```
+
+Drift class: `target-axis-trap` (a concern re-implemented per sibling command).
+Three-strikes rule: a concern appearing in 3+ `cmd_*` bodies is promoted to a
+stage.
 
 ## Expected debt
 
