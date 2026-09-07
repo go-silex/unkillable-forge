@@ -11,7 +11,16 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ### Changed
 
-- Dropped chrome, ffmpeg, and jq from the publisher machine for OG thumbnails. Render now happens before `wrangler pages deploy` via Cloudflare Browser Run (`gen-og-images.sh` → `lib/og_render.py`). `publish.sh` gained `--force-og`; `--quality` is JPEG 1–100, default 80.
+- OG thumbnails now render on Cloudflare Browser Run before `wrangler pages deploy` (`gen-og-images.sh` → `lib/og_render.py`). Publisher machines no longer need chrome, ffmpeg, or jq. `--quality` is JPEG 1–100 (default 80), not ffmpeg `-q:v`. `--force` remains a `gen-og-images.sh` flag, now reachable through `publish.sh --force-og`. A dry run does not POST.
+- `CLOUDFLARE_API_TOKEN` now needs Browser Run Write beside Pages Edit, Workers KV Edit, and Account Settings Read. A token missing it makes every render fail per slug; the publish still succeeds.
+- The v2 digest prefix cannot collide with a v1 proof, so after upgrading every artifact reads as stale exactly once. Until a slug is re-rendered its previously published card keeps shipping. `publish.sh --rebuild-index` once after the upgrade is recommended (~33 renders, well inside the 10 browser-hours/month included on Workers Paid) — a recommendation, not a prerequisite; nothing breaks if skipped.
+- A publisher still on the previous engine computes a v1 digest and re-renders and re-persists a slug a v2 machine already proved, and vice versa. Bounded churn (extra renders, different JPEG bytes uploaded), never a deleted card. Everyone should pull.
+- The Browser Run `html` payload has an opaque origin, so a third-party embed that needs a real one degrades. Measured on `lgu-recap`, whose remote tella.tv player is replaced by its own client-side error box. Rendering that slug faithfully would need to navigate the real URL, which sits behind the visibility ACL.
+- A render that fails leaves the previous thumbnail in place. The per-slug warning now names the reason.
+
+### Removed
+
+- `forge-doctor.sh` no longer reports an OG toolchain. The `--json` payload has no OG key.
 
 ## [1.17.0] - 2026-09-06
 

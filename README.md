@@ -75,7 +75,7 @@ and CI runs the suite on `macos-latest` plus a `bash:3.2` container.
 | `bash` ≥ 3.2, `python3` ≥ 3.9 (stdlib only), `git`, `curl` | everything |
 | `wrangler` **or** `npx` | `wrangler pages deploy` |
 | `flock` | optional — a portable `mkdir` lock is used when absent, or when `flock` has no `-w` (BusyBox) |
-| `CLOUDFLARE_API_TOKEN` with **Browser Run Write** | OG thumbnails via Cloudflare Browser Run — no chrome/ffmpeg/jq. Missing token / render failure warns, publish continues |
+| `CLOUDFLARE_API_TOKEN` with **Browser Run Write** | OG thumbnails via Cloudflare Browser Run — no chrome/ffmpeg/jq. A token missing it makes every render fail per slug; the publish still succeeds |
 
 ### Install the plugin
 
@@ -162,7 +162,7 @@ Two different Cloudflare credentials — do not mint one from the other's list:
 | Credential | Used by | Needs |
 |---|---|---|
 | `wrangler login` **OAuth** | `forge-discover.sh`, `forge-provision.sh`, `--share` KV fallback | scopes `pages (write)`, `workers_kv (write)` |
-| `CLOUDFLARE_API_TOKEN` in `forge.env` | `publish.sh` — every deploy | permissions Account · Cloudflare Pages · **Edit** · Account · Workers KV Storage · **Edit** · Account · Account Settings · **Read** · Account · Browser Run · **Write** |
+| `CLOUDFLARE_API_TOKEN` in `forge.env` | `publish.sh` — every deploy | permissions Account · Cloudflare Pages · **Edit** · Account · Workers KV Storage · **Edit** · Account · Account Settings · **Read** · Account · Browser Run · **Write**. A token missing Browser Run Write makes every render fail per slug; the publish still succeeds |
 
 Discovery is OAuth-only and never sees a token; deploy is token-only and
 `publish.sh` dies without one.
@@ -283,9 +283,21 @@ Pages snapshot, a copy in the hub SSOT, `og.src` hub-only proof (v2 digest =
 canonical HTML + subresources). `--force` remains a `gen-og-images.sh` flag;
 `publish.sh --force-og` passes it through. `--rebuild-index` without
 `--force-og` still only re-renders `is_stale` slugs. `--quality` is JPEG 1–100,
-default 80. Best-effort: missing token / Browser Run failure warns and publish
-continues. A modified artifact no longer keeps a previous thumbnail when
-render is skipped.
+default 80 — not ffmpeg `-q:v`. A dry run does not POST. Best-effort: missing
+token / Browser Run failure warns and publish continues. A render that fails
+leaves the previous thumbnail in place, and the per-slug warning now names
+the reason.
+
+The v2 digest prefix cannot collide with a v1 proof, so after upgrading every
+artifact reads as stale exactly once. Until a slug is re-rendered its previously
+published card keeps shipping. Recommend `publish.sh --rebuild-index` once
+after the upgrade (~33 renders, well inside the 10 browser-hours/month included
+on Workers Paid). That is a recommendation, not a prerequisite — nothing
+breaks if skipped. A publisher still on the previous engine computes a v1
+digest and will re-render and re-persist a slug a v2 machine already proved,
+and vice versa: bounded churn (extra renders, different JPEG bytes uploaded),
+never a deleted card. Everyone should pull.
+
 
 ### `--dry-run`
 

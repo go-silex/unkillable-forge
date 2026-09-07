@@ -562,7 +562,7 @@ Order:
 2. Password manager available → fill from your ops vault (do **not** echo the token in chat)
 3. Otherwise **ask for the token** (one question) and write the same way
 
-Scopes: Pages Write + Read, Account Settings Read, Workers KV Storage Write (CLI `--share` via REST), Browser Run Write (OG thumbnails).
+Permissions: Pages Edit · Workers KV Storage Edit · Account Settings Read · **Browser Run Write**. A token missing Browser Run Write makes every render fail per slug; the publish still succeeds. Workers KV Storage Write still covers CLI `--share` via REST.
 
 **KV fallback:** if the token lacks KV scope (or REST is rejected), `publish.sh`
 retries with `wrangler login` OAuth (`wrangler kv … --remote`,
@@ -685,18 +685,36 @@ Browser Run REST (`html` payload, JPEG out), invoked from `gen-og-images.sh`
 via `lib/og_render.py`.
 
 No chrome/chromium/ffmpeg/jq on the publisher machine. `python3` plus the
-existing `CLOUDFLARE_API_TOKEN` with **Browser Run Write** is enough.
+existing `CLOUDFLARE_API_TOKEN` with **Browser Run Write** is enough. A token
+missing that permission makes every render fail per slug; the publish still
+succeeds.
 
 Storage is unchanged: JPEG in the Pages snapshot, copy in the hub SSOT,
 `og.src` hub-only proof (v2 digest = canonical HTML + subresources).
 
 `--force` remains a `gen-og-images.sh` flag. `publish.sh --force-og` passes
 it through. `--rebuild-index` without `--force-og` still only re-renders
-`is_stale` slugs. `--quality` is JPEG 1–100, default 80.
+`is_stale` slugs. `--quality` is JPEG 1–100, default 80 — not ffmpeg `-q:v`.
+A dry run does not POST.
 
 Best-effort: a missing token or Browser Run failure warns and publish
-continues. A modified artifact no longer keeps a previous thumbnail when
-render is skipped. Doctor no longer probes chrome/ffmpeg/jq for OG.
+continues. A render that fails leaves the previous thumbnail in place, and
+the per-slug warning now names the reason.
+
+The v2 digest prefix cannot collide with a v1 proof, so after upgrading every
+artifact reads as stale exactly once. Until a slug is re-rendered its
+previously published card keeps shipping. Recommend `publish.sh --rebuild-index`
+once after the upgrade (~33 renders, well inside the 10 browser-hours/month
+included on Workers Paid). That is a recommendation, not a prerequisite —
+nothing breaks if skipped.
+
+A publisher still on the previous engine computes a v1 digest and will
+re-render and re-persist a slug a v2 machine already proved, and vice versa.
+Bounded churn (extra renders, different JPEG bytes uploaded), never a deleted
+card. Everyone should pull.
+
+Doctor no longer reports an OG toolchain at all.
+
 
 ## Step 8 — Final doctor (`--online`) and report
 

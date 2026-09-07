@@ -351,7 +351,9 @@ A forge on someone else's Cloudflare account: `forge-provision.sh` + `"vault_mar
 Rendered **before** `wrangler pages deploy` by Cloudflare Browser Run REST
 (`html` payload, JPEG out), invoked from `gen-og-images.sh` via `lib/og_render.py`.
 Publisher machines need `python3` and the existing `CLOUDFLARE_API_TOKEN` with
-**Browser Run Write** — not chrome/chromium/ffmpeg/jq.
+**Browser Run Write** beside Pages Edit / Workers KV Edit / Account Settings
+Read — not chrome/chromium/ffmpeg/jq. A token missing Browser Run Write makes
+every render fail per slug; the publish still succeeds.
 
 Storage is unchanged: `site/a/<slug>/og.jpg` in the Pages snapshot, a copy in
 the hub SSOT, `og.src` hub-only proof (v2 digest = canonical HTML + subresources).
@@ -363,11 +365,32 @@ plugins/silex-forge/scripts/gen-og-images.sh --slug my-slug --force --quality 80
 
 `--force` is a `gen-og-images.sh` flag. `publish.sh --force-og` passes it
 through. `--rebuild-index` without `--force-og` still only re-renders `is_stale`
-slugs. `--quality` is JPEG 1–100, default 80.
+slugs. `--quality` is JPEG 1–100, default 80 — not ffmpeg `-q:v`. A dry run
+does not POST.
 
 Best-effort: missing token / Browser Run failure warns and publish continues.
-A modified artifact no longer keeps a previous thumbnail when render is skipped.
-Doctor no longer probes chrome/ffmpeg/jq for OG.
+A render that fails leaves the previous thumbnail in place, and the per-slug
+warning now names the reason.
+
+The page renders from an inline HTML string, so it has an opaque origin: a
+third-party embed that needs a real one degrades. Measured on `lgu-recap`,
+whose remote tella.tv player is replaced by its own client-side error box.
+Rendering that slug faithfully would need to navigate the real URL, which
+sits behind the visibility ACL.
+
+The v2 digest prefix cannot collide with a v1 proof, so after upgrading every
+artifact reads as stale exactly once. Until a slug is re-rendered its previously
+published card keeps shipping. Recommend `publish.sh --rebuild-index` once
+after the upgrade (~33 renders, well inside the 10 browser-hours/month included
+on Workers Paid). That is a recommendation, not a prerequisite — nothing
+breaks if skipped.
+
+A publisher still on the previous engine computes a v1 digest and will
+re-render and re-persist a slug a v2 machine already proved, and vice versa.
+Consequence is bounded churn (extra renders, different JPEG bytes uploaded),
+never a deleted card. Everyone should pull.
+
+Doctor no longer reports an OG toolchain at all.
 
 ## Agent rules
 
