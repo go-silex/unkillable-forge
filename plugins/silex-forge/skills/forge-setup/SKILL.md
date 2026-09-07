@@ -697,6 +697,12 @@ it through. `--rebuild-index` without `--force-og` still only re-renders
 `is_stale` slugs. `--quality` is JPEG 1–100, default 80 — not ffmpeg `-q:v`.
 A dry run does not POST.
 
+`touch $hub/<artifacts_dir>/<slug>/og.keep` pins that slug's published card
+in the hub: `gen-og-images.sh` never re-renders it (`--force` does not
+override). Delete the file to un-pin. The pin preserves an older capture;
+it does not fix the opaque-origin / runtime-path limits of the inline
+payload.
+
 Best-effort: a missing token or Browser Run failure warns and publish
 continues. A render that fails leaves the previous thumbnail in place, and
 the per-slug warning now names the reason.

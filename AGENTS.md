@@ -386,6 +386,22 @@ base URL. Two consequences, both measured:
 Rendering either faithfully would need to navigate the real URL, which sits
 behind the visibility ACL.
 
+Pin a slug whose card the inline payload cannot reproduce:
+
+```bash
+touch $hub/<artifacts_dir>/<slug>/og.keep
+```
+
+`gen-og-images.sh` never re-renders a pinned slug — `--force` does not
+override it. Delete the file to un-pin. No `og.src` is written while pinned,
+so un-pinning reads as stale and re-renders on the next run. A pin with no
+existing thumbnail still renders: preserving a card that does not exist
+would ship no card at all. The marker lives in the hub, so the decision
+travels to every publisher; `build-site-from-hub.py` never copies it into
+the deploy tree, like `og.src`. The run summary gains `, N pinned` only
+when N > 0. The pin preserves an older capture; it does not fix the
+rendering limits.
+
 The v2 digest prefix cannot collide with a v1 proof, so after upgrading every
 artifact reads as stale exactly once. Until a slug is re-rendered its previously
 published card keeps shipping. Recommend `publish.sh --rebuild-index` once

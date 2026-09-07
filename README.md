@@ -288,6 +288,12 @@ token / Browser Run failure warns and publish continues. A render that fails
 leaves the previous thumbnail in place, and the per-slug warning now names
 the reason.
 
+`touch $hub/<artifacts_dir>/<slug>/og.keep` pins that slug's published card
+in the hub: `gen-og-images.sh` never re-renders it (`--force` does not
+override). Delete the file to un-pin. It preserves an older capture for
+artifacts the inline payload cannot reproduce (opaque origin, a path built
+at runtime); it does not fix those limits.
+
 The v2 digest prefix cannot collide with a v1 proof, so after upgrading every
 artifact reads as stale exactly once. Until a slug is re-rendered its previously
 published card keeps shipping. Recommend `publish.sh --rebuild-index` once
