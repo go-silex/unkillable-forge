@@ -1,0 +1,48 @@
+name: PR title
+
+# The squash/merge subject becomes the release note material read by
+# scripts/check_plugin_versions.py --print-notes, so a non-conventional title
+# is a defect, not a style nit. Hand-rolled instead of a third-party action:
+# the check is 20 lines of grep and needs no pinned SHA to audit.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+jobs:
+  title:
+    runs-on: ubuntu-latest
+    steps:
+      # The title is untrusted input: it goes through the environment, never
+      # interpolated into the shell (`${{ }}` inside run: is a script
+      # injection).
+      - name: Conventional Commits subject
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -eu
+          types='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert'
+          printf 'title: %s\n' "$TITLE"
+
+          if ! printf '%s' "$TITLE" \
+            | grep -qE "^(${types})(\([a-z0-9._/-]+\))?!?: .+"; then
+            echo "::error::title must be '<type>(<scope>)?: <subject>' with type in ${types}"
+            exit 1
+          fi
+
+          case "$TITLE" in
+            *.) echo "::error::drop the trailing period"; exit 1 ;;
+          esac
+
+          # A subject that is only the scope ("fix(publish): publish") carries
+          # no information into the changelog.
+          subject=${TITLE#*: }
+          if [ "${#subject}" -lt 10 ]; then
+            echo "::error::subject too short (${#subject} chars) — describe the change"
+            exit 1
+          fi
+
+          echo "ok"
