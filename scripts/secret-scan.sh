@@ -9,14 +9,19 @@
 # with "Exec format error" — that is how this gate would fail open in practice).
 # Pin SSoT: config/trufflehog.version
 #
-# Two passes, deliberately asymmetric flags:
-#   1. CREDENTIAL — generic detectors, --only-verified, NO exclude list.
-#      Verification calls the provider, so a fake token in a fixture is not a
-#      finding and a live one is. Excluding tests/ here would be a blind spot.
-#   2. INFRA-ID   — scripts/trufflehog-detectors.yaml, NO --only-verified
-#      (its findings are unverifiable by construction), tests/ excluded.
+# Two passes, deliberately asymmetric:
+#   1. CREDENTIAL — generic detectors, --only-verified, COMMON exclude list
+#      (build output, deps, the pinned binary). tests/ stays IN scope:
+#      verification calls the provider, so a fixture is not a finding and a
+#      live token is — excluding tests/ would be a blind spot.
+#   2. INFRA-ID   — scripts/trufflehog-detectors.yaml, NO --only-verified (its
+#      findings are unverifiable by construction), common exclude + tests/.
 # Both pass --fail explicitly: without it the CLI exits 0 while reporting
 # findings, which is a green gate with detected secrets.
+#
+# `--history` adds a third pass over the git history (`trufflehog git`), used by
+# the scheduled workflow run. The two passes above scan the WORKING TREE only,
+# so a token committed and later removed is invisible to them.
 #
 # This does NOT replace the `Secret / infra ID scan` step in ci.yml: that one
 # greps the whole tree on every run, so an already-committed infra id keeps
@@ -30,11 +35,19 @@ PIN="${ROOT}/config/trufflehog.version"
 EXCLUDE_SRC="${ROOT}/scripts/trufflehog-exclude-paths.txt"
 DETECTORS_SRC="${ROOT}/scripts/trufflehog-detectors.yaml"
 
-SCAN_PATH="${1:-.}"
+SCAN_PATH="."
+WITH_HISTORY=0
+for arg in "$@"; do
+  case "$arg" in
+    --history) WITH_HISTORY=1 ;;
+    *) SCAN_PATH="$arg" ;;
+  esac
+done
 
 excl=$(mktemp)
+excl_custom=$(mktemp)
 tmp=""
-trap 'rm -f "$excl"; rm -rf "${tmp:-}"' EXIT
+trap 'rm -f "$excl" "$excl_custom"; rm -rf "${tmp:-}"' EXIT
 
 pin_get() {
   local key="$1" line
@@ -142,17 +155,35 @@ fi
   exit 1
 }
 
-echo "secret-scan: credential pass (verified only, no exclude) — ${SCAN_PATH}"
+# Custom pass only: fake credentials in tests/ are unverifiable, so they would
+# be permanent findings. Same exemption as ci.yml.
+cp "$excl" "$excl_custom"
+printf '%s\n' '(^|/)tests/' >> "$excl_custom"
+
+echo "secret-scan: credential pass (verified only, tests/ in scope) — ${SCAN_PATH}"
 "$THOG" filesystem "$SCAN_PATH" \
   --only-verified \
+  --exclude-paths="$excl" \
   --fail \
   --no-update
 
 echo "secret-scan: infra-id pass (custom detectors, tests/ excluded) — ${SCAN_PATH}"
 "$THOG" filesystem "$SCAN_PATH" \
   --config="$DETECTORS_SRC" \
-  --exclude-paths="$excl" \
+  --exclude-paths="$excl_custom" \
   --fail \
   --no-update
+
+if [ "$WITH_HISTORY" = 1 ]; then
+  # The two passes above only see the working tree. This one walks the history,
+  # so a credential committed and later removed is still caught. Verified
+  # detectors only: unverifiable custom findings would fire on every historical
+  # revision of a file we already fixed.
+  echo "secret-scan: history pass (verified only, full git log)"
+  "$THOG" git "file://${ROOT}" \
+    --only-verified \
+    --fail \
+    --no-update
+fi
 
 echo "secret-scan: clean"

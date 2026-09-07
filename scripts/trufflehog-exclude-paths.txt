@@ -1,18 +1,27 @@
-# TruffleHog --exclude-paths (newline-separated regexes) for the CUSTOM pass only.
+# TruffleHog --exclude-paths (newline-separated regexes).
 # `#` comments are stripped by scripts/secret-scan.sh.
 #
-# The generic --only-verified pass deliberately runs with NO exclude list: a live
-# Cloudflare token pasted into a fixture is a real leak, and API verification
-# tells it apart from a fake one with no false positive (measured: 11671 chunks,
-# 0 findings on this tree). Excluding tests/ there would create a blind spot the
-# hand-rolled git grep never had.
+# This file is the COMMON list, applied to both passes: build output, vendored
+# deps, local indexes and the pinned scanner binary itself. Without it the
+# credential pass measured 3720 chunks / 48 MB — essentially the 48 MB
+# trufflehog binary under .cache/, plus all of node_modules once a contributor
+# has run `npm ci`.
 #
-# The custom pass is the opposite case — its findings are unverifiable by
-# construction, so tests/ must be excluded, matching the policy already written
-# in ci.yml (":!tests/** fake tokens / contract fixtures").
+# `tests/` is NOT here. It is added by secret-scan.sh for the CUSTOM pass only:
+#   custom pass  → findings are unverifiable by construction, so the fake
+#                  credentials in tests/ must be excluded, matching the policy
+#                  written in ci.yml (":!tests/** fake tokens / contract fixtures").
+#   credential pass → API verification tells a live token from a fixture with no
+#                  false positive (measured 0 findings), so excluding tests/
+#                  there would create a blind spot the git grep never had.
+#
+# Deliberately stricter than ci.yml on prose: that scan also excludes `*.md`,
+# `.env.example` and `CHANGELOG.md`. Here they stay in scope, so a doc that one
+# day illustrates a real-looking account id will fail the custom pass. Fix the
+# doc (use an obviously fake shape), or add the path here with a reason.
 # Prefer fixing sources over growing this list.
 
-# Build / deps / envs / local indexes
+# Build output / vendored deps / local caches and indexes
 (^|/)node_modules/
 (^|/)\.venv/
 (^|/)dist/
@@ -23,6 +32,4 @@
 (^|/)\.cocoindex_code/
 (^|/)coverage/
 (^|/)__pycache__/
-
-# Fake credentials and contract fixtures — same exemption as ci.yml
-(^|/)tests/
+(^|/)\.pytest_cache/
