@@ -1,0 +1,103 @@
+# .dev/stack.yml — contrat de repo lu par les skills dev-core. COMMITÉ, aucun secret.
+#
+# Écrit à la main, PAS copié depuis stack.yml.example : le template suppose
+# bun + nestjs + tanstack-start + turbo + biome + vercel, rien de tout ça ici.
+#
+# Ce repo = moteur de publication : bash (scripts) + Python 3.9 stdlib (lib/ + unittest)
+# + une surface TS minuscule (functions/ Cloudflare Pages, vitest).
+#
+# Délibérément absent :
+#   hooks.tool: none    → la validation est en CI (5 jobs), pas en pre-commit
+#   quality_gates       → QG_FILE_ROOT est codé en dur sur src/ ; pas de src/ ici ⇒ gate mort
+#   build.formatter     → aucun formatter dans le repo ; laisse le hook format.cjs inerte
+#   deploy.platform     → le déploiement est publish.sh → wrangler pages deploy, jamais la CI
+
+schema_version: "1.0"
+
+runtime: node
+package_manager: npm
+
+backend:
+  framework: none
+  # Pages Functions = la surface serveur (Access middleware, /api/*, /s/*) :
+  # c'est bien R-backend-dev qui doit la relire, pas R-frontend-dev.
+  path: functions
+
+frontend:
+  framework: none
+  path: ""
+
+build:
+  orchestrator: none
+  formatter: none
+  formatter_fix_cmd: ""
+
+testing:
+  unit: vitest
+  e2e: none
+
+hooks:
+  tool: none
+
+lsp:
+  enabled: true
+
+deploy:
+  platform: none
+  secrets_cmd: ""
+
+# Modèle réel : tag à la fusion sur main via scripts/release-plugin.sh
+# (Convention A, <component>/vX.Y.Z). Les versions sont stampées par
+# scripts/check_plugin_versions.py sur 9 manifestes + CHANGELOG ⇒ version_files vide,
+# dev-core ne doit rien réécrire.
+release:
+  model: trunk
+  class: NONE
+  component: silex-forge
+  version_files: []
+
+docs:
+  framework: none
+  path: docs
+  format: md
+
+# La commande de validation réelle : les 3 suites que la CI exécute.
+# run-os-script-tests.sh contient déjà `python3 -m unittest discover -s tests/python`.
+commands:
+  test: "npm test && bash tests/shell/run-os-script-tests.sh && bash tests/shell/test_release_plugin.sh"
+  typecheck: npm run typecheck
+  install: npm ci
+  # pas de `lint` : aucun linter dans le repo (ShellCheck tourne en CI) ⇒ les skills
+  # qui testent l'existence de la clé passent --lint false au lieu d'inventer une commande.
+
+review:
+  roster:
+    max_agents: 4
+    verify_below_confidence: 90
+    recall_min_delta: 50
+    agents:
+      R-adversarial: default
+      R-security-auditor: default
+      R-tester: default
+      # Pas d'app front : sans frontend.path, l'oracle retombe sur un match d'extension
+      # (.ts/.css) et convoquerait un agent front sur functions/ ou site/. `never` le coupe.
+      R-frontend-dev: never
+      R-backend-dev: default
+      R-devops: default
+      R-architect: default
+      R-axial-adr-review: default
+
+artifacts:
+  brainstorms: artifacts/brainstorms
+  analyses: artifacts/analyses
+  specs: artifacts/specs
+  frames: artifacts/frames
+  plans: artifacts/plans
+
+# Pas de docs/standards/ ici : les conventions dures vivent dans AGENTS.md
+# (§ Agent rules, § Hub drift guard) et les docs d'archi dans docs/.
+standards:
+  architecture: docs/
+  code_review: AGENTS.md
+  testing: AGENTS.md
+  contributing: CONTRIBUTING.md
