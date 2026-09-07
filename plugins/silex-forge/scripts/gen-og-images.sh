@@ -157,13 +157,14 @@ render_one() {
   local out="$dir/og.jpg"
   local tmp_jpg="$dir/.og-tmp-$$.jpg"
 
-  if ! python3 "$LIB_DIR/og_render.py" render "$html" --out "$tmp_jpg" --quality "$QUALITY" >/dev/null 2>&1; then
-    warn "$slug: browser-run render failed"
+  local err=""
+  if ! err="$(python3 "$LIB_DIR/og_render.py" render "$html" --out "$tmp_jpg" --quality "$QUALITY" 2>&1 >/dev/null)"; then
+    warn "$slug: browser-run render failed${err:+ — $err}"
     rm -f "$tmp_jpg"
     return 1
   fi
   if [ ! -s "$tmp_jpg" ]; then
-    warn "$slug: browser-run render failed"
+    warn "$slug: browser-run returned no JPEG"
     rm -f "$tmp_jpg"
     return 1
   fi
@@ -179,6 +180,7 @@ render_one() {
 rendered=0
 failed=0
 up_to_date=0
+would_render=0
 total_kb=0
 
 shopt -s nullglob
@@ -215,13 +217,13 @@ for reg in "$REG"/*.json; do
   fi
   if [ "$FORCE" -eq 0 ] \
       && ! is_stale "$html" "$jpg" "$slug" "$source_digest" "$image_digest"; then
-    record_source_proof "$src_proof" "$source_digest" "$image_digest"
+    [ "$DRY_RUN" -eq 1 ] || record_source_proof "$src_proof" "$source_digest" "$image_digest"
     up_to_date=$((up_to_date + 1))
     continue
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    rendered=$((rendered + 1))
+    would_render=$((would_render + 1))
     continue
   fi
 
@@ -237,5 +239,9 @@ done
 
 avg=0
 [ "$rendered" -gt 0 ] && avg=$((total_kb / rendered))
-echo "og-images — ${rendered} rendered (~${avg} kb avg), ${up_to_date} up-to-date, ${failed} failed (browser-run pipeline)"
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "og-images — dry run: ${would_render} would render, ${up_to_date} up-to-date (nothing posted)"
+else
+  echo "og-images — ${rendered} rendered (~${avg} kb avg), ${up_to_date} up-to-date, ${failed} failed (browser-run pipeline)"
+fi
 exit 0

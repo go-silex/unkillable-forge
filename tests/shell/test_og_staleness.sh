@@ -246,4 +246,15 @@ out=$(FORGE_CONFIG="$TD/cfg-nohub.json" bash -c "cd '$TD/repo' && bash '$GEN'" 2
 assert_counts "$out" 1 0 "mtime fallback"
 pass "without a resolvable hub, staleness falls back to the mtime comparison"
 
+# --- 8. --dry-run writes nothing and does not lie in the summary ------------
+rm -f "$JPG" "$SRC"
+out=$(cd "$TD/repo" && bash "$GEN" --dry-run 2>&1)
+case "$out" in
+  *"og-images — dry run: 1 would render, 0 up-to-date (nothing posted)"*) ;;
+  *) note "$out"; fail "dry-run: expected dry-run summary form" ;;
+esac
+[ ! -f "$JPG" ] || fail "dry-run created og.jpg"
+[ ! -f "$SRC" ] || fail "dry-run created og.src"
+pass "--dry-run reports would-render and writes nothing"
+
 echo "all og staleness checks passed"
