@@ -52,6 +52,7 @@ GIT() { git -c core.hooksPath=/dev/null "$@"; }
 
 WORK=""
 DRY_RUN=false
+FORCE_OG=false
 PUBLISH_LOCK_FD=""
 PUBLISH_LOCK_DIR=""
 # Removals this command performs by design (space-separated slugs). cmd_remove
@@ -125,7 +126,7 @@ sys.exit(1)'); then
 usage() {
   cat <<EOF
 Usage:
-  publish.sh <slug> [path] [--share] [--title T] [--type TYPE] [--desc D] [--dry-run]
+  publish.sh <slug> [path] [--share] [--title T] [--type TYPE] [--desc D] [--dry-run] [--force-og]
   publish.sh --share <slug>
   publish.sh --unshare <slug>
   publish.sh --list | --remove <slug> | --rebuild-index
@@ -134,6 +135,9 @@ Usage:
   --dry-run : accepted anywhere in argv, for every command — builds and
               validates everything (engine, hub snapshot, wrangler.toml)
               without deploying and without mutating KV.
+
+  --force-og : re-render every thumbnail even when og.src matches (passed
+              to gen-og-images.sh --force).
 
   --allow-removals : proceed even when the deploy would delete artifacts that
               are live but absent from the local hub. Without it, that case
@@ -894,6 +898,8 @@ gen_og_images() {
   local slug="${1-}"
   local args=()
   [ -n "$slug" ] && args+=(--slug "$slug")
+  $FORCE_OG && args+=(--force)
+  $DRY_RUN && args+=(--dry-run)
   local sh
   sh="$(SCRIPTS)/gen-og-images.sh"
   if [ -f "$sh" ]; then
@@ -920,25 +926,19 @@ print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
 PY
 }
 
-# Use the same exact overlay inverses as gen-og-images.sh. This makes a hub
-# source comparable to the deploy HTML that was actually checked/rendered,
-# while keeping share-bar and OG metadata changes outside thumbnail identity.
+# Kernel digest (og_render.py digest): v2 canonical HTML + subresources.
+# Resolved through $(SCRIPTS) like share_bar_script and build_from_hub:
+# gen-og-images.sh and build-site-from-hub.py both run the engine clone's copy,
+# and all three must be the same implementation or persist_og_to_hub compares a
+# clone-produced proof against an installed-plugin digest, never matches, and
+# re-renders on every publish forever.
+# Empty on failure so persist_og_to_hub skips rather than writing a bad proof.
 canonical_og_source_digest() {
-  local html="$1" tmp="$WORK/.og-source-persist-$$.html"
-  local share_inj="" og_inj="" digest=""
-  og_inj="$(SCRIPTS)/inject-og.py"
-  [ -f "$html" ] && [ -f "$og_inj" ] || return 0
-  if ! share_inj="$(share_bar_script)"; then
-    return 0
-  fi
-  if ! cp -f "$html" "$tmp"; then
-    return 0
-  fi
-  if python3 "$share_inj" "$tmp" --strip >/dev/null 2>&1 \
-      && python3 "$og_inj" "$tmp" --strip >/dev/null 2>&1; then
-    digest="$(sha256_file "$tmp")" || digest=""
-  fi
-  rm -f "$tmp"
+  local html="$1" digest="" kernel=""
+  kernel="$(SCRIPTS)/lib/og_render.py"
+  [ -f "$kernel" ] || kernel="$LIB_DIR/og_render.py"
+  [ -f "$kernel" ] || { printf '\n'; return 0; }
+  digest="$(python3 "$kernel" digest "$html" 2>/dev/null)" || digest=""
   printf '%s\n' "$digest"
 }
 
@@ -949,8 +949,8 @@ persist_og_to_hub() {
   local src="$dir/og.jpg" proof="$dir/og.src"
   local hub_dir="${ARTIFACTS_ROOT}/${slug}"
   # build_from_hub excludes og.src. Its presence therefore proves that this run
-  # checked the existing source/image pair or completed a render. Missing
-  # Chrome/ffmpeg and failed renders never produce one.
+  # checked the existing source/image pair or completed a render. A failed
+  # Browser Run render never produces one.
   [ -f "$src" ] && [ -f "$proof" ] || return 0
   [ -d "$hub_dir" ] && [ -f "$hub_dir/index.html" ] || return 0
 
@@ -1719,13 +1719,14 @@ if [ -n "${FORGE_PUBLISH_LIB_ONLY:-}" ]; then
 fi
 source_cf_credentials
 
-# --dry-run, --allow-removals and --allow-unverified are global: accepted
-# anywhere in argv, for every command. Strip them here, before the dispatch,
-# so no per-command parser ever sees them.
+# --dry-run, --force-og, --allow-removals and --allow-unverified are global:
+# accepted anywhere in argv, for every command. Strip them here, before the
+# dispatch, so no per-command parser ever sees them.
 _dry_run_args=()
 for _arg in "$@"; do
   case "$_arg" in
     --dry-run) DRY_RUN=true ;;
+    --force-og) FORCE_OG=true ;;
     --allow-removals) ALLOW_REMOVALS=true ;;
     --allow-unverified) ALLOW_UNVERIFIED=true ;;
     *) _dry_run_args+=("$_arg") ;;

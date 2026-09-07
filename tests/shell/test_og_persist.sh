@@ -55,9 +55,10 @@ DEPLOY_OG="$DEPLOY_DIR/og.jpg"
 DEPLOY_SRC="$DEPLOY_DIR/og.src"
 
 # Model gen_og_images: a successful render produces an image plus a proof that
-# binds the canonical deploy source to those exact image bytes.
+# binds the canonical deploy source to those exact image bytes. The source
+# half is the kernel digest (og_render.py digest), not a local strip+sha256.
 printf 'FAKE_OG' > "$DEPLOY_OG"
-SOURCE_DIGEST="$(canonical_og_source_digest "$DEPLOY_HTML")"
+SOURCE_DIGEST="$(python3 "$LIB_DIR/og_render.py" digest "$DEPLOY_HTML")"
 IMAGE_DIGEST="$(sha256_file "$DEPLOY_OG")"
 printf '%s %s\n' "$SOURCE_DIGEST" "$IMAGE_DIGEST" > "$DEPLOY_SRC"
 
@@ -71,7 +72,7 @@ persist_og_to_hub new-deck
 pass "og.jpg lands in the hub SSOT"
 [ -f "$ARTIFACTS_ROOT/new-deck/og.src" ] \
   || fail "og.src not persisted to the hub SSOT"
-EXPECTED_SOURCE="$(canonical_og_source_digest "$ARTIFACTS_ROOT/new-deck/index.html")"
+EXPECTED_SOURCE="$(python3 "$LIB_DIR/og_render.py" digest "$ARTIFACTS_ROOT/new-deck/index.html")"
 EXPECTED_IMAGE="$(sha256_file "$ARTIFACTS_ROOT/new-deck/og.jpg")"
 [ "$(cat "$ARTIFACTS_ROOT/new-deck/og.src")" = "$EXPECTED_SOURCE $EXPECTED_IMAGE" ] \
   || fail "og.src does not bind the final hub HTML to the persisted JPEG"
@@ -100,7 +101,7 @@ pass "no render proof means no new source digest"
 # If the hub changes after the deploy tree was checked, the proof describes the
 # old source. Refuse the whole copy rather than clobbering a remotely-synced
 # image and stamping the new HTML as fresh against it.
-CHECKED_SOURCE="$(canonical_og_source_digest "$DEPLOY_HTML")"
+CHECKED_SOURCE="$(python3 "$LIB_DIR/og_render.py" digest "$DEPLOY_HTML")"
 CHECKED_IMAGE="$(sha256_file "$DEPLOY_OG")"
 printf '%s %s\n' "$CHECKED_SOURCE" "$CHECKED_IMAGE" > "$DEPLOY_SRC"
 printf '%s\n' '<html><body>concurrent hub update</body></html>' \
@@ -131,8 +132,12 @@ pass "unknown slug does not touch the hub"
 # headless Chrome on every publish (~55 s for 30 slugs) with no craft change,
 # and the decks that animate are not byte-reproducible, so those re-renders
 # uploaded thumbnails that were merely different. Measured before the fix:
-# "30 rendered, 0 up-to-date" on two identical runs, with 2 og.jpg changing.
 printf 'HUB_OG' > "$ARTIFACTS_ROOT/new-deck/og.jpg"
+# build-site-from-hub copies og.jpg only when og.src matches the kernel digest.
+printf '%s %s\n' \
+  "$(python3 "$LIB_DIR/og_render.py" digest "$ARTIFACTS_ROOT/new-deck/index.html")" \
+  "$(sha256_file "$ARTIFACTS_ROOT/new-deck/og.jpg")" \
+  > "$ARTIFACTS_ROOT/new-deck/og.src"
 # Make the hub's og.jpg newer than its index.html, i.e. not stale at source.
 touch -t 202601010000 "$ARTIFACTS_ROOT/new-deck/index.html"
 touch -t 202601020000 "$ARTIFACTS_ROOT/new-deck/og.jpg"

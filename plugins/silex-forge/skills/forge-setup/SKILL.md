@@ -43,7 +43,7 @@ Reached only after the last configuration step (token) and the final
 ✅ forge-doctor.sh --online exit 0 — ready (hub OK AND deploy_ready AND online_ok)
 ⚠️ optional Shlink shortlinks — Pages SHLINK_* + local CLI (step 6b)
 ⚠️ recommended external craft plugins (step 7)
-⚠️ optional OG thumbnail toolchain — chrome + ffmpeg + jq (step 7b)
+⚠️ optional OG thumbnails — existing token needs Browser Run Write (step 7b)
 ```
 
 An offline `forge-doctor.sh` exit 0 is **not** the criterion: it only proves the
@@ -562,7 +562,7 @@ Order:
 2. Password manager available → fill from your ops vault (do **not** echo the token in chat)
 3. Otherwise **ask for the token** (one question) and write the same way
 
-Scopes: Pages Write + Read, Account Settings Read, Workers KV Storage Write (CLI `--share` via REST).
+Permissions: Pages Edit · Workers KV Storage Edit · Account Settings Read · **Browser Run Write**. A token missing Browser Run Write makes every render fail per slug; the publish still succeeds. Workers KV Storage Write still covers CLI `--share` via REST.
 
 **KV fallback:** if the token lacks KV scope (or REST is rejected), `publish.sh`
 retries with `wrangler login` OAuth (`wrangler kv … --remote`,
@@ -676,54 +676,51 @@ Every harness:
 npx skills add alchaincyf/huashu-design
 ```
 
-## Step 7b — OG thumbnail toolchain (optional)
+## Step 7b — OG thumbnails (Browser Run)
 
 Renders `site/a/<slug>/og.jpg` for every artifact: the **thumbnails in the
 forge catalogue**, and the **preview card** a paste of the link shows in Slack,
-LinkedIn or iMessage. Not part of the hub or the deploy credentials — doctor
-stays exit `0` without it.
+LinkedIn or iMessage. Rendered **before** `wrangler pages deploy` by Cloudflare
+Browser Run REST (`html` payload, JPEG out), invoked from `gen-og-images.sh`
+via `lib/og_render.py`.
 
-| Binary | Role |
-|---|---|
-| `google-chrome` / `chromium` | headless screenshot at deck native 1920×1080 |
-| `ffmpeg` | cover-crop to the 1200×630 OG card |
-| `jq` | reads the artifact registry |
+No chrome/chromium/ffmpeg/jq on the publisher machine. `python3` plus the
+existing `CLOUDFLARE_API_TOKEN` with **Browser Run Write** is enough. A token
+missing that permission makes every render fail per slug; the publish still
+succeeds.
 
-A Playwright chromium already cached under `~/.cache/ms-playwright/` counts as
-chrome — install nothing if `forge-doctor.sh` reports the toolchain complete.
+Storage is unchanged: JPEG in the Pages snapshot, copy in the hub SSOT,
+`og.src` hub-only proof (v2 digest = canonical HTML + subresources).
 
-```bash
-# Debian / Ubuntu / WSL
-sudo apt-get install -y chromium-browser ffmpeg jq
-# Fedora / RHEL
-sudo dnf install -y chromium ffmpeg jq
-# macOS
-brew install --cask google-chrome && brew install ffmpeg jq
-```
+`--force` remains a `gen-og-images.sh` flag. `publish.sh --force-og` passes
+it through. `--rebuild-index` without `--force-og` still only re-renders
+`is_stale` slugs. `--quality` is JPEG 1–100, default 80 — not ffmpeg `-q:v`.
+A dry run does not POST.
 
-**Skipping is supported.** `gen-og-images.sh` is best-effort: a missing binary
-warns and exits `0`, so generate and publish keep working — the artifact simply
-goes live with no thumbnail and no preview card.
+`touch $hub/<artifacts_dir>/<slug>/og.keep` pins that slug's published card
+in the hub: `gen-og-images.sh` never re-renders it (`--force` does not
+override). Delete the file to un-pin. The pin preserves an older capture;
+it does not fix the opaque-origin / runtime-path limits of the inline
+payload.
 
-**The one non-obvious consequence.** A publish deploys a **full snapshot**
-rebuilt from the local hub, so it does not only skip its own thumbnail: it also
-**removes from the live site the thumbnails other machines rendered**, silently
-and with a successful publish. Measured on 2026-09-06: 30 of 31 artifacts kept
-their thumbnail, the 31st lost the one another machine had generated. So on a
-shared forge, either every publishing machine has the toolchain, or expect
-thumbnails to come and go with whoever published last.
+Best-effort: a missing token or Browser Run failure warns and publish
+continues. A render that fails leaves the previous thumbnail in place, and
+the per-slug warning now names the reason.
 
-Check (never changes the exit code):
+The v2 digest prefix cannot collide with a v1 proof, so after upgrading every
+artifact reads as stale exactly once. Until a slug is re-rendered its
+previously published card keeps shipping. Recommend `publish.sh --rebuild-index`
+once after the upgrade (~33 renders, well inside the 10 browser-hours/month
+included on Workers Paid). That is a recommendation, not a prerequisite —
+nothing breaks if skipped.
 
-```bash
-: "${FORGE_ROOT:?run § Shell setup first}"
-bash "$FORGE_ROOT/scripts/forge-doctor.sh"
-```
+A publisher still on the previous engine computes a v1 digest and will
+re-render and re-persist a slug a v2 machine already proved, and vice versa.
+Bounded churn (extra renders, different JPEG bytes uploaded), never a deleted
+card. Everyone should pull.
 
-An incomplete toolchain prints a `⚠` line naming the missing binaries and this
-consequence, plus a `→ og images:` install line for the host. It is a warning:
-`ok`, `deploy_ready` and the exit code are untouched, `--quiet` stays silent,
-and `--json` carries `og_toolchain` (`{ok, missing, chrome}`).
+Doctor no longer reports an OG toolchain at all.
+
 
 ## Step 8 — Final doctor (`--online`) and report
 

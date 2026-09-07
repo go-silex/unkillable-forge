@@ -144,11 +144,17 @@ def build(
             # meta.json stays hub-only name; registry is the deploy mirror
             if item.name == "meta.json":
                 continue
-            # og.src binds the canonical source digest to the exact JPEG bytes.
-            # It is hub bookkeeping for gen-og-images.sh, never a served asset:
-            # shipping it would add a file per slug and expose nothing useful.
-            if item.name == "og.src":
+            # og.src binds the canonical source digest to the exact JPEG bytes;
+            # og.keep pins a slug's published card so gen-og-images.sh never
+            # re-renders it. Both are hub bookkeeping, never served assets:
+            # shipping them would add a file per slug and expose nothing useful.
+            if item.name in ("og.src", "og.keep"):
                 continue
+            # Always copy hub og.jpg. A full-snapshot deploy plus a single-slug
+            # re-render means skipping a hub og.jpg deletes the live thumbnails
+            # of every other artifact. A stale card is recoverable; a deleted
+            # one is not. is_stale in gen-og-images.sh re-renders a changed
+            # artifact.
             target = dest / item.name
             if item.is_dir():
                 if target.exists():
