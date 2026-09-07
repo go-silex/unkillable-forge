@@ -33,16 +33,11 @@ jobs:
             exit 1
           fi
 
+          # `subject-full-stop` is a @commitlint/config-conventional rule, so it
+          # belongs here. A minimum subject length would not — no length floor:
+          # the `.+` in the pattern is what requires a subject at all.
           case "$TITLE" in
             *.) echo "::error::drop the trailing period"; exit 1 ;;
           esac
-
-          # A subject that is only the scope ("fix(publish): publish") carries
-          # no information into the changelog.
-          subject=${TITLE#*: }
-          if [ "${#subject}" -lt 10 ]; then
-            echo "::error::subject too short (${#subject} chars) — describe the change"
-            exit 1
-          fi
 
           echo "ok"

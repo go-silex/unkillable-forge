@@ -140,6 +140,17 @@ If you change the plugin surface (skills, scripts, manifests):
 - **Do not** include HTML artifacts, `.env`, or `forge.config.json` with real paths/tokens
 - CI must pass (shell syntax + Python smoke tests)
 
+### Title format
+
+PR titles and commits follow [Conventional Commits](https://www.conventionalcommits.org/):
+`<type>(<scope>)?: <subject>`, with `type` one of
+`feat` `fix` `docs` `style` `refactor` `perf` `test` `build` `ci` `chore` `revert`,
+and no trailing period. `!` marks a breaking change (`feat(share)!: …`).
+
+This is a contract, not a style preference: on merge to `main` the title and the
+matching CHANGELOG section are what `scripts/check_plugin_versions.py --print-notes`
+turns into the GitHub Release body. `.github/workflows/pr-title.yml` checks it.
+
 Reviewers may ask you to update skills, docs, or CHANGELOG.
 
 ## Security
