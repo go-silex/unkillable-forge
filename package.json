@@ -4,11 +4,13 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepare": "git config --get core.hooksPath >/dev/null 2>&1 || lefthook install"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250214.0",
     "@types/node": "^26.2.0",
+    "lefthook": "^2.1.12",
     "typescript": "^5.8.2",
     "vitest": "^3.0.9"
   }
