@@ -762,15 +762,6 @@ def doctor_online(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
-def og_toolchain() -> dict[str, Any]:
-    """Stable doctor key: {ok: True, missing: []}.
-
-    The OG renderer is Cloudflare Browser Run via the publish token, so
-    there is nothing extra to probe. Never networks.
-    """
-    return {"ok": True, "missing": []}
-
-
 def doctor(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return structured health check. ok=False ⇒ run forge-setup."""
     cfg = cfg or load_config()
@@ -848,10 +839,9 @@ def doctor(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     if not perm["ok"] and perm.get("issue"):
         warnings.append(perm["issue"])
 
-    # Stable payload key. The OG renderer is Browser Run via the publish
-    # token, so there is nothing extra to probe. Never networks. Neither
-    # ok nor deploy_ready may move because of it.
-    og = og_toolchain()
+    # No OG toolchain probe: the renderer is Browser Run, reached with python3
+    # and the publish token (already reported). The real signal is a per-slug
+    # "browser-run render failed — <reason>" from gen-og-images.sh.
 
     deploy_blockers: list[str] = []
     if not has_token:
@@ -887,7 +877,6 @@ def doctor(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         "shares_kv_namespace_id": kv or None,
         "pages_project": cfg.get("pages_project") or "silex-forge",
         "forge_env_permissions": perm,
-        "og_toolchain": og,
         "skill": "forge-setup",
     }
     if not hub_s:

@@ -120,61 +120,6 @@ run --json --quiet
 is_json "$OUT" || fail "--json --quiet must still emit JSON only: ${OUT}"
 pass "--json --quiet prefers JSON"
 
-# ── advisory · OG toolchain is a stable key, never a gate ──────────────────────
-# The OG renderer is Browser Run via the publish token (python3 +
-# CLOUDFLARE_API_TOKEN, already publish dependencies). chrome/ffmpeg/jq
-# on PATH are irrelevant. Doctor must keep its three-way exit contract
-# and must not tell the operator to apt-get/brew install those binaries.
-STRIP_BIN="$TD/strip-bin"
-mkdir -p "$STRIP_BIN"
-# Everything forge-doctor.sh itself needs; chrome/chromium, ffmpeg and jq
-# are deliberately absent from this PATH.
-for tool in sh bash dirname cat python3 uname; do
-  TOOL_PATH="$(command -v "$tool" 2>/dev/null || true)"
-  if [ -n "$TOOL_PATH" ]; then
-    ln -sf "$TOOL_PATH" "$STRIP_BIN/$tool"
-  fi
-done
-SH_ABS="$(command -v "$SH" || true)"
-[ -n "$SH_ABS" ] || fail "cannot resolve the test interpreter: $SH"
-
-# run_stripped <args...> — doctor with a PATH that has no chrome/ffmpeg/jq.
-run_stripped() {
-  set +e
-  OUT="$(PATH="$STRIP_BIN" "$SH_ABS" "$DOCTOR" "$@" 2>"$TD/err")"
-  RC=$?
-  set -e
-  ERR="$(cat "$TD/err")"
-  ERR_LINES="$(wc -l < "$TD/err" | tr -d ' ')"
-}
-
-run_stripped
-[ "$RC" -eq 0 ] || fail "a PATH without chrome/ffmpeg/jq must still exit 0, got $RC: $OUT $ERR"
-echo "$OUT" | grep -q 'status   : OK' \
-  || fail "stripped PATH must keep the status OK, got: $OUT"
-if echo "$OUT" | grep -q 'apt-get'; then
-  fail "report must not tell the operator to apt-get install chrome/ffmpeg/jq, got: $OUT"
-fi
-if echo "$OUT" | grep -q 'brew install'; then
-  fail "report must not tell the operator to brew install chrome/ffmpeg/jq, got: $OUT"
-fi
-pass "stripped PATH → exit 0, no chrome/ffmpeg/jq install hint"
-
-run_stripped --json
-[ "$RC" -eq 0 ] || fail "--json must stay exit 0 with no chrome/ffmpeg/jq on PATH, got $RC"
-is_json "$OUT" || fail "--json stdout is not valid JSON: ${OUT}"
-printf '%s' "$OUT" | python3 -c \
-  'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["og_toolchain"]["ok"] is True and d["og_toolchain"]["missing"] == [] and d["deploy_blockers"] == [] and d["ok"] is True else 1)' \
-  || fail "--json must carry og_toolchain.ok true and missing [] while ok stays true and deploy_blockers stays empty, got: $OUT"
-pass "--json exposes og_toolchain without touching ok / deploy_blockers"
-
-run_stripped --quiet
-[ "$RC" -eq 0 ] || fail "--quiet must stay exit 0 with no chrome/ffmpeg/jq on PATH, got $RC"
-[ -z "$OUT" ] || fail "--quiet must not print to stdout, got: $OUT"
-[ -z "$ERR" ] || fail "--quiet must stay silent when there is no OG issue, got: $ERR"
-pass "--quiet stays silent: no OG issue"
-
-
 # ── exit 2 · config fine, credentials missing → deploy blocked ─────────────────
 export FORGE_ENV="$TD/absent.env"
 [ ! -f "$TD/absent.env" ] || fail "fixture error: absent.env exists"
@@ -320,6 +265,7 @@ printf '%s\n%s\n' "$OUT" "$ERR" | grep -q 'load_config.py' \
 pass "human report: raising load_config → exit 1 naming load_config.py"
 
 # An unimportable lib/ (not just a raising call) takes the same path.
+# --json must stay a parseable document; --quiet must stay one stderr line.
 printf 'def doctor(:\n' > "$CRASH/lib/load_config.py"
 run_at "$CRASH/forge-doctor.sh" --json
 [ "$RC" -eq 1 ] || fail "an unimportable lib/ must exit 1 in --json, got $RC: $OUT $ERR"
@@ -328,11 +274,16 @@ pass "--json survives a lib/ that cannot be imported"
 
 run_at "$CRASH/forge-doctor.sh" --quiet
 [ "$RC" -eq 1 ] || fail "an unimportable lib/ must exit 1 in --quiet, got $RC: $ERR"
+[ -z "$OUT" ] || fail "--quiet must not print to stdout on an unimportable lib/, got: $OUT"
 [ "$ERR_LINES" -eq 1 ] \
   || fail "--quiet must stay one stderr line on an unimportable lib/, got $ERR_LINES: $ERR"
-pass "--quiet survives a lib/ that cannot be imported"
+echo "$ERR" | grep -q 'load_config.py' \
+  || fail "--quiet unimportable-lib line must name load_config.py, got: $ERR"
+pass "--quiet: unimportable lib/ → exit 1, one stderr line naming load_config.py"
 
 # A payload missing deploy_ready must degrade to blocked, never to a silent 0.
+# Human report: two machine lines (STATUS / BLOCKER) then REPORT — swallowing
+# the title would mean the header parse still expects a third OG line.
 cat > "$CRASH/lib/load_config.py" <<'EOF'
 def doctor():
     return {"ok": True}
@@ -343,8 +294,18 @@ def doctor_online():
 EOF
 run_at "$CRASH/forge-doctor.sh"
 [ "$RC" -eq 2 ] || fail "a payload without deploy_ready must exit 2, got $RC: $OUT"
+echo "$OUT" | grep -q 'silex-forge' \
+  || fail "truncated payload must still emit the human report after STATUS/BLOCKER, got: $OUT"
+run_at "$CRASH/forge-doctor.sh" --json
+[ "$RC" -eq 2 ] || fail "--json must exit 2 on a truncated payload, got $RC: $OUT $ERR"
+is_json "$OUT" || fail "--json must stay parseable on a truncated payload, got: ${OUT}"
+printf '%s' "$OUT" | python3 -c \
+  'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") is True else 1)' \
+  || fail "--json truncated payload must keep ok:true, got: $OUT"
 run_at "$CRASH/forge-doctor.sh" --quiet
 [ "$RC" -eq 2 ] || fail "--quiet must exit 2 on a payload without deploy_ready, got $RC"
+[ "$ERR_LINES" -eq 1 ] \
+  || fail "--quiet must stay one stderr line on a truncated payload, got $ERR_LINES: $ERR"
 pass "a truncated payload degrades to deploy-blocked, never a silent 0"
 
 echo "all forge-doctor behavioral checks passed"

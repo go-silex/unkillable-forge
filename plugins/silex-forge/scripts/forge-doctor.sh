@@ -125,10 +125,9 @@ PY
   exit $?
 fi
 
-# Human report. Python emits three machine lines first (status + blockers +
-# the OG toolchain line), then the report; the shell owns the blocker →
-# command map. The og: line stays so the STATUS/BLOCKER/OG header parse
-# does not shift.
+# Human report. Python emits two machine lines first (status + blockers),
+# then the report; the shell owns the blocker → command map. Header is
+# parsed positionally as STATUS / BLOCKER / REPORT.
 DOCTOR_OUT=$(python3 - <<PY
 import sys
 from load_config import doctor, doctor_online
@@ -142,12 +141,6 @@ blockers = d.get("deploy_blockers") or []
 
 print("%d %d %d %s" % (ok, deploy, online_ok, d.get("forge_env") or ""))
 print("blockers:" + "".join(" " + b for b in blockers))
-# The og: line stays for header-parse stability. The OG renderer is Browser
-# Run via the publish token, so missing is always empty; a truncated payload
-# still reads as nothing to report.
-og = d.get("og_toolchain") or {}
-og_missing = [] if og.get("ok", True) else (og.get("missing") or [])
-print("og:" + "".join(" " + m for m in og_missing))
 
 print("silex-forge · doctor" + (" · online" if online else ""))
 print(f"  source   : {d.get('config_source')}")
@@ -198,8 +191,6 @@ PY
 STATUS_LINE=${DOCTOR_OUT%%$'\n'*}
 DOCTOR_REST=${DOCTOR_OUT#*$'\n'}
 BLOCKER_LINE=${DOCTOR_REST%%$'\n'*}
-DOCTOR_REST=${DOCTOR_REST#*$'\n'}
-OG_LINE=${DOCTOR_REST%%$'\n'*}
 REPORT=${DOCTOR_REST#*$'\n'}
 
 D_OK=1

@@ -27,7 +27,6 @@ from load_config import (  # noqa: E402
     hub_root_candidates,
     load_config,
     main,
-    og_toolchain,
     parse_forge_env,
     pick_forge_repo,
     resolve_hub_root,
@@ -510,91 +509,6 @@ class InferHubLayoutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             hub = Path(td)
             self.assertEqual(infer_hub_layout(hub), ("artifacts", []))
-
-
-class OgToolchainTests(unittest.TestCase):
-    """og_toolchain is a stable doctor key with nothing extra to probe.
-
-    The OG renderer is Cloudflare Browser Run via the publish token
-    (python3 + CLOUDFLARE_API_TOKEN, already reported elsewhere). A
-    missing chrome/ffmpeg/jq on PATH must not appear in missing and
-    must never move ok or deploy_ready. The probe never networks.
-    """
-
-    def setUp(self) -> None:
-        self._td = tempfile.TemporaryDirectory()
-        self.root = Path(self._td.name)
-        self.home = self.root / "home"
-        self.home.mkdir()
-        self._envcm = patch.dict(
-            os.environ, {"HOME": str(self.home), "PATH": ""}, clear=False
-        )
-        self._envcm.start()
-
-    def tearDown(self) -> None:
-        self._envcm.stop()
-        self._td.cleanup()
-
-    def _minimal_cfg(self, hub_root: str) -> dict:
-        return {
-            "version": 1,
-            "hub_root": hub_root,
-            "artifacts_dir": "artifacts",
-            "public_host": "forge.example.com",
-            "forge_repo": FORGE_REPO_HTTPS,
-            "site_dir": "site",
-            "registry_dir": "registry",
-            "internal_prefix": "a",
-        }
-
-    def test_probe_is_always_ok_with_empty_missing(self) -> None:
-        probe = og_toolchain()
-        self.assertTrue(probe["ok"])
-        self.assertEqual(probe["missing"], [])
-
-    def test_doctor_payload_contains_og_toolchain(self) -> None:
-        hub = self.root / "hub"
-        (hub / "00_COCKPIT").mkdir(parents=True)
-        (hub / "01_COMPANY").mkdir()
-        (hub / "artifacts").mkdir()
-        payload = doctor(self._minimal_cfg(str(hub)))
-        self.assertIn("og_toolchain", payload)
-        self.assertTrue(payload["og_toolchain"]["ok"])
-        self.assertEqual(payload["og_toolchain"]["missing"], [])
-
-    def test_missing_chrome_ffmpeg_jq_never_gates(self) -> None:
-        hub = self.root / "hub"
-        (hub / "00_COCKPIT").mkdir(parents=True)
-        (hub / "01_COMPANY").mkdir()
-        (hub / "artifacts").mkdir()
-        cfg = self._minimal_cfg(str(hub))
-
-        without = doctor(cfg)
-        bin_dir = self.root / "bin"
-        bin_dir.mkdir()
-        for name in ("google-chrome", "ffmpeg", "jq"):
-            path = bin_dir / name
-            path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            path.chmod(0o755)
-        os.environ["PATH"] = str(bin_dir)
-        with_tools = doctor(cfg)
-
-        self.assertEqual(without["ok"], with_tools["ok"])
-        self.assertEqual(without["deploy_blockers"], with_tools["deploy_blockers"])
-        self.assertEqual(without["deploy_ready"], with_tools["deploy_ready"])
-        self.assertTrue(without["og_toolchain"]["ok"])
-        self.assertTrue(with_tools["og_toolchain"]["ok"])
-        self.assertEqual(without["og_toolchain"]["missing"], [])
-        self.assertEqual(with_tools["og_toolchain"]["missing"], [])
-        blob = " ".join(
-            without["warnings"]
-            + with_tools["warnings"]
-            + without["issues"]
-            + with_tools["issues"]
-        )
-        for name in ("chrome", "ffmpeg", "jq"):
-            self.assertNotIn(name, without["og_toolchain"]["missing"])
-            self.assertNotIn(name, blob)
 
 
 if __name__ == "__main__":
