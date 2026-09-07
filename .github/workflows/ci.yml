@@ -100,7 +100,7 @@ jobs:
         run: |
           set -e
           scan() {
-            git grep -E "$1" -- . \
+            git grep -IE "$1" -- . \
               ':!*.md' \
               ':!tests/**' \
               ':!.env.example' \
@@ -115,6 +115,15 @@ jobs:
           fi
           if git grep -E 'id = "[0-9a-f]{32}"' wrangler.toml 2>/dev/null; then
             echo "found KV id in wrangler.toml"; exit 1
+          fi
+          # Bare id, no assignment shape. The rules above only match
+          # `KEY=<hex>` or `id = "<hex>"`, so a plain hex pasted into a script
+          # or a comment passed CI: that is exactly how the account and KV ids
+          # rode along on `main` inside scripts/purge-git-history.sh until
+          # 2026-09-08, in `literal:<hex>==>PLACEHOLDER` rules. Measured 0
+          # matches on the current tree under the same exclusions.
+          if scan '\b[0-9a-f]{32}\b'; then
+            echo "found a bare 32-hex infra id — resolve it from forge.env at run time"; exit 1
           fi
           token_prefix='cf''ut_'
           key_prefix='cf''k_'
