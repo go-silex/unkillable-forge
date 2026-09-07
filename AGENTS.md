@@ -372,11 +372,19 @@ Best-effort: missing token / Browser Run failure warns and publish continues.
 A render that fails leaves the previous thumbnail in place, and the per-slug
 warning now names the reason.
 
-The page renders from an inline HTML string, so it has an opaque origin: a
-third-party embed that needs a real one degrades. Measured on `lgu-recap`,
-whose remote tella.tv player is replaced by its own client-side error box.
-Rendering that slug faithfully would need to navigate the real URL, which
-sits behind the visibility ACL.
+The page renders from an inline HTML string, so it has an opaque origin and no
+base URL. Two consequences, both measured:
+
+- A third-party embed that needs a real origin degrades — `lgu-recap`, whose
+  remote tella.tv player is replaced by its own client-side error box.
+- A path built at runtime cannot be rewritten. Inlining covers `src=`, `href=`
+  and `url()`; a `fetch()` argument is computed while the page runs —
+  `infographie-repos-showcase` reports *Failed to parse URL* on
+  `tabs/<id>.html`. No inlining strategy closes this, and that card is already
+  broken the same way on `main`. It is the only artifact of the 33 affected.
+
+Rendering either faithfully would need to navigate the real URL, which sits
+behind the visibility ACL.
 
 The v2 digest prefix cannot collide with a v1 proof, so after upgrading every
 artifact reads as stale exactly once. Until a slug is re-rendered its previously

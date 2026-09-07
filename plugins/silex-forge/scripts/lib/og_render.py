@@ -48,11 +48,23 @@ build-site-from-hub.py copies the hub JPEG unconditionally, and it must stay
 that way: a full-snapshot deploy plus a single-slug re-render means any
 per-slug gate there deletes the live thumbnails of every other artifact.
 
-Known limit of the payload form: the page is rendered from an inline HTML
-string, so it has an opaque origin. A third-party embed that needs a real one
-degrades -- measured on lgu-recap, whose remote tella.tv player is replaced by
-its own client-side error box. Rendering that slug faithfully would require
-navigating the real URL, which is behind the visibility ACL.
+Two known limits of the payload form, both from the same root: the page is
+rendered from an inline HTML string, so it has an opaque origin and no base
+URL.
+
+  * A third-party embed that needs a real origin degrades -- measured on
+    lgu-recap, whose remote tella.tv player is replaced by its own client-side
+    error box.
+  * A path built at runtime cannot be rewritten. Inlining covers src=, href=
+    and url(), which is all a parser can see; a fetch() or XHR argument is
+    computed while the page runs. Measured on infographie-repos-showcase,
+    whose inlined script fetches tabs/<id>.html and reports "Failed to parse
+    URL". No inlining strategy can close this -- the path does not exist until
+    execution. It is the only artifact of the 33 that does this, and its card
+    is already broken the same way on main.
+
+Rendering either faithfully would require navigating the real URL, which is
+behind the visibility ACL.
 """
 
 from __future__ import annotations
