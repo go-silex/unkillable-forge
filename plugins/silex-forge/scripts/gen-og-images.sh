@@ -2,24 +2,19 @@
 # gen-og-images.sh — screenshot each forge artifact → site/a/<slug>/og.jpg
 #
 # Stack:
-#   jq           — registry JSON
-#   python3      — canonical source digest when a forge hub is configured
-#   google-chrome|chromium — headless screenshot at deck native 1920×1080
-#   ffmpeg       — cover-crop to OG 1200×630 JPEG (no side letterbox)
-#
-# Why 1920×1080 first?
-#   Silex decks are 16:9 stages letterboxed into the viewport with --stage-bg.
-#   Capturing at 1200×630 (wider than 16:9) left grey side bars. Capture at
-#   native stage size, then ffmpeg cover-crop → full-bleed OG.
+#   python3 + lib/og_render.py — canonical source digest + Browser Run JPEG
 #
 # Usage (repo root):
 #   plugins/silex-forge/scripts/gen-og-images.sh
 #   plugins/silex-forge/scripts/gen-og-images.sh --slug my-slug --force
-#   plugins/silex-forge/scripts/gen-og-images.sh --quality 4
+#   plugins/silex-forge/scripts/gen-og-images.sh --quality 80
+#   plugins/silex-forge/scripts/gen-og-images.sh --dry-run
 #
 # Regeneration is keyed on sha256(canonical source HTML) + sha256(og.jpg),
 # recorded together in og.src (unless --force). See is_stale.
-# Best-effort: missing chrome/ffmpeg → exit 0 + warn (publish continues).
+# Best-effort: missing python3/og_render.py → exit 0 + warn (publish continues).
+# A failed render never fails the batch. Token absence is not a startup abort:
+# digest/staleness still run; render fails per slug.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,13 +36,9 @@ ARTIFACTS=""
 if [ -n "${FORGE_HUB_ROOT:-}" ] && [ -n "${FORGE_ARTIFACTS_DIR:-}" ]; then
   ARTIFACTS="${FORGE_HUB_ROOT}/${FORGE_ARTIFACTS_DIR}"
 fi
-# Capture at deck native size (16:9) → then cover-crop to OG card ratio
-CAP_W=1920
-CAP_H=1080
-OG_W=1200
-OG_H=630
-QUALITY=5   # ffmpeg -q:v for mjpeg: 2=best, 5≈good, 10=small
+QUALITY=80   # JPEG quality 1–100 (Browser Run)
 FORCE=0
+DRY_RUN=0
 SLUG_FILTER=""
 
 # shellcheck source=/dev/null
@@ -57,8 +48,9 @@ warn() { forge_warn "$@"; }
 
 usage() {
   cat <<EOF
-Usage: gen-og-images.sh [--slug SLUG] [--force] [--quality N]
-  --quality  ffmpeg -q:v 2..12 (default 5; lower = larger/better)
+Usage: gen-og-images.sh [--slug SLUG] [--force] [--quality N] [--dry-run]
+  --quality  JPEG quality 1..100 (default 80)
+  --dry-run  compute staleness and print counts; do not render
 EOF
 }
 
@@ -67,39 +59,19 @@ while [ $# -gt 0 ]; do
     --slug)    SLUG_FILTER="${2-}"; shift 2 ;;
     --force)   FORCE=1; shift ;;
     --quality) QUALITY="${2-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 — see gen-og-images.sh --help" ;;
   esac
 done
 
 # ── deps ──────────────────────────────────────────────────────────
-CHROME=""
-for c in google-chrome google-chrome-stable chromium chromium-browser; do
-  if command -v "$c" >/dev/null 2>&1; then CHROME="$c"; break; fi
-done
-if [ -z "$CHROME" ] && [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
-  CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-fi
-# Playwright-cached chromium as last resort (linux + mac)
-if [ -z "$CHROME" ]; then
-  for bin in \
-    "$HOME"/.cache/ms-playwright/chromium-*/chrome-linux*/chrome \
-    "$HOME"/.cache/ms-playwright/chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium
-  do
-    if [ -x "$bin" ]; then CHROME="$bin"; break; fi
-  done
-fi
-
-if [ -z "$CHROME" ]; then
-  warn "no chrome/chromium — skip OG images"
+if ! command -v python3 >/dev/null 2>&1; then
+  warn "python3 missing — skip OG images"
   exit 0
 fi
-if ! command -v ffmpeg >/dev/null 2>&1; then
-  warn "ffmpeg missing — skip OG images"
-  exit 0
-fi
-if ! command -v jq >/dev/null 2>&1; then
-  warn "jq missing — skip OG images"
+if [ ! -f "$LIB_DIR/og_render.py" ]; then
+  warn "og_render.py missing — skip OG images"
   exit 0
 fi
 if [ ! -d "$REG" ]; then
@@ -135,31 +107,16 @@ sha256_of() {
   fi
 }
 
-# Hash the exact craft HTML represented by the deploy tree, not a second read
-# from a hub that may be syncing concurrently. The share bar and forge OG block
-# are engine-owned overlays; use their exact inverses so engine/metadata changes
-# do not invalidate thumbnails.
-canonical_html_digest() {
-  local html="$1" tmp="" digest=""
-  if ! command -v python3 >/dev/null 2>&1 \
-      || [ ! -f "$SCRIPT_DIR/inject-share-bar.py" ] \
-      || [ ! -f "$SCRIPT_DIR/inject-og.py" ]; then
-    echo ""
-    return 0
-  fi
-  tmp="$(dirname "$html")/.og-source-$$.html"
-  if ! cp -f "$html" "$tmp"; then
-    echo ""
-    return 0
-  fi
-  if python3 "$SCRIPT_DIR/inject-share-bar.py" "$tmp" --strip \
-      >/dev/null 2>&1 \
-      && python3 "$SCRIPT_DIR/inject-og.py" "$tmp" --strip \
-      >/dev/null 2>&1; then
-    digest="$(sha256_of "$tmp")"
-  fi
-  rm -f "$tmp"
-  printf '%s\n' "$digest"
+# Registry JSON field. Empty on missing key or unreadable file.
+reg_field() {
+  python3 -c 'import json,sys
+p,k=sys.argv[1],sys.argv[2]
+try:
+    v=json.load(open(p,encoding="utf-8")).get(k)
+except Exception:
+    v=None
+print("" if v is None else v)
+' "$1" "$2"
 }
 
 # The proof binds both sides of the relation: the canonical source and the
@@ -192,73 +149,26 @@ is_stale() {
     || [ "$have_image" != "$image_digest" ]
 }
 
-# Render one HTML file → og.jpg next to it (full-bleed, no stage letterbox)
+# Render one HTML file → og.jpg next to it (cover-crop JPEG via Browser Run)
 render_one() {
   local slug="$1" html="$2"
   local dir
   dir="$(dirname "$html")"
   local out="$dir/og.jpg"
-  local tmp_png="$dir/.og-tmp-$$.png"
-  local tmp_html="$dir/.og-render-$$.html"
   local tmp_jpg="$dir/.og-tmp-$$.jpg"
 
-  # Temp HTML: strip share-bar + inject capture CSS.
-  # Do NOT force body background:#000 — that letterboxes light guides (forge-guide /
-  # diagrams) into a black void. Decks already set --stage-bg on html/body; pinning
-  # .deck-stage to 1920×1080 fills the viewport so the mat never shows anyway.
-  {
-    if grep -q 'forge-share-bar' "$html" 2>/dev/null; then
-      sed '/<!-- forge-share-bar -->/,/<!-- \/forge-share-bar -->/d' "$html"
-    else
-      cat "$html"
-    fi
-  } | sed '/<\/head>/i\
-<style id="forge-og-capture">\
-  html,body{margin:0!important;padding:0!important;overflow:hidden!important}\
-  .edit-toggle,.edit-hotzone,[data-forge-share-bar],[data-forge-toast]{display:none!important}\
-  .deck-viewport{background:transparent!important;inset:0!important}\
-  /* pin stage 1:1 at 1920×1080 — no letterbox scale from fit() */\
-  .deck-stage{transform:none!important;left:0!important;top:0!important;width:1920px!important;height:1080px!important}\
-  .slide.active{visibility:visible!important;opacity:1!important;pointer-events:auto!important}\
-</style>
-' >"$tmp_html"
-
-  local url="file://${tmp_html}"
-  # Capture at native deck size so fit() / stage scale has nothing to letterbox
-  if ! "$CHROME" \
-      --headless=new \
-      --disable-gpu \
-      --no-sandbox \
-      --hide-scrollbars \
-      --force-device-scale-factor=1 \
-      --window-size="${CAP_W},${CAP_H}" \
-      --virtual-time-budget=10000 \
-      --run-all-compositor-stages-before-draw \
-      --screenshot="$tmp_png" \
-      "$url" >/dev/null 2>&1; then
-    warn "$slug: chrome screenshot failed"
-    rm -f "$tmp_png" "$tmp_html" "$tmp_jpg"
+  if ! python3 "$LIB_DIR/og_render.py" render "$html" --out "$tmp_jpg" --quality "$QUALITY" >/dev/null 2>&1; then
+    warn "$slug: browser-run render failed"
+    rm -f "$tmp_jpg"
     return 1
   fi
-
-  if [ ! -s "$tmp_png" ]; then
-    warn "$slug: empty screenshot"
-    rm -f "$tmp_png" "$tmp_html" "$tmp_jpg"
-    return 1
-  fi
-
-  # Cover-crop 16:9 → OG 1200×630 (fills width, slight vertical crop — no side bars)
-  # + JPEG compress. No intermediate PNG committed.
-  if ! ffmpeg -y -loglevel error -i "$tmp_png" \
-      -vf "scale=${OG_W}:${OG_H}:force_original_aspect_ratio=increase,crop=${OG_W}:${OG_H}" \
-      -frames:v 1 -q:v "$QUALITY" "$tmp_jpg" 2>/dev/null; then
-    warn "$slug: ffmpeg jpeg failed"
-    rm -f "$tmp_png" "$tmp_html" "$tmp_jpg"
+  if [ ! -s "$tmp_jpg" ]; then
+    warn "$slug: browser-run render failed"
+    rm -f "$tmp_jpg"
     return 1
   fi
 
   mv -f "$tmp_jpg" "$out"
-  rm -f "$tmp_png" "$tmp_html" "$dir/og.png"
   local kb
   kb=$(( $(wc -c <"$out") / 1024 ))
   echo "  ✓ $slug → site/a/${slug}/og.jpg (${kb} kb, full-bleed, q=${QUALITY})"
@@ -273,13 +183,13 @@ total_kb=0
 
 shopt -s nullglob
 for reg in "$REG"/*.json; do
-  slug="$(jq -r '.slug // empty' "$reg")"
+  slug="$(reg_field "$reg" slug)"
   [ -n "$slug" ] || continue
   if [ -n "$SLUG_FILTER" ] && [ "$slug" != "$SLUG_FILTER" ]; then
     continue
   fi
 
-  path="$(jq -r '.path // empty' "$reg")"
+  path="$(reg_field "$reg" path)"
   [ -n "$path" ] || path="/a/${slug}/"
   rel="${path#/}"
   rel="${rel%/}"
@@ -294,16 +204,24 @@ for reg in "$REG"/*.json; do
 
   jpg="$(dirname "$html")/og.jpg"
   src_proof="$(dirname "$jpg")/og.src"
-  source_digest="$(canonical_html_digest "$html")"
+  source_digest="$(python3 "$LIB_DIR/og_render.py" digest "$html" 2>/dev/null || true)"
   image_digest=""
   [ ! -f "$jpg" ] || image_digest="$(sha256_of "$jpg")"
   # A stale proof from a standalone invocation must not survive a failed
   # renderer. The normal publish build already starts from a clean deploy tree.
-  rm -f "$src_proof"
+  # --dry-run must not touch a would-render slug's og.src (or og.jpg).
+  if [ "$DRY_RUN" -eq 0 ]; then
+    rm -f "$src_proof"
+  fi
   if [ "$FORCE" -eq 0 ] \
       && ! is_stale "$html" "$jpg" "$slug" "$source_digest" "$image_digest"; then
     record_source_proof "$src_proof" "$source_digest" "$image_digest"
     up_to_date=$((up_to_date + 1))
+    continue
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    rendered=$((rendered + 1))
     continue
   fi
 
@@ -319,5 +237,5 @@ done
 
 avg=0
 [ "$rendered" -gt 0 ] && avg=$((total_kb / rendered))
-echo "og-images — ${rendered} rendered (~${avg} kb avg), ${up_to_date} up-to-date, ${failed} failed (chrome+ffmpeg pipeline)"
+echo "og-images — ${rendered} rendered (~${avg} kb avg), ${up_to_date} up-to-date, ${failed} failed (browser-run pipeline)"
 exit 0

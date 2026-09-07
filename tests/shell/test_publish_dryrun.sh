@@ -62,10 +62,11 @@ EOF
 
 # materialize_engine requires a git work tree with site/404.html. Copy only
 # the plugin scripts the dry-run chain actually runs (build-site-from-hub,
-# hub-index, inject-share-bar, patch_wrangler) rather than `git archive` of
-# $ROOT: that fails in the CI docker job (`detected dubious ownership`) and
-# pulls in the whole repo for no benefit. Drop gen-og-images.sh so
-# gen_og_images is a silent no-op: no chrome, no ffmpeg, no delay.
+# hub-index, inject-share-bar, patch_wrangler, gen-og-images) rather than
+# `git archive` of $ROOT: that fails in the CI docker job (`detected dubious
+# ownership`) and pulls in the whole repo for no benefit. Keep
+# gen-og-images.sh — publish.sh must pass --dry-run so the kernel never
+# POSTs. A wrap on the copied og_render.py records any accidental render.
 mkdir -p "$TD/engine/site" "$TD/engine/plugins/silex-forge"
 printf '404\n' > "$TD/engine/site/404.html"
 # Real wrangler.toml: patch_wrangler_for_deploy dies if the SHARES kv binding
@@ -77,7 +78,60 @@ cp -a "$ROOT/plugins/silex-forge/scripts" "$TD/engine/plugins/silex-forge/script
 cp "$ROOT/plugins/silex-forge/forge.config.example.json" \
   "$TD/engine/plugins/silex-forge/forge.config.example.json" \
   || fail "engine fixture: cannot copy forge.config.example.json"
-rm -f "$TD/engine/plugins/silex-forge/scripts/gen-og-images.sh"
+OG_RENDER_COPY="$TD/engine/plugins/silex-forge/scripts/lib/og_render.py"
+[ -f "$OG_RENDER_COPY" ] || fail "engine fixture: og_render.py missing"
+mv "$OG_RENDER_COPY" "$OG_RENDER_COPY.real"
+# Marker path via env so the wrap can be a quoted heredoc (no bash $ expansion
+# of sys.argv). build-site-from-hub.py imports canonical_digest, so the wrap
+# re-exports the real kernel on import and only intercepts the render CLI.
+export OG_RENDER_MARKER="$TD/og-render-called"
+cat > "$OG_RENDER_COPY" <<'PY'
+#!/usr/bin/env python3
+"""Test wrap: digest stays real; render is recorded and never POSTs."""
+import importlib.machinery
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+REAL = Path(__file__).with_name("og_render.py.real")
+MARKER = Path(os.environ.get("OG_RENDER_MARKER", "og-render-called"))
+
+def _load_real():
+    loader = importlib.machinery.SourceFileLoader("_og_render_real", str(REAL))
+    spec = importlib.util.spec_from_loader("_og_render_real", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "render":
+        MARKER.write_text("called\n")
+        out = None
+        args = sys.argv[2:]
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "--out" and i + 1 < len(args):
+                out = args[i + 1]
+                i += 2
+                continue
+            if a.startswith("--out="):
+                out = a.split("=", 1)[1]
+                i += 1
+                continue
+            i += 1
+        jpeg = b"FAKE_OG_JPEG"
+        if out:
+            Path(out).write_bytes(jpeg)
+        print(len(jpeg))
+        sys.exit(0)
+    os.execv(sys.executable, [sys.executable, str(REAL), *sys.argv[1:]])
+else:
+    _mod = _load_real()
+    globals().update({k: v for k, v in vars(_mod).items() if k != "__name__"})
+PY
 git -C "$TD/engine" init -q >/dev/null 2>&1 || fail "engine fixture: git init failed"
 git -C "$TD/engine" config user.email "forge-test@example.com"
 git -C "$TD/engine" config user.name "Forge Test"
@@ -222,6 +276,13 @@ refute() {
   fi
 }
 
+assert_og_not_rendered() {
+  # $1 = label
+  if [ -f "$TD/og-render-called" ]; then
+    fail "$1: og_render.py render ran during a dry run (publish.sh did not pass --dry-run)"
+  fi
+}
+
 # ------------------------------------------------------- library-only sourcing
 export FORGE_PUBLISH_LIB_ONLY=1
 # shellcheck source=/dev/null
@@ -276,6 +337,7 @@ reset_fixture_env() {
     rm -rf "$WORK"
   fi
   : > "$REC"
+  rm -f "$TD/og-render-called"
 }
 
 # =============================================================== dry-run publish
@@ -329,6 +391,8 @@ pass "the whole hub write chain ran, into the sandbox"
 # 3. no wrangler, no shlink, no state-changing curl
 [ ! -s "$REC" ] || fail "a mutating CLI ran during the dry run: $(tr '\n' ';' < "$REC")"
 pass "dry-run publish invokes no wrangler / shlink / mutating curl"
+assert_og_not_rendered "publish --dry-run"
+pass "dry-run publish does not call og_render.py render"
 
 # 3b. read-only crossings are allowed, but only those: every recorded curl must
 # be a KV *values* GET, never a namespace write or another endpoint.
@@ -408,6 +472,7 @@ grep -q 'CLOUDFLARE_API_TOKEN' "$gate" \
   || fail "dry run failed without naming the missing CLOUDFLARE_API_TOKEN"
 refute 'dry run OK' "$gate" "dry run printed its OK line despite a failed precondition"
 [ ! -s "$REC" ] || fail "a mutating CLI ran on the failed-precondition path: $(tr '\n' ';' < "$REC")"
+assert_og_not_rendered "empty-token gate"
 pass "empty CLOUDFLARE_API_TOKEN makes the dry run exit non-zero"
 
 # ================================================================ --share: no KV
@@ -425,6 +490,7 @@ fi
   || fail "dry-run --share mutated something: $(tr '\n' ';' < "$REC")"
 grep -q 'dry run' "$share_out" || fail "dry-run --share printed no dry-run line"
 assert_hub_untouched "publish --share --dry-run"
+assert_og_not_rendered "publish --share --dry-run"
 pass "dry-run --share mints no KV entry, no HTTP call, no shortlink"
 
 # ====================================================== --dry-run is positional
@@ -449,6 +515,7 @@ cli_case() {
     || fail "CLI $label: no dry-run plan — the flag was not consumed"
   [ ! -s "$REC" ] || fail "CLI $label deployed for real: $(tr '\n' ';' < "$REC")"
   assert_hub_untouched "CLI $label"
+  assert_og_not_rendered "CLI $label"
 }
 
 cli_case "--dry-run before the slug"        --dry-run cli-before "$TD/src/deck.html"

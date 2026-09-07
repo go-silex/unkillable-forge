@@ -22,8 +22,9 @@
 # fallback for a standalone run with no resolvable hub.
 #
 # Isolation: hub + deploy tree in mktemp -d, FORGE_CONFIG points at a temp
-# config, and chrome/ffmpeg are recording stubs — no browser, no network, no
-# real hub. bash 3.2-safe.
+# config, and lib/og_render.py is a stub (digest/subresources/payload exec the
+# real kernel; render writes deterministic bytes, never networks). Renderer is
+# Browser Run. bash 3.2-safe.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -40,38 +41,8 @@ note() { echo "      $*"; }
 
 echo "og staleness tests"
 
-if ! command -v jq >/dev/null 2>&1; then
-  echo "  skip: jq absent (gen-og-images.sh requires it and exits 0 early)"
-  exit 0
-fi
-
 TD="$(mktemp -d)"
 trap 'rm -rf "$TD"' EXIT
-
-# --- chrome + ffmpeg stubs ---------------------------------------------------
-# render_one calls chrome with --screenshot=<png>, then ffmpeg with the jpg as
-# its last argument. The stubs write deterministic bytes, so any difference in
-# the assertions below comes from the staleness decision, never from a renderer.
-BIN="$TD/bin"
-mkdir -p "$BIN"
-cat > "$BIN/google-chrome" <<'SH'
-#!/bin/sh
-for a in "$@"; do
-  case "$a" in
-    --screenshot=*) printf 'FAKEPNG' > "${a#--screenshot=}" ;;
-  esac
-done
-exit 0
-SH
-cat > "$BIN/ffmpeg" <<'SH'
-#!/bin/sh
-out=""
-for a in "$@"; do out="$a"; done
-printf 'FAKEJPEG' > "$out"
-exit 0
-SH
-chmod +x "$BIN/google-chrome" "$BIN/ffmpeg"
-export PATH="$BIN:$PATH"
 
 # --- fixture -----------------------------------------------------------------
 SLUG="deck-one"
@@ -95,6 +66,52 @@ cp -a "$ROOT/plugins/silex-forge/scripts" "$TD/repo/plugins/silex-forge/scripts"
 cp -a "$ROOT/plugins/silex-forge/forge.config.example.json" \
   "$TD/repo/plugins/silex-forge/forge.config.example.json"
 GEN="$TD/repo/plugins/silex-forge/scripts/gen-og-images.sh"
+
+# --- og_render.py stub -------------------------------------------------------
+# digest/subresources/payload must stay the real kernel (persist/staleness
+# assertions hash the canonical source). render writes deterministic bytes so
+# any difference in the assertions below comes from the staleness decision,
+# never from Browser Run.
+OG_LIB="$TD/repo/plugins/silex-forge/scripts/lib"
+mv "$OG_LIB/og_render.py" "$OG_LIB/og_render.py.real"
+cat > "$OG_LIB/og_render.py" <<'PY'
+#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+
+cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+real = Path(__file__).with_name("og_render.py.real")
+if cmd in ("digest", "subresources", "payload"):
+    os.execv(sys.executable, [sys.executable, str(real), *sys.argv[1:]])
+
+if cmd == "render":
+    out = None
+    args = sys.argv[2:]
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--out" and i + 1 < len(args):
+            out = args[i + 1]
+            i += 2
+            continue
+        if a.startswith("--out="):
+            out = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a in ("--quality", "--timeout") and i + 1 < len(args):
+            i += 2
+            continue
+        i += 1
+    if not out:
+        sys.exit(1)
+    data = b"FAKE_OG_JPEG"
+    Path(out).write_bytes(data)
+    print(len(data))
+    sys.exit(0)
+
+sys.exit(2)
+PY
 
 DEPLOY="$TD/repo/site/a/$SLUG"
 JPG="$DEPLOY/og.jpg"
@@ -213,7 +230,8 @@ pass "a missing thumbnail renders even when the digest matches"
 persist
 
 # --- 7. no resolvable hub falls back to the mtime comparison ----------------
-# gen-og-images.sh must stay usable standalone, without a config or python3.
+# gen-og-images.sh must stay usable standalone, without a resolvable hub.
+# python3 is required for digest; empty ARTIFACTS still degrades to mtimes.
 cat > "$TD/cfg-nohub.json" <<EOF
 {"version": 1, "hub_root": "$TD/absent", "artifacts_dir": "artifacts",
  "site_dir": "site", "registry_dir": "registry", "internal_prefix": "a",
