@@ -98,6 +98,7 @@ When changing behavior, update **skills** if user-facing workflows change.
    bash scripts/secret-scan.sh   # two TruffleHog passes, repo-pinned scanner
    bash scripts/lint-shell.sh    # ShellCheck
    bash scripts/test-all.sh      # vitest + python/shell + release plugin (needs npm ci)
+   python3 plugins/silex-forge/scripts/lib/load_config.py --doctor  # needs local hub config
    ```
 
    `npm ci` installs the pre-push hook (lefthook, via the `prepare` script) unless
