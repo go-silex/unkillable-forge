@@ -149,24 +149,21 @@ _SKIP_PREFIXES = (
 # Text formats whose own relative refs must be rewritten before they are
 # inlined: a data: URI has an opaque origin, so a stylesheet that still carried
 # a relative ref would resolve it against the data: URL.
-#
-# .html is deliberately NOT here. Inlining a nested document was added
-# speculatively -- the only artifact that references one (lgu-recap ->
-# deck.html) has no relative refs of its own, so it bought nothing -- and it
-# was the sole cause of a measured regression: that page's remote tella.tv
-# embed rendered a client-side error instead of its player once a 3 MB data:
-# iframe sat next to it. An un-inlined relative iframe simply fails to load,
-# exactly as it already does for an anonymous visitor.
 _TEXT_INLINE_EXTS = {".css"}
 
 # Refs that must be left exactly as they are. _TEXT_INLINE_EXTS only decides
 # whether a carried file's OWN refs get rewritten first; this set decides
-# whether the file is carried at all. Nested documents are not: embedding
-# deck.html as a 3 MB data: iframe was the sole cause of a measured regression
-# (lgu-recap's remote tella.tv player rendered its own client-side error box
-# instead of the video poster). An un-inlined relative iframe simply fails to
-# load, exactly as it already does for an anonymous visitor. They stay out of
-# the digest too, since the payload never carries them.
+# whether the file is carried at all.
+#
+# Nested documents are not carried. Inlining one was added speculatively: the
+# only artifact that references one (lgu-recap -> deck.html) has no relative
+# refs of its own, so embedding it as a 3 MB data: iframe bought nothing. It is
+# NOT the cause of that slug's degraded card -- measured after this change, the
+# remote tella.tv player still renders its own client-side error box, because
+# the payload page has an opaque origin either way (see the module docstring).
+# An un-inlined relative iframe simply fails to load, exactly as it already
+# does for an anonymous visitor. They stay out of the digest too, since the
+# payload never carries them.
 _NEVER_INLINE_EXTS = {".html", ".htm"}
 _MAX_REF_DEPTH = 3
 
