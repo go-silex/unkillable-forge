@@ -927,10 +927,18 @@ PY
 }
 
 # Kernel digest (og_render.py digest): v2 canonical HTML + subresources.
+# Resolved through $(SCRIPTS) like share_bar_script and build_from_hub:
+# gen-og-images.sh and build-site-from-hub.py both run the engine clone's copy,
+# and all three must be the same implementation or persist_og_to_hub compares a
+# clone-produced proof against an installed-plugin digest, never matches, and
+# re-renders on every publish forever.
 # Empty on failure so persist_og_to_hub skips rather than writing a bad proof.
 canonical_og_source_digest() {
-  local html="$1" digest=""
-  digest="$(python3 "$LIB_DIR/og_render.py" digest "$html" 2>/dev/null)" || digest=""
+  local html="$1" digest="" kernel=""
+  kernel="$(SCRIPTS)/lib/og_render.py"
+  [ -f "$kernel" ] || kernel="$LIB_DIR/og_render.py"
+  [ -f "$kernel" ] || { printf '\n'; return 0; }
+  digest="$(python3 "$kernel" digest "$html" 2>/dev/null)" || digest=""
   printf '%s\n' "$digest"
 }
 
