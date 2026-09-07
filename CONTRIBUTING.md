@@ -147,9 +147,12 @@ PR titles and commits follow [Conventional Commits](https://www.conventionalcomm
 `feat` `fix` `docs` `style` `refactor` `perf` `test` `build` `ci` `chore` `revert`,
 and no trailing period. `!` marks a breaking change (`feat(share)!: …`).
 
-This is a contract, not a style preference: on merge to `main` the title and the
-matching CHANGELOG section are what `scripts/check_plugin_versions.py --print-notes`
-turns into the GitHub Release body. `.github/workflows/pr-title.yml` checks it.
+Checked by `.github/workflows/pr-title.yml`. The reason is a readable history,
+not wiring: every commit in this repo already follows the convention, and the PR
+title is what a reviewer reads in `gh pr list` and what you carry into the
+CHANGELOG section by hand. No tool parses it — `--print-notes` reads
+`CHANGELOG.md`, and the Release title comes from the tag
+(`silex-forge X.Y.Z`).
 
 Reviewers may ask you to update skills, docs, or CHANGELOG.
 

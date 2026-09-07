@@ -1,9 +1,12 @@
 name: PR title
 
-# The squash/merge subject becomes the release note material read by
-# scripts/check_plugin_versions.py --print-notes, so a non-conventional title
-# is a defect, not a style nit. Hand-rolled instead of a third-party action:
-# the check is 20 lines of grep and needs no pinned SHA to audit.
+# Consistency gate on human-readable metadata: every commit in this repo's
+# history already follows Conventional Commits, and the PR title is what a
+# reviewer reads in `gh pr list` and carries into the CHANGELOG by hand.
+# No tool consumes it — `check_plugin_versions.py --print-notes` reads
+# CHANGELOG.md, and release-plugin.sh builds the Release title from the tag.
+# Hand-rolled instead of a third-party action: 20 lines of grep, no pinned
+# SHA to audit.
 
 on:
   pull_request:
