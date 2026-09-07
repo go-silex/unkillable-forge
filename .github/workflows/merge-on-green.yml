@@ -1,0 +1,189 @@
+# Merge-on-green — go-silex Free plan (gosilex-ci App, label reviewed).
+# Native `allow_auto_merge` is off on this org.
+#
+# Anchor is the `check` job (ci.yml). That job's display name is `check`
+# (no `name:` override). The gate itself is universal: every other
+# check-run on the head SHA must be completed with none failed. Do not
+# list `test-os / macos-bash32` (matrix name) or `TruffleHog` as extra
+# required anchors — a renamed or skipped check would block every merge.
+# TruffleHog is a separate workflow (`Secret scan`); it still gates via
+# the universal pending/failed rule. `workflow_run` watches it (and
+# `PR title`) so an evaluation that ran while it was pending retries
+# when it finishes, instead of waiting for another label event.
+#
+# Merges when ALL hold:
+#   1. label `reviewed`
+#   2. check-run `check` present (proves ci.yml ran)
+#   3. every other check-run completed, none failed
+#   4. PR mergeable, not draft
+#
+# Merge method: merge commit.
+# Without vars.CI_APP_CLIENT_ID + secrets.CI_APP_PRIVATE_KEY → evaluate-only (manual merge).
+name: Merge on Green
+
+on:
+  pull_request:
+    types: [labeled]
+    branches: [main]
+  workflow_run:
+    workflows: [CI, Secret scan, PR title]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to evaluate (optional; blank = all reviewed open PRs)
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+  checks: read
+  statuses: read
+
+concurrency:
+  group: merge-on-green-${{ github.event.pull_request.number || github.event.workflow_run.head_sha || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  merge-on-green:
+    name: merge-on-green
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Resolve gosilex-ci availability
+        id: cfg
+        env:
+          APP_ID: ${{ vars.CI_APP_CLIENT_ID }}
+          # Both halves are required. Gating on APP_ID alone turns a
+          # half-configured repo into a hard failure: the mint step below errors
+          # out on an empty private key, so every PR goes red instead of falling
+          # back to manual merge. Observed on silex-plugins 2026-08-31.
+          APP_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_ID" ] && [ -n "$APP_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "gosilex-ci: App ID + private key present → auto-merge enabled"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            missing=""
+            [ -n "$APP_ID" ]  || missing="vars.CI_APP_CLIENT_ID"
+            [ -n "$APP_KEY" ] || missing="${missing:+$missing and }secrets.CI_APP_PRIVATE_KEY"
+            echo "::warning title=Manual merge required::gosilex-ci not configured ($missing missing)."
+          fi
+
+      - name: Mint app token (gosilex-ci)
+        id: app
+        if: steps.cfg.outputs.enabled == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+
+      - name: Evaluate green PRs
+        id: evaluate
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const SELF_JOB = 'merge-on-green';
+            const REQUIRED_LABEL = 'reviewed';
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+            const toMerge = [];
+
+            const candidates = new Set();
+            const dispatchPr = context.payload.inputs && context.payload.inputs.pr;
+            if (dispatchPr) {
+              candidates.add(parseInt(dispatchPr, 10));
+            } else if (context.payload.pull_request) {
+              candidates.add(context.payload.pull_request.number);
+            } else if (context.payload.workflow_run) {
+              for (const pr of context.payload.workflow_run.pull_requests || []) {
+                candidates.add(pr.number);
+              }
+            }
+            if (candidates.size === 0) {
+              const { data: open } = await github.rest.pulls.list({
+                owner: context.repo.owner, repo: context.repo.repo, state: 'open', per_page: 100,
+              });
+              for (const pr of open) {
+                if (pr.labels.some((l) => l.name === REQUIRED_LABEL)) candidates.add(pr.number);
+              }
+            }
+
+            for (const number of candidates) {
+              const tag = `PR #${number}`;
+              let pr;
+              for (let i = 0; i < 6; i++) {
+                ({ data: pr } = await github.rest.pulls.get({
+                  owner: context.repo.owner, repo: context.repo.repo, pull_number: number,
+                }));
+                if (pr.mergeable !== null || pr.state !== 'open') break;
+                await sleep(3000);
+              }
+              if (pr.state !== 'open') { core.info(`${tag}: not open — skip.`); continue; }
+              if (pr.draft) { core.info(`${tag}: draft — skip.`); continue; }
+              if (pr.merged) { core.info(`${tag}: already merged — skip.`); continue; }
+              if (!pr.labels.some((l) => l.name === REQUIRED_LABEL)) {
+                core.info(`${tag}: no '${REQUIRED_LABEL}' label — skip.`); continue;
+              }
+              if (pr.mergeable === false) { core.info(`${tag}: conflict — skip.`); continue; }
+              if (pr.mergeable === null) { core.info(`${tag}: mergeability computing — skip.`); continue; }
+
+              const sha = pr.head.sha;
+              const runs = await github.paginate(github.rest.checks.listForRef, {
+                owner: context.repo.owner, repo: context.repo.repo, ref: sha, per_page: 100,
+              });
+              const others = runs.filter((r) => r.name !== SELF_JOB);
+              if (others.length === 0) {
+                core.info(`${tag}: no check runs — skip.`);
+                continue;
+              }
+              // Check-run name is the job's display name: job `check` renders
+              // as `check` (ci.yml has no name: override). TruffleHog is a
+              // separate check-run; the universal pending/failed filter
+              // gates it. Do not require it by name.
+              const hasCi = others.some((r) => (r.name || '').toLowerCase() === 'check');
+              if (!hasCi) {
+                core.info(`${tag}: missing check 'check' — skip.`);
+                continue;
+              }
+              const pending = others.filter((r) => r.status !== 'completed');
+              const failed = others.filter(
+                (r) => r.status === 'completed' && !['success', 'neutral', 'skipped'].includes(r.conclusion),
+              );
+              if (pending.length) {
+                core.info(`${tag}: pending ${pending.map((r) => r.name).join(', ')} — skip.`);
+                continue;
+              }
+              if (failed.length) {
+                core.info(`${tag}: failed — skip.`);
+                continue;
+              }
+
+              core.info(`${tag}: reviewed + checks green → queue merge.`);
+              toMerge.push(number);
+            }
+
+            core.setOutput('to_merge', JSON.stringify(toMerge));
+
+      - name: Merge green PRs
+        if: >-
+          steps.cfg.outputs.enabled == 'true' &&
+          steps.app.outcome == 'success' &&
+          steps.evaluate.outputs.to_merge != '' &&
+          steps.evaluate.outputs.to_merge != '[]'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          TO_MERGE: ${{ steps.evaluate.outputs.to_merge }}
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const toMerge = JSON.parse(process.env.TO_MERGE || '[]');
+            for (const number of toMerge) {
+              await github.rest.pulls.merge({
+                owner: context.repo.owner, repo: context.repo.repo, pull_number: number,
+                merge_method: 'merge',
+              });
+              core.notice(`PR #${number}: merged by gosilex-ci.`);
+            }
