@@ -67,6 +67,7 @@ S=plugins/silex-forge/scripts/publish.sh
 "$S" --list
 "$S" --remove my-deck
 "$S" --rebuild-index
+"$S" --rebuild-index --force-og
 
 "$S" my-deck ./deck.html --dry-run # build + validate, no deploy, no KV
 "$S" --rebuild-index --dry-run
@@ -78,9 +79,10 @@ Deploy: `publish.sh` → `wrangler pages deploy` (token in `~/.config/silex/forg
 — engine materialize, build from hub, og, share-bar inject, `wrangler.toml`
 patch — against a **sandboxed copy of the hub** (`$WORK/hub-root`, with
 `FORGE_CONFIG` redirected so the Python helpers follow), then prints the deploy
-plan instead of deploying. The online preflight still runs: it is a gate, not a
-preview. Nothing is written to the real hub, no KV entry is touched, no
-shortlink is minted.
+plan instead of deploying. `publish.sh --dry-run` passes `--dry-run` to
+`gen-og-images.sh`, which does not POST. The online preflight still runs: it
+is a gate, not a preview. Nothing is written to the real hub, no KV entry is
+touched, no shortlink is minted.
 
 ## Hub drift guard
 
@@ -276,7 +278,7 @@ plugins/silex-forge/scripts/forge-doctor.sh
 plugins/silex-forge/scripts/publish.sh --rebuild-index  # hub → wrangler Pages
 ```
 
-`--write` merges the discovered keys into `forge.env` (prints **key names only**) and persists the confirmed `pages_project` into an **existing** `forge.config.json` — it never creates that file. Never discoverable: `CLOUDFLARE_API_TOKEN` (API token permissions: Pages Edit · Workers KV Storage Edit · Account Settings Read — not the OAuth scopes above) and `hub_root` (local vault path). Both come from the operator via **`/forge-setup`**.
+`--write` merges the discovered keys into `forge.env` (prints **key names only**) and persists the confirmed `pages_project` into an **existing** `forge.config.json` — it never creates that file. Never discoverable: `CLOUDFLARE_API_TOKEN` (API token permissions: Pages Edit · Workers KV Storage Edit · Account Settings Read · **Browser Run Write** — not the OAuth scopes above) and `hub_root` (local vault path). Both come from the operator via **`/forge-setup`**.
 
 | `forge-discover.sh` exit | Meaning | Next |
 |---|---|---|
@@ -346,14 +348,26 @@ A forge on someone else's Cloudflare account: `forge-provision.sh` + `"vault_mar
 
 ## OG thumbnails (landing)
 
+Rendered **before** `wrangler pages deploy` by Cloudflare Browser Run REST
+(`html` payload, JPEG out), invoked from `gen-og-images.sh` via `lib/og_render.py`.
+Publisher machines need `python3` and the existing `CLOUDFLARE_API_TOKEN` with
+**Browser Run Write** — not chrome/chromium/ffmpeg/jq.
+
+Storage is unchanged: `site/a/<slug>/og.jpg` in the Pages snapshot, a copy in
+the hub SSOT, `og.src` hub-only proof (v2 digest = canonical HTML + subresources).
+
 ```bash
-# pure sh: Chrome headless + ffmpeg (no Python)
 plugins/silex-forge/scripts/gen-og-images.sh
-plugins/silex-forge/scripts/gen-og-images.sh --slug my-slug --force --quality 4
+plugins/silex-forge/scripts/gen-og-images.sh --slug my-slug --force --quality 80
 ```
 
-Deps: `google-chrome`|`chromium`, `ffmpeg`, `jq`.  
-Writes `site/a/<slug>/og.jpg` (1200×630). Wired in `publish.sh` + `--rebuild-index`.
+`--force` is a `gen-og-images.sh` flag. `publish.sh --force-og` passes it
+through. `--rebuild-index` without `--force-og` still only re-renders `is_stale`
+slugs. `--quality` is JPEG 1–100, default 80.
+
+Best-effort: missing token / Browser Run failure warns and publish continues.
+A modified artifact no longer keeps a previous thumbnail when render is skipped.
+Doctor no longer probes chrome/ffmpeg/jq for OG.
 
 ## Agent rules
 

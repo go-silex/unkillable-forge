@@ -75,7 +75,7 @@ and CI runs the suite on `macos-latest` plus a `bash:3.2` container.
 | `bash` ≥ 3.2, `python3` ≥ 3.9 (stdlib only), `git`, `curl` | everything |
 | `wrangler` **or** `npx` | `wrangler pages deploy` |
 | `flock` | optional — a portable `mkdir` lock is used when absent, or when `flock` has no `-w` (BusyBox) |
-| `google-chrome`\|`chromium`, `ffmpeg`, `jq` | OG thumbnails (skipped with a warning if missing) |
+| `CLOUDFLARE_API_TOKEN` with **Browser Run Write** | OG thumbnails via Cloudflare Browser Run — no chrome/ffmpeg/jq. Missing token / render failure warns, publish continues |
 
 ### Install the plugin
 
@@ -162,7 +162,7 @@ Two different Cloudflare credentials — do not mint one from the other's list:
 | Credential | Used by | Needs |
 |---|---|---|
 | `wrangler login` **OAuth** | `forge-discover.sh`, `forge-provision.sh`, `--share` KV fallback | scopes `pages (write)`, `workers_kv (write)` |
-| `CLOUDFLARE_API_TOKEN` in `forge.env` | `publish.sh` — every deploy | permissions Account · Cloudflare Pages · **Edit** · Account · Workers KV Storage · **Edit** · Account · Account Settings · **Read** |
+| `CLOUDFLARE_API_TOKEN` in `forge.env` | `publish.sh` — every deploy | permissions Account · Cloudflare Pages · **Edit** · Account · Workers KV Storage · **Edit** · Account · Account Settings · **Read** · Account · Browser Run · **Write** |
 
 Discovery is OAuth-only and never sees a token; deploy is token-only and
 `publish.sh` dies without one.
@@ -265,6 +265,7 @@ S=plugins/silex-forge/scripts/publish.sh
 "$S" --list
 "$S" --remove my-deck
 "$S" --rebuild-index
+"$S" --rebuild-index --force-og
 
 "$S" my-deck ./deck.html --dry-run                  # build + validate, deploy nothing
 "$S" --rebuild-index --dry-run
@@ -275,14 +276,26 @@ doctor issues and names `/forge-setup` rather than deploying with example
 defaults. `--share <slug>` checks the artifact exists in the hub before it
 deploys anything.
 
+OG thumbnails are rendered **before** `wrangler pages deploy` by Cloudflare
+Browser Run REST (`html` payload, JPEG out), invoked from `gen-og-images.sh`
+via `lib/og_render.py`. Storage is unchanged: `site/a/<slug>/og.jpg` in the
+Pages snapshot, a copy in the hub SSOT, `og.src` hub-only proof (v2 digest =
+canonical HTML + subresources). `--force` remains a `gen-og-images.sh` flag;
+`publish.sh --force-og` passes it through. `--rebuild-index` without
+`--force-og` still only re-renders `is_stale` slugs. `--quality` is JPEG 1–100,
+default 80. Best-effort: missing token / Browser Run failure warns and publish
+continues. A modified artifact no longer keeps a previous thumbnail when
+render is skipped.
+
 ### `--dry-run`
 
 Accepted on every command, anywhere in argv. The whole chain runs for real —
 engine materialize, build from the hub, og thumbnails, share-bar injection,
 `wrangler.toml` patch — but against a **sandboxed copy of the hub** under
 `$WORK/hub-root`, with `FORGE_CONFIG` redirected so the Python helpers
-(`build-site-from-hub.py`, `hub-index.py`) follow the same redirect. Instead of
-deploying it prints the plan:
+(`build-site-from-hub.py`, `hub-index.py`) follow the same redirect.
+`publish.sh --dry-run` passes `--dry-run` to `gen-og-images.sh`, which does
+not POST. Instead of deploying it prints the plan:
 
 ```
 ▸ dry run — no deploy, no KV mutation

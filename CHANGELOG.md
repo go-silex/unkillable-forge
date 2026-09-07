@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+### Changed
+
+- Dropped chrome, ffmpeg, and jq from the publisher machine for OG thumbnails. Render now happens before `wrangler pages deploy` via Cloudflare Browser Run (`gen-og-images.sh` → `lib/og_render.py`). `publish.sh` gained `--force-og`; `--quality` is JPEG 1–100, default 80.
+
 ## [1.17.0] - 2026-09-06
 
 ### Added
