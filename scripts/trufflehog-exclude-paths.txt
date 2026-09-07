@@ -1,0 +1,28 @@
+# TruffleHog --exclude-paths (newline-separated regexes) for the CUSTOM pass only.
+# `#` comments are stripped by scripts/secret-scan.sh.
+#
+# The generic --only-verified pass deliberately runs with NO exclude list: a live
+# Cloudflare token pasted into a fixture is a real leak, and API verification
+# tells it apart from a fake one with no false positive (measured: 11671 chunks,
+# 0 findings on this tree). Excluding tests/ there would create a blind spot the
+# hand-rolled git grep never had.
+#
+# The custom pass is the opposite case — its findings are unverifiable by
+# construction, so tests/ must be excluded, matching the policy already written
+# in ci.yml (":!tests/** fake tokens / contract fixtures").
+# Prefer fixing sources over growing this list.
+
+# Build / deps / envs / local indexes
+(^|/)node_modules/
+(^|/)\.venv/
+(^|/)dist/
+(^|/)\.turbo/
+(^|/)\.git/
+(^|/)\.cache/
+(^|/)\.wrangler/
+(^|/)\.cocoindex_code/
+(^|/)coverage/
+(^|/)__pycache__/
+
+# Fake credentials and contract fixtures — same exemption as ci.yml
+(^|/)tests/

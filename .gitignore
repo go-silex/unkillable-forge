@@ -22,3 +22,6 @@ __pycache__/
 /site/manifest.json
 /registry/*.json
 **/forge.env
+
+# repo-pinned tooling (scripts/secret-scan.sh)
+.cache/

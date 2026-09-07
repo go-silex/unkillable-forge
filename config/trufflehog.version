@@ -1,0 +1,29 @@
+# Pin SSoT for the secret scanner. Consumed by scripts/secret-scan.sh, which is
+# the single entrypoint for both the pre-push hook and the CI workflow.
+#
+# Checksums are the upstream release ones, copied verbatim from
+# roxabi-boilerplate-cf/config/kit/trufflehog.version (same version). Re-derive from
+# https://github.com/trufflesecurity/trufflehog/releases/download/v<ver>/trufflehog_<ver>_checksums.txt
+#   sha256_<target>     = the release tar.gz
+#   sha256_bin_<target> = the extracted `trufflehog` binary
+#
+# BUMPING IS MANUAL, ON PURPOSE. CI runs `bash scripts/secret-scan.sh`, not the
+# trufflesecurity/trufflehog action, so there is no `uses:` for Dependabot's
+# github-actions ecosystem to track, and no ecosystem tracks this file. What that
+# actually costs is Dependabot *security alerts* on the action repository — not
+# version bumps: the fleet kit keeps a `uses:` and still ignores Dependabot's
+# version PRs, bumping here by hand. Calling the script directly is what lets us
+# own --fail on both passes and pin the scanner itself (the action defaults to
+# `version: latest` and would pull a floating image behind a pinned SHA).
+#
+# action_sha is kept for provenance only: no workflow in this repo uses it.
+version=3.97.1
+action_sha=20652fbbdefffcdaa493a5bf57ab2ac6b1db715b
+sha256_darwin_amd64=1515710bb16be5653ca9986c27ecd1a0e7536fc6e53ad46f7100992692f6a05f
+sha256_darwin_arm64=1af86cf30c1cc5c1735ec6af9292b399ec9bed3ff1b30be13fcbfd4a30ab449a
+sha256_linux_amd64=f863ea3a8d786f7d097870496c977944cce7372a2fe1e56707d965016e543ece
+sha256_linux_arm64=57bfcc0988aae3f2ef97e74abe1138cf37a8fbd84dd26299062c77a6a6b125dd
+sha256_bin_darwin_amd64=79878e05228d92d97e54a8fea214682736e80f2d7e0810040a348160972ca994
+sha256_bin_darwin_arm64=f6899e5521ff060634a9599e02215195d29d330e9a902feb3f5322eedcb7ba21
+sha256_bin_linux_amd64=591136c64476b0f3545f5863aa96c2b3a3406c1348d53a8065baf694e7a36829
+sha256_bin_linux_arm64=5a7839b1bcd7f8304946dbeceb007c1b74d52f9c1e9708ff98196ae1018d11e6
