@@ -1,0 +1,59 @@
+# Custom TruffleHog detectors for the INFRA-ID class: Cloudflare account id, KV
+# namespace id, Access AUD. AGENTS.md agent rule 11 forbids all three in git.
+#
+# WHY THIS FILE EXISTS
+# TruffleHog verifies a finding by calling the issuing provider's API. An account
+# id or a KV namespace id is an *identifier*, not a credential — there is no
+# endpoint that says "this is valid and secret", so findings are necessarily
+# unverified and `--only-verified` discards them silently. Adding a detector
+# without dropping that flag gives a green scan and no coverage: the worst
+# outcome. Hence a separate pass, without that flag, scoped to this config.
+#
+# => Any run using this config MUST NOT pass `--only-verified`, and MUST pass
+#    `--fail` (measured: 4 findings with rc 0 without it, rc 183 with it).
+#
+# THESE DETECTORS DO NOT REPLACE the `Secret / infra ID scan` step in ci.yml.
+# That step runs `git grep` over the whole checked-out tree on every run, so an
+# id already committed keeps failing until it is removed. This pass is scoped by
+# whatever the caller gives it, and the two share no semantics. Keep both.
+#
+# MEASURED (trufflehog 3.97.1, filesystem, ghcr image at the pinned version):
+#   fixtures  CLOUDFLARE_ACCOUNT_ID=<32 hex>            -> 1 finding
+#             FORGE_SHARES_KV_ID=<32 hex>               -> 1 finding
+#             CF_ACCESS_AUD=<64 hex>                    -> 1 finding
+#             wrangler.toml `id = "<32 hex>"`           -> 1 finding
+#             empty values / `id = "YOUR_KV_NAMESPACE_ID"` -> 0
+#             `uses: actions/checkout@<40 hex>`         -> 0 (no keyword in chunk)
+#   real tree (126 chunks, tests/ excluded)             -> 0 findings
+#   before excluding tests/: 2 findings, both fake ids in
+#   tests/shell/test_publish_dryrun.sh — the class ci.yml already exempts.
+#
+# RE2, not PCRE: CustomRegex compiles with regexp.Compile, so `(?!…)` is a parse
+# error. `(?:[^0-9a-f]|$)` is the stand-in for "not another hex digit".
+# Keywords gate the chunk: a file without the literal name is never scanned,
+# which is what keeps 40-hex action SHAs and git digests out of the results.
+detectors:
+  - name: forge-cf-account-id
+    keywords:
+      - CLOUDFLARE_ACCOUNT_ID
+    regex:
+      key: |-
+        CLOUDFLARE_ACCOUNT_ID["' ]*[:=]["' ]*([0-9a-f]{32})(?:[^0-9a-f]|$)
+
+  # `id = "<32 hex>"` in wrangler.toml has no unique prefix to anchor on, so the
+  # keyword is the surrounding TOML table name. patch_wrangler.py injects the
+  # real id at deploy time; committing the patched file is the accident.
+  - name: forge-kv-namespace-id
+    keywords:
+      - FORGE_SHARES_KV_ID
+      - kv_namespaces
+    regex:
+      key: |-
+        (?:FORGE_SHARES_KV_ID|id)["' ]*[:=]["' ]*([0-9a-f]{32})(?:[^0-9a-f]|$)
+
+  - name: forge-cf-access-aud
+    keywords:
+      - CF_ACCESS_AUD
+    regex:
+      key: |-
+        CF_ACCESS_AUD["' ]*[:=]["' ]*([0-9a-f]{64})(?:[^0-9a-f]|$)

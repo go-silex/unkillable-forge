@@ -6,6 +6,9 @@
 # is not used. Child tests run under "$BASH" (this interpreter), not PATH bash.
 set -euo pipefail
 
+# shellcheck source=tests/shell/lib/git-env-guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/git-env-guard.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
@@ -49,5 +52,8 @@ export FORGE_BASH="$BASH"
 "$BASH" tests/shell/test_og_persist.sh
 "$BASH" tests/shell/test_publish_snapshot.sh
 "$BASH" tests/shell/test_og_staleness.sh
+# Last: it re-runs another suite under an inherited GIT_DIR pointed at a scratch
+# repo, so it is the slowest and the one that proves the guard above is real.
+"$BASH" tests/shell/test_git_env_isolation.sh
 
 echo "os-script-tests OK"

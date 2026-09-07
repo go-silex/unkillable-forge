@@ -2,6 +2,9 @@
 # Behaviour tests for scripts/release-plugin.sh — isolated tmpdir, no network.
 set -euo pipefail
 
+# shellcheck source=tests/shell/lib/git-env-guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/git-env-guard.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fail=0
 

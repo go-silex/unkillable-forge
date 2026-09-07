@@ -1,0 +1,35 @@
+# TruffleHog --exclude-paths (newline-separated regexes).
+# `#` comments are stripped by scripts/secret-scan.sh.
+#
+# This file is the COMMON list, applied to both passes: build output, vendored
+# deps, local indexes and the pinned scanner binary itself. Without it the
+# credential pass measured 3720 chunks / 48 MB — essentially the 48 MB
+# trufflehog binary under .cache/, plus all of node_modules once a contributor
+# has run `npm ci`.
+#
+# `tests/` is NOT here. It is added by secret-scan.sh for the CUSTOM pass only:
+#   custom pass  → findings are unverifiable by construction, so the fake
+#                  credentials in tests/ must be excluded, matching the policy
+#                  written in ci.yml (":!tests/** fake tokens / contract fixtures").
+#   credential pass → API verification tells a live token from a fixture with no
+#                  false positive (measured 0 findings), so excluding tests/
+#                  there would create a blind spot the git grep never had.
+#
+# Deliberately stricter than ci.yml on prose: that scan also excludes `*.md`,
+# `.env.example` and `CHANGELOG.md`. Here they stay in scope, so a doc that one
+# day illustrates a real-looking account id will fail the custom pass. Fix the
+# doc (use an obviously fake shape), or add the path here with a reason.
+# Prefer fixing sources over growing this list.
+
+# Build output / vendored deps / local caches and indexes
+(^|/)node_modules/
+(^|/)\.venv/
+(^|/)dist/
+(^|/)\.turbo/
+(^|/)\.git/
+(^|/)\.cache/
+(^|/)\.wrangler/
+(^|/)\.cocoindex_code/
+(^|/)coverage/
+(^|/)__pycache__/
+(^|/)\.pytest_cache/

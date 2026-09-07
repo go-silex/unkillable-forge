@@ -92,12 +92,24 @@ When changing behavior, update **skills** if user-facing workflows change.
 
 1. **Fork** and create a branch: `feat/…`, `fix/…`, or `docs/…`
 2. **Edit** engine code or docs (English for user-facing text)
-3. **Run checks** locally:
+3. **Run checks** locally — one entrypoint per gate, the same files CI runs:
 
    ```bash
-   bash -n plugins/silex-forge/scripts/publish.sh
+   bash scripts/secret-scan.sh   # two TruffleHog passes, repo-pinned scanner
+   bash scripts/lint-shell.sh    # ShellCheck
+   bash scripts/test-all.sh      # vitest + python/shell + release plugin (needs npm ci)
    python3 plugins/silex-forge/scripts/lib/load_config.py --doctor  # needs local hub config
    ```
+
+   `npm ci` installs the pre-push hook (lefthook, via the `prepare` script) unless
+   `core.hooksPath` is already set — shared hooks win, we never overwrite them. The hook
+   runs the three commands above before anything leaves your machine. Emergency skip,
+   document why: `LEFTHOOK=0 git push`.
+
+   The scanner is **repo-pinned** under `.cache/trufflehog/<version>/` and verified by
+   sha256 from [`config/trufflehog.version`](config/trufflehog.version) — never taken from
+   `PATH`, so a stale or stub binary cannot decide whether the gate runs. Bumping it is
+   manual; the procedure is in that file's header.
 
 4. **Update** [CHANGELOG.md](CHANGELOG.md) under `[Unreleased]` or the target version
 5. **Open a PR** — the template checklist must pass

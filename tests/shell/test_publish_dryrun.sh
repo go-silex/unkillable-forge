@@ -23,6 +23,9 @@
 # bash 3.2-safe (no mapfile, no assoc arrays, no ${x^^}).
 set -euo pipefail
 
+# shellcheck source=tests/shell/lib/git-env-guard.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/git-env-guard.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 PUBLISH="$ROOT/plugins/silex-forge/scripts/publish.sh"

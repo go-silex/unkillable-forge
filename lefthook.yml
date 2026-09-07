@@ -1,0 +1,22 @@
+# Local hook runner — fleet standard (conventions.ssot.md § Git hooks: one
+# runner, lefthook, no machine-wide core.hooksPath; CI stays the authority and
+# lefthook is the fast net).
+#
+# Install: `npm ci` runs the `prepare` script, which installs the hooks unless
+# core.hooksPath is already set (shared/org hooks win — we do not overwrite them).
+# Emergency skip, document why: LEFTHOOK=0 git push
+#
+# pre-push, not pre-commit: the two long gates (test-all ~16 s, secret-scan ~1 s
+# after the first fetch) belong before code leaves the machine, not on every
+# commit. Steps live in scripts/ — do not copy them here; ci.yml and
+# .dev/stack.yml commands.* call the same files.
+pre-push:
+  parallel: false
+  commands:
+    # Secrets first: cheapest, and the only failure that is irreversible once pushed.
+    secret-scan:
+      run: bash scripts/secret-scan.sh
+    lint-shell:
+      run: bash scripts/lint-shell.sh
+    test-all:
+      run: bash scripts/test-all.sh
