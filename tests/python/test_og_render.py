@@ -439,10 +439,11 @@ class ProbeTests(_Tmp):
         Quick Actions caches a response ~5 s keyed on the request body, so a
         constant body makes the second `--online` of a /forge-setup run free.
         Measured against the live API: a cache hit replays the bytes and the
-        billing figure at 0.15 s wall, and the same body with a revoked token
-        still answers HTTP 401 — authentication is enforced ahead of the
-        cache, so a cache hit cannot manufacture a green. `cacheTTL` is
-        therefore not sent (the endpoint rejects it in the body anyway).
+        billing figure at 0.15 s wall, and the same body with an invalid
+        token still answers HTTP 401 — authentication is enforced ahead of
+        the cache. Authorization within the window is untested (a valid
+        token stripped of the permission answers 403, not 401). `cacheTTL`
+        is not sent either way — the endpoint rejects it in the body.
         """
         seen: list[dict] = []
 

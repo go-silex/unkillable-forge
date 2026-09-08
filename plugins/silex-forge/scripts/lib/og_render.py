@@ -108,9 +108,12 @@ DEFAULT_TIMEOUT = 90
 # request body, so a second probe inside that window is replayed for free
 # (measured: identical bytes and an identical X-Browser-Ms-Used at 0.15 s
 # wall, against 3.8 s for the render) -- which is what /forge-setup wants,
-# since it runs --online twice. It cannot fake a green either: the same
-# cached body with a revoked token answers HTTP 401, so authentication is
-# enforced ahead of the cache.
+# since it runs --online twice. Authentication is enforced ahead of the
+# cache -- measured: the same cached body with an invalid token answers HTTP
+# 401, not a cached 200. Authorization inside the window is NOT tested: a
+# token that stays valid but loses Browser Rendering / Edit would answer 403,
+# and whether that also precedes the cache is unknown, so a probe repeated
+# within ~5 s of a permission change could in principle read the old green.
 PROBE_HTML = '<!doctype html><meta charset="utf-8"><title>forge probe</title>'
 # A blank 64x64 page measured 0.13-2.5 s of browser time (cold instance vs
 # warm) and 3.8 s wall, so 15 s is generous. urlopen's timeout is per socket
@@ -577,7 +580,8 @@ def _screenshot(body: bytes, timeout: int, token: str = "", account: str = "") -
     # Actions index, nor llms.txt. Nothing here needs it. The ~5 s response
     # cache is keyed on the request body, so an identical body deserves an
     # identical card, a failed render caches nothing, and a cache hit is
-    # still authenticated (same body + revoked token = HTTP 401).
+    # still authenticated (measured: same body + invalid token = HTTP 401;
+    # a valid token that lost the permission would 403 and is untested).
     url = (
         "https://api.cloudflare.com/client/v4/accounts/"
         f"{account}/browser-rendering/screenshot"
