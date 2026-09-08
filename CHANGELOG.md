@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+## [1.19.0] - 2026-09-08
+
 ### Added
 
 - `forge-doctor.sh --online` proves the token's `Browser Rendering · Edit` permission with one advisory 64×64 render (`lib/og_render.py` gains a `probe` subcommand, wrapped by `load_config.browser_run_probe()`). `--json` gains `browser_run`, `online_checks.browser_run` reads `permission ok`, and a failure appends one `online_warnings` line — `Browser Run unavailable — OG thumbnails will fail per slug (publish still succeeds): <reason>`. Advisory by design: `ok`, `online_ok`, `deploy_ready`, `issues`, `deploy_blockers` and every exit code are untouched, because a token without that permission still deploys and only loses its thumbnails. Skipped, with no network call, when the token or the account id is missing and when the rest of the live pass failed. One probe is one render — measured 133 ms and 2492 ms of browser time on two runs — sent with `?cacheTTL=0` so a repeat cannot replay a ≤5 s-old verdict. Rationale and measurements: PR #55.
