@@ -101,25 +101,37 @@ OG_HEIGHT = 630
 DEFAULT_QUALITY = 80
 DEFAULT_TIMEOUT = 90
 
-# Browser Run reachability probe (forge-doctor.sh --online). The Browser Run
-# Write permission cannot be read back from the token verify endpoint, so the
-# only honest check is a real render.
-# Constant on purpose. Quick Actions caches a response ~5 s keyed on the
-# request body, so a second probe inside that window is replayed for free
-# (measured: identical bytes and an identical X-Browser-Ms-Used at 0.15 s
-# wall, against 3.8 s for the render) -- which is what /forge-setup wants,
-# since it runs --online twice. Authentication is enforced ahead of the
-# cache -- measured: the same cached body with an invalid token answers HTTP
-# 401, not a cached 200. Authorization inside the window is NOT tested: a
-# token that stays valid but loses Browser Rendering / Edit would answer 403,
-# and whether that also precedes the cache is unknown, so a probe repeated
-# within ~5 s of a permission change could in principle read the old green.
+# Browser Run reachability probe (forge-doctor.sh --online). The
+# Browser Rendering · Edit permission cannot be read back from the token
+# verify endpoint, so the only honest check is a real render. (The dashboard
+# group is Browser Rendering at level Edit; the API reference spells the same
+# permission "Browser Rendering Write", which is where this repo's earlier
+# "Browser Run Write" came from -- that string names nothing.)
+#
+# Constant body on purpose: the probe carries no state, and probe() disables
+# the response cache instead (see PROBE_CACHE_TTL), so a repeat is a real
+# render rather than a replay of the previous verdict.
 PROBE_HTML = '<!doctype html><meta charset="utf-8"><title>forge probe</title>'
-# A blank 64x64 page measured 0.13-2.5 s of browser time (cold instance vs
-# warm) and 3.8 s wall, so 15 s is generous. urlopen's timeout is per socket
-# operation, not a wall clock, so this bounds a stalled connection loosely --
-# keep it well under the 90 s a real render is allowed.
+# Two real renders of this page measured 133 ms and 2492 ms of browser time
+# (3.8 s wall on the slow one), so 15 s is generous. urlopen's timeout is per
+# socket operation, not a wall clock, so this bounds a stalled connection
+# loosely -- keep it well under the 90 s a real render is allowed.
 PROBE_TIMEOUT = 15
+
+# Quick Actions caches generated content ~5 s per account (FAQ: "Is there any
+# temporary caching of submitted content?"), and the API reference documents
+# cacheTTL as a QUERY parameter -- "Cache TTL default is 5s. Set to 0 to
+# disable", minimum 0. The probe disables it, because a cached 200 would
+# report the previous verdict for a credential whose PERMISSION changed inside
+# the window: an invalid token is rejected ahead of the cache (measured HTTP
+# 401), but a valid token stripped of Browser Rendering · Edit answers 403,
+# and the cache is account-scoped, so even a second token on the same account
+# lands on the same entry. The price is one render per --online, 0.13-2.5 s of
+# browser time against the 10 browser hours a month included on Workers Paid.
+#
+# render() deliberately keeps the cache: an identical payload deserves an
+# identical card. Whether a failed render is cached was not measured.
+PROBE_CACHE_TTL = 0
 
 # Settle budget before the capture. Every subresource is inlined as a data:
 # URI, so the page makes almost no network requests and gotoOptions'
@@ -562,7 +574,13 @@ def _credentials(token: str = "", account: str = "") -> tuple[str, str]:
     return token, account
 
 
-def _screenshot(body: bytes, timeout: int, token: str = "", account: str = "") -> bytes:
+def _screenshot(
+    body: bytes,
+    timeout: int,
+    token: str = "",
+    account: str = "",
+    cache_ttl: int | None = None,
+) -> bytes:
     """POST one screenshot request body and return the JPEG bytes.
 
     The single request path, shared by render() and probe(): a probe that
@@ -574,17 +592,14 @@ def _screenshot(body: bytes, timeout: int, token: str = "", account: str = "") -
     """
     token, account = _credentials(token, account)
 
-    # No cacheTTL. Measured 2026-09-08: the endpoint rejects it in the body
-    # ("HTTP 400 Unrecognized key: cacheTTL"), accepts it in the query string,
-    # and documents it in neither the screenshot endpoint page, the Quick
-    # Actions index, nor llms.txt. Nothing here needs it. The ~5 s response
-    # cache is keyed on the request body, so an identical body deserves an
-    # identical card, a failed render caches nothing, and a cache hit is
-    # still authenticated (measured: same body + invalid token = HTTP 401;
-    # a valid token that lost the permission would 403 and is untested).
+    # cacheTTL is a query parameter, never a body key: the endpoint answers
+    # "HTTP 400 Unrecognized key: cacheTTL" for the body form (measured), and
+    # the API reference lists it under Query Parameters. Omitted entirely when
+    # the caller wants the default 5 s cache.
+    query = "" if cache_ttl is None else f"?cacheTTL={cache_ttl}"
     url = (
         "https://api.cloudflare.com/client/v4/accounts/"
-        f"{account}/browser-rendering/screenshot"
+        f"{account}/browser-rendering/screenshot{query}"
     )
     request = urllib.request.Request(
         url,
@@ -646,7 +661,13 @@ def probe(timeout: int = PROBE_TIMEOUT, token: str = "", account: str = "") -> N
     """
     if not (token and account):
         load_forge_env()
-    _screenshot(json.dumps(probe_payload()).encode("utf-8"), timeout, token, account)
+    _screenshot(
+        json.dumps(probe_payload()).encode("utf-8"),
+        timeout,
+        token,
+        account,
+        cache_ttl=PROBE_CACHE_TTL,
+    )
 
 
 def _api_error(raw: bytes) -> str:

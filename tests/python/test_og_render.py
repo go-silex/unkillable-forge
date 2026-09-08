@@ -405,7 +405,9 @@ class ProbeTests(_Tmp):
                 og_render.render(html)
 
         probe_req, render_req = seen
-        self.assertEqual(render_req.full_url, probe_req.full_url)
+        # Same account and endpoint — the probe differs only by the cache knob,
+        # so it still stands in for the render it is asked about.
+        self.assertEqual(f"{render_req.full_url}?cacheTTL=0", probe_req.full_url)
         self.assertIn("browser-rendering/screenshot", probe_req.full_url)
         self.assertEqual("POST", probe_req.get_method())
         self.assertEqual("Bearer tok", probe_req.get_header("Authorization"))
@@ -433,32 +435,39 @@ class ProbeTests(_Tmp):
         self.assertNotIn("clip", body["screenshotOptions"])
         self.assertEqual(og_render.PROBE_HTML, body["html"])
 
-    def test_the_probe_body_is_stable_and_carries_no_cache_parameter(self) -> None:
-        """Two probes send the same bytes, on purpose.
+    def test_the_probe_disables_the_response_cache(self) -> None:
+        """A replayed verdict is not a check.
 
-        Quick Actions caches a response ~5 s keyed on the request body, so a
-        constant body makes the second `--online` of a /forge-setup run free.
-        Measured against the live API: a cache hit replays the bytes and the
-        billing figure at 0.15 s wall, and the same body with an invalid
-        token still answers HTTP 401 — authentication is enforced ahead of
-        the cache. Authorization within the window is untested (a valid
-        token stripped of the permission answers 403, not 401). `cacheTTL`
-        is not sent either way — the endpoint rejects it in the body.
+        Quick Actions caches generated content ~5 s per account, and the API
+        reference documents `cacheTTL` as a query parameter ("Set to 0 to
+        disable"). Without it the probe is replayable: an invalid token is
+        rejected ahead of the cache (measured HTTP 401), but a valid token
+        stripped of the permission answers 403 and that ordering was never
+        tested, so a cached 200 could report the pre-change verdict. The body
+        stays constant — `cacheTTL` is rejected there (HTTP 400) — and
+        render() keeps the default cache, where an identical payload deserves
+        an identical card.
         """
-        seen: list[dict] = []
+        seen: list[urllib.request.Request] = []
 
         def fake(request: urllib.request.Request, timeout: object = None) -> _Response:
-            self.assertNotIn("cacheTTL", request.full_url)
-            seen.append(json.loads(request.data))
+            seen.append(request)
             return _Response(b"\xff\xd8\xff\xd9")
 
+        html = _artifact(self.td / "b", "<html><head></head><body>y</body></html>")
         with patch.dict("os.environ", self._env()):
             with patch("urllib.request.urlopen", fake):
                 og_render.probe()
                 og_render.probe()
+                og_render.render(html)
 
-        self.assertEqual(seen[0], seen[1])
-        self.assertNotIn("cacheTTL", seen[0])
+        first, second, render_req = seen
+        self.assertTrue(first.full_url.endswith("?cacheTTL=0"), first.full_url)
+        self.assertEqual(first.full_url, second.full_url)
+        self.assertEqual(json.loads(first.data), json.loads(second.data))
+        self.assertNotIn("cacheTTL", json.loads(first.data))
+        # The render is left cacheable on purpose.
+        self.assertNotIn("cacheTTL", render_req.full_url)
 
     def test_in_band_failure_is_refused_with_the_api_reason(self) -> None:
         """A 200 carrying JSON means the API refused; doctor needs the reason."""
