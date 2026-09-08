@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+## [1.19.1] - 2026-09-08
+
 ### Fixed
 
 - The token permission is `Browser Run · Edit`, not `Browser Rendering · Edit`. 1.19.0 replaced 1.18.0's `Browser Run Write` with the string from Cloudflare's Quick Actions page — but that page is stale on the product rename. `GET /accounts/{id}/tokens/permission_groups` on the account lists `Browser Run Write` and no `Browser Rendering` group at all; API `<group> Write` is the dashboard's `<group> · Edit`, the same mapping the three sibling rows follow (`Pages Write`, `Workers KV Storage Write`, `Account Settings Read`). Corrected in the wizard, `.env.example`, `README.md`, `AGENTS.md`, the `forge-setup` skill and the code comments, with that endpoint recorded as the authority so the docs cannot walk it back. Verified by minting an account-owned token from those group ids: `forge-doctor.sh --online` reports `token: account` and `browser_run: permission ok`, and a real render succeeds.
