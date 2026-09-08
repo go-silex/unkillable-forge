@@ -730,17 +730,14 @@ Bounded churn (extra renders, different JPEG bytes uploaded), never a deleted
 card. Everyone should pull.
 
 Doctor reports no local OG toolchain — there is none, the renderer is
-server-side. `forge-doctor.sh --online` instead probes Browser Run once (a
-64×64 JPEG — two real renders measured 133 ms and 2492 ms of browser time;
-the probe sends the documented `cacheTTL=0`, so every `--online` renders
-rather than replaying a ≤5 s-old verdict), advisory only:
+server-side. `forge-doctor.sh --online` probes Browser Run once instead
+(one 64×64 render, `cacheTTL=0`), advisory only:
 `browser_run: permission ok` among the online checks, or one
 `⚠ Browser Run unavailable — OG thumbnails will fail per slug (publish still
-succeeds): <reason>` line. It never changes the exit code. It is skipped, with
-no network call, in two cases: the token or the account id is missing (already
-a deploy blocker), and the rest of the live pass failed — after a revoked token
-or a deleted Pages project the publish does **not** succeed, so the sentence
-would be false and the request wasted.
+succeeds): <reason>` line. It never changes the exit code, and it is skipped
+with no network call when the token or the account id is missing, or when the
+rest of the live pass failed — that sentence only holds when the render
+permission is the sole gap.
 
 `permission ok` is the whole claim: the credential may render. Plan limits
 decide whether a real publish can (Cloudflare docs, read 2026-09-08) — Workers

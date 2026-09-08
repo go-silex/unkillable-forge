@@ -753,11 +753,11 @@ def _exc_one_line(exc: BaseException) -> str:
 def browser_run_probe(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     """Advisory: can this token render an OG thumbnail on Browser Run.
 
-    Returns {ok, checked, reason} and never raises. The renderer needs the
-    Browser Rendering · Edit permission, which cannot be read back from the token
-    verify endpoint _verify_api_token uses — the only honest check is one real
-    render. A token without it still publishes; only the per-slug thumbnails
-    fail, so this must never flip a verdict.
+    Returns {ok, checked, reason} and never raises. The Browser Rendering ·
+    Edit permission cannot be read back from the token verify endpoint, so the
+    check is one real render. It must never flip a verdict: a token without
+    that permission still publishes and only loses its thumbnails.
+    Reasoning and measurements: PR #55.
     """
     cfg = cfg or load_config()
     token = resolve_api_token()
@@ -770,19 +770,16 @@ def browser_run_probe(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
             "reason": "token or account id missing — already reported",
         }
 
-    # Lazy import, both ways: og_render._forge_env_path() imports load_config
-    # lazily, so a module-level import here would close the cycle. A missing
-    # og_render.py is also exactly the broken install doctor must survive.
+    # Lazy: og_render imports load_config lazily too, so a module-level import
+    # here would close the cycle.
     try:
         import og_render
     except Exception as exc:
         return {"ok": False, "checked": True, "reason": _exc_one_line(exc)}
 
     try:
-        # The resolved pair travels with the call: resolved_account_id() also
-        # honours forge.config.json's cloudflare_account_id, which og_render
-        # would otherwise have to re-resolve — and a doctor that refused a
-        # value it had just resolved would blame the wrong thing.
+        # The resolved pair travels with the call — resolved_account_id() reads
+        # sources og_render does not.
         og_render.probe(token=token, account=account)
     except og_render.OgRenderError as exc:
         return {"ok": False, "checked": True, "reason": str(exc)}
@@ -801,18 +798,10 @@ def doctor_online(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     online_warnings = list(pf.get("warnings") or [])
     perm = forge_env_permissions()
 
-    # Advisory: one 64x64 JPEG (two real renders measured 133 ms and 2492 ms
-    # of browser time; the probe sends cacheTTL=0 so every run renders),
-    # reported as a warning only. It must not reach online_ok/deploy_ready — a publish
-    # with a token that cannot render still deploys the site, it just ships no
-    # new thumbnails.
-    #
-    # Gated on pf["ok"]: the warning states "publish still succeeds", which is
-    # only true when the render permission is the ONLY thing missing. On a
-    # revoked token, an unreachable account or a deleted Pages project the
-    # publish does NOT succeed, and probing there would spend a second doomed
-    # request to blame Browser Run for a credential the report already
-    # condemned two lines above.
+    # Advisory, warning-only, and gated on pf["ok"] because the warning says
+    # "publish still succeeds", which holds only when the render permission is
+    # the sole gap. One probe = one render (measured 133 ms and 2492 ms of
+    # browser time on two runs). Reasoning: PR #55.
     if pf["ok"]:
         browser_run = browser_run_probe(cfg)
     else:

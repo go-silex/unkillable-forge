@@ -437,23 +437,19 @@ never a deleted card. Everyone should pull.
 There is no local toolchain left for doctor to report — the renderer is
 server-side — so `forge-doctor.sh --online` proves the credential instead: one
 64×64 JPEG through `og_render.probe()`, against the same endpoint the renderer
-POSTs to. It surfaces as `browser_run: permission ok` among the online checks, or as one
+POSTs to, with `cacheTTL=0` so a repeat cannot replay the previous verdict.
+It surfaces as `browser_run: permission ok` among the online checks, or as one
 `⚠ Browser Run unavailable — OG thumbnails will fail per slug (publish still
 succeeds): <reason>` line. Advisory only: it never moves `ok` / `online_ok` /
 `deploy_ready` / `deploy_blockers` or any exit code, because publish is
-best-effort on thumbnails — a machine with a 3-permission token is still ready
-to deploy. It is skipped, with no network call, when the token or the account id
-is missing: that gap is already a deploy blocker, and doctor must not report the
-same hole twice.
+best-effort on thumbnails. Skipped, with no network call, when the token or
+the account id is missing (already a deploy blocker) and when the rest of the
+live pass failed (the sentence would be false).
 
-This is what the deleted chrome/ffmpeg/jq probe became. Moving the renderer
-server-side did not remove the dependency, it moved it into the credential —
-where nothing checked it: a token minted before the cutover, or by the
-provision wizard that still listed three permissions until this change,
-deploys fine and then fails every render, one warning per slug, in the middle
-of a publish. The probe turns that into a setup-time answer. No such publish
-is on record — this is the failure mode the check exists to prevent, not an
-incident report.
+`permission ok` is the exact claim: the credential may render. It does not
+prove a 6.5 MiB payload renders, that the plan's Quick Actions rate allows 33
+of them, or that the permission still exists at publish time. Design
+discussion and measurements: PR #55.
 
 ## Agent rules
 

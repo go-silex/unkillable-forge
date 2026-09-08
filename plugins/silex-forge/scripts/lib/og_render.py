@@ -103,34 +103,16 @@ DEFAULT_TIMEOUT = 90
 
 # Browser Run reachability probe (forge-doctor.sh --online). The
 # Browser Rendering · Edit permission cannot be read back from the token
-# verify endpoint, so the only honest check is a real render. (The dashboard
-# group is Browser Rendering at level Edit; the API reference spells the same
-# permission "Browser Rendering Write", which is where this repo's earlier
-# "Browser Run Write" came from -- that string names nothing.)
-#
-# Constant body on purpose: the probe carries no state, and probe() disables
-# the response cache instead (see PROBE_CACHE_TTL), so a repeat is a real
-# render rather than a replay of the previous verdict.
+# verify endpoint, so the check is a real render. Reasoning: PR #55.
 PROBE_HTML = '<!doctype html><meta charset="utf-8"><title>forge probe</title>'
-# Two real renders of this page measured 133 ms and 2492 ms of browser time
-# (3.8 s wall on the slow one), so 15 s is generous. urlopen's timeout is per
-# socket operation, not a wall clock, so this bounds a stalled connection
-# loosely -- keep it well under the 90 s a real render is allowed.
+# Two real renders of this page measured 133 ms and 2492 ms of browser time,
+# 3.8 s wall on the slow one. urlopen's timeout is per socket operation, not a
+# wall clock.
 PROBE_TIMEOUT = 15
-
-# Quick Actions caches generated content ~5 s per account (FAQ: "Is there any
-# temporary caching of submitted content?"), and the API reference documents
-# cacheTTL as a QUERY parameter -- "Cache TTL default is 5s. Set to 0 to
-# disable", minimum 0. The probe disables it, because a cached 200 would
-# report the previous verdict for a credential whose PERMISSION changed inside
-# the window: an invalid token is rejected ahead of the cache (measured HTTP
-# 401), but a valid token stripped of Browser Rendering · Edit answers 403,
-# and the cache is account-scoped, so even a second token on the same account
-# lands on the same entry. The price is one render per --online, 0.13-2.5 s of
-# browser time against the 10 browser hours a month included on Workers Paid.
-#
-# render() deliberately keeps the cache: an identical payload deserves an
-# identical card. Whether a failed render is cached was not measured.
+# Sent as ?cacheTTL=0 on the probe only: Quick Actions caches generated
+# content 5 s per account, so without it a repeat replays the previous verdict
+# (API reference, Query Parameters: "Set to 0 to disable", minimum 0).
+# render() keeps the default cache.
 PROBE_CACHE_TTL = 0
 
 # Settle budget before the capture. Every subresource is inlined as a data:
