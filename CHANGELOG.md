@@ -16,11 +16,11 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ### Changed
 
-- The API token permission is named `Browser Rendering · Edit`, not "Browser Run Write": Cloudflare renamed the product Browser Rendering → Browser Run and left the permission group alone. 1.18.0 recorded the wrong string in `README.md`, `AGENTS.md`, the `forge-setup` skill and the entry below. Corrected at every site.
 - `forge-provision.sh` stage 5 and `.env.example` name the four permissions the token needs — Pages Edit, Workers KV Storage Edit, Account Settings Read, `Browser Rendering · Edit`. Both described the 3-permission token from before the 1.18.0 cutover, so an operator following the wizard minted a token that could deploy but could not render a thumbnail.
 
 ### Fixed
 
+- The API token permission is named `Browser Rendering · Edit`, not "Browser Run Write": Cloudflare renamed the product Browser Rendering → Browser Run and left the permission group alone. 1.18.0 shipped the wrong string in `README.md`, `AGENTS.md`, the `forge-setup` skill and its own release entry below. Corrected at every site.
 - `lib/og_render.py` resolves the account id through `load_config.resolved_account_id()` when neither the environment nor `forge.env` carries it, instead of refusing `CLOUDFLARE_ACCOUNT_ID missing` for the `cloudflare_account_id` the local `forge.config.json` provides. `publish.sh` exports the resolved value, so its renders were unaffected; a standalone `gen-og-images.sh` run and the in-process doctor probe saw the narrower source. The doctor advisory hands `probe()` the pair it resolved, and a supplied credential skips the `forge.env` read, so a loose file mode stays the env-permission blocker it already is.
 - `plugins/silex-forge/skills/forge-publish/SKILL.md` documents `--force-og` and `--desc`, the two flags `publish.sh` advertises and the skill never named. `--desc` is the only durable source of `meta.json`'s `description`: every publish rewrites it and preserves only `shared`, so re-publishing without the flag clears the field.
 
