@@ -278,7 +278,7 @@ plugins/silex-forge/scripts/forge-doctor.sh
 plugins/silex-forge/scripts/publish.sh --rebuild-index  # hub → wrangler Pages
 ```
 
-`--write` merges the discovered keys into `forge.env` (prints **key names only**) and persists the confirmed `pages_project` into an **existing** `forge.config.json` — it never creates that file. Never discoverable: `CLOUDFLARE_API_TOKEN` (API token permissions: Pages Edit · Workers KV Storage Edit · Account Settings Read · **Browser Rendering · Edit** — the dashboard group name, not the OAuth scopes above) and `hub_root` (local vault path). Both come from the operator via **`/forge-setup`**.
+`--write` merges the discovered keys into `forge.env` (prints **key names only**) and persists the confirmed `pages_project` into an **existing** `forge.config.json` — it never creates that file. Never discoverable: `CLOUDFLARE_API_TOKEN` (API token permissions: Pages Edit · Workers KV Storage Edit · Account Settings Read · **Browser Run · Edit** — the dashboard group name, not the OAuth scopes above) and `hub_root` (local vault path). Both come from the operator via **`/forge-setup`**.
 
 | `forge-discover.sh` exit | Meaning | Next |
 |---|---|---|
@@ -359,12 +359,17 @@ A forge on someone else's Cloudflare account: `forge-provision.sh` + `"vault_mar
 Rendered **before** `wrangler pages deploy` by Cloudflare Browser Run REST
 (`html` payload, JPEG out), invoked from `gen-og-images.sh` via `lib/og_render.py`.
 Publisher machines need `python3` and the existing `CLOUDFLARE_API_TOKEN` with
-**Browser Rendering · Edit** beside Pages Edit / Workers KV Edit / Account
-Settings Read — not chrome/chromium/ffmpeg/jq. That is the dashboard group
-name: the product was renamed Browser Rendering → Browser Run, the permission
-group was not, so a token minted by searching for "Browser Run" carries no
-render permission. A token missing it makes every render fail per slug; the
-publish still succeeds.
+**Browser Run · Edit** beside Pages Edit / Workers KV Edit / Account Settings
+Read — not chrome/chromium/ffmpeg/jq. A token missing it makes every render
+fail per slug; the publish still succeeds.
+
+Authority for that label is `GET /accounts/{id}/tokens/permission_groups` on
+the account itself, not the docs: it lists `Browser Run Write` and no
+`Browser Rendering` group at all. API `<group> Write` is the dashboard's
+`<group> · Edit` — the same mapping the three sibling rows follow (`Pages
+Write`, `Workers KV Storage Write`, `Account Settings Read`). Cloudflare's
+Quick Actions page still says "Browser Rendering - Edit"; it is stale on the
+product rename.
 
 Storage is unchanged: `site/a/<slug>/og.jpg` in the Pages snapshot, a copy in
 the hub SSOT, `og.src` hub-only proof (v2 digest = canonical HTML + subresources).

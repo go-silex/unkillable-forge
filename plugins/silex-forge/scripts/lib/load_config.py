@@ -753,8 +753,8 @@ def _exc_one_line(exc: BaseException) -> str:
 def browser_run_probe(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     """Advisory: can this token render an OG thumbnail on Browser Run.
 
-    Returns {ok, checked, reason} and never raises. The Browser Rendering ·
-    Edit permission cannot be read back from the token verify endpoint, so the
+    Returns {ok, checked, reason} and never raises. The Browser Run · Edit
+    permission cannot be read back from the token verify endpoint, so the
     check is one real render. It must never flip a verdict: a token without
     that permission still publishes and only loses its thumbnails.
     Reasoning and measurements: PR #55.

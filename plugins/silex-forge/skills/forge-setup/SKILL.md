@@ -43,7 +43,7 @@ Reached only after the last configuration step (token) and the final
 ✅ forge-doctor.sh --online exit 0 — ready (hub OK AND deploy_ready AND online_ok)
 ⚠️ optional Shlink shortlinks — Pages SHLINK_* + local CLI (step 6b)
 ⚠️ recommended external craft plugins (step 7)
-⚠️ optional OG thumbnails — existing token needs Browser Rendering · Edit (step 7b, probed by --online)
+⚠️ optional OG thumbnails — existing token needs Browser Run · Edit (step 7b, probed by --online)
 ```
 
 An offline `forge-doctor.sh` exit 0 is **not** the criterion: it only proves the
@@ -571,7 +571,7 @@ Order:
 2. Password manager available → fill from your ops vault (do **not** echo the token in chat)
 3. Otherwise **ask for the token** (one question) and write the same way
 
-Permissions: Pages Edit · Workers KV Storage Edit · Account Settings Read · **Browser Rendering · Edit** — that is the dashboard group name, unchanged by the Browser Rendering → Browser Run product rename, so a token minted by searching the dropdown for "Browser Run" has no render permission. A token missing it makes every render fail per slug; the publish still succeeds. Verify that permission with `forge-doctor.sh --online` (step 7b) instead of discovering it at publish time. Workers KV Storage Write still covers CLI `--share` via REST.
+Permissions: Pages Edit · Workers KV Storage Edit · Account Settings Read · **Browser Run · Edit**. Authority is the account's own `GET /accounts/{id}/tokens/permission_groups`, which lists `Browser Run Write` (API `Write` = dashboard `Edit`) and no `Browser Rendering` group; Cloudflare's Quick Actions page is stale on the rename. A token missing it makes every render fail per slug; the publish still succeeds. Verify that permission with `forge-doctor.sh --online` (step 7b) instead of discovering it at publish time. Workers KV Storage Write still covers CLI `--share` via REST.
 
 **KV fallback:** if the token lacks KV scope (or REST is rejected), `publish.sh`
 retries with `wrangler login` OAuth (`wrangler kv … --remote`,
@@ -694,7 +694,7 @@ Browser Run REST (`html` payload, JPEG out), invoked from `gen-og-images.sh`
 via `lib/og_render.py`.
 
 No chrome/chromium/ffmpeg/jq on the publisher machine. `python3` plus the
-existing `CLOUDFLARE_API_TOKEN` with **Browser Rendering · Edit** is enough (the
+existing `CLOUDFLARE_API_TOKEN` with **Browser Run · Edit** is enough (the
 dashboard group name; Browser Run is the product). A token
 missing that permission makes every render fail per slug; the publish still
 succeeds.

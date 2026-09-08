@@ -309,7 +309,7 @@ run_at "$CRASH/forge-doctor.sh" --quiet
 pass "a truncated payload degrades to deploy-blocked, never a silent 0"
 
 # ── advisory · a failing Browser Run probe warns, it never blocks ─────────────
-# A token without the Browser Rendering · Edit permission renders no thumbnail, but
+# A token without the Browser Run · Edit permission renders no thumbnail, but
 # the publish itself still succeeds — so the probe rides in online_warnings
 # and must leave the exit code at 0. The operator has to see it anyway: the
 # human report printed `warnings` only, and this advisory is the first thing
