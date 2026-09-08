@@ -104,6 +104,10 @@ DEFAULT_TIMEOUT = 90
 # Browser Run reachability probe (forge-doctor.sh --online). The Browser Run
 # Write permission cannot be read back from the token verify endpoint, so the
 # only honest check is a real render.
+# The probe page carries a nonce so no two probes can share a Quick Actions
+# cache entry (responses are cached ~5 s by default, keyed on the request
+# body). A constant body is the one way this check could report a cached
+# green for a credential that has since been revoked.
 PROBE_HTML = '<!doctype html><meta charset="utf-8"><title>forge probe</title>'
 # A blank 64x64 page measured 133 ms of browser time, so 15 s is already
 # generous. urlopen's timeout is per socket operation, not a wall clock, so
@@ -564,16 +568,17 @@ def _screenshot(body: bytes, timeout: int, token: str = "", account: str = "") -
     """
     token, account = _credentials(token, account)
 
-    # cacheTTL=0 as a QUERY parameter, measured 2026-09-08: the endpoint
-    # rejects it in the body ("HTTP 400 Unrecognized key: cacheTTL") and
-    # accepts it in the query string (200, JPEG). Quick Actions cache
-    # responses for 5s by default; whether the query form disables that is
-    # not observable from here. It cannot serve a wrong card either way --
-    # the cache key is the request body, so an identical body deserves an
-    # identical card and a failed render caches nothing.
+    # No cacheTTL: measured 2026-09-08, the endpoint rejects it in the body
+    # ("HTTP 400 Unrecognized key: cacheTTL") and accepts it in the query
+    # string without documenting it anywhere -- it appears in neither the
+    # screenshot endpoint page, the Quick Actions index, nor llms.txt, so
+    # what it does there is unknowable. Renders do not need it: the cache is
+    # keyed on the request body, so an identical body deserves an identical
+    # card and a failed render caches nothing. The probe does not need it
+    # either -- its body carries a nonce (see PROBE_HTML).
     url = (
         "https://api.cloudflare.com/client/v4/accounts/"
-        f"{account}/browser-rendering/screenshot?cacheTTL=0"
+        f"{account}/browser-rendering/screenshot"
     )
     request = urllib.request.Request(
         url,
@@ -611,9 +616,12 @@ def render(html_path: Path, quality: int = DEFAULT_QUALITY, timeout: int = DEFAU
 
 
 def probe_payload() -> dict:
-    """The smallest render Browser Run will accept: a 64x64 blank page."""
+    """The smallest render Browser Run will accept: a 64x64 blank page.
+
+    Nonced per call: two probes must never collide in the response cache.
+    """
     return {
-        "html": PROBE_HTML,
+        "html": f"{PROBE_HTML}<!-- {os.urandom(8).hex()} -->",
         "viewport": {"width": 64, "height": 64},
         "gotoOptions": {"waitUntil": "load", "timeout": 10000},
         "screenshotOptions": {"type": "jpeg", "quality": 1},

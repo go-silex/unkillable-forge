@@ -152,7 +152,9 @@ S="$FORGE_ROOT/scripts/publish.sh"
 # Internal + mint share
 "$S" <slug> [path] --share --title "…" --type deck
 
-# Catalogue subtitle (optional; also settable as description in meta.json)
+# Catalogue subtitle. `--desc` is the ONLY durable source: every publish
+# rewrites meta.json's description from it, so re-publishing without --desc
+# clears the field (only `shared` survives from the previous meta).
 "$S" <slug> [path] --title "…" --type deck --desc "one line under the title"
 ```
 

@@ -431,6 +431,28 @@ class ProbeTests(_Tmp):
         self.assertEqual({"width": 64, "height": 64}, body["viewport"])
         self.assertEqual("jpeg", body["screenshotOptions"]["type"])
         self.assertNotIn("clip", body["screenshotOptions"])
+        self.assertIn("forge probe", body["html"])
+
+    def test_two_probes_cannot_share_a_cache_entry(self) -> None:
+        """Quick Actions caches ~5 s on the request body.
+
+        A constant probe body is the one way this check could answer from
+        cache for a credential revoked in the meantime, so the page carries a
+        nonce and no `cacheTTL` parameter is relied on.
+        """
+        seen: list[dict] = []
+
+        def fake(request: urllib.request.Request, timeout: object = None) -> _Response:
+            seen.append(json.loads(request.data))
+            return _Response(b"\xff\xd8\xff\xd9")
+
+        with patch.dict("os.environ", self._env()):
+            with patch("urllib.request.urlopen", fake):
+                og_render.probe()
+                og_render.probe()
+
+        self.assertNotEqual(seen[0]["html"], seen[1]["html"])
+        self.assertNotIn("cacheTTL", seen[0])
 
     def test_in_band_failure_is_refused_with_the_api_reason(self) -> None:
         """A 200 carrying JSON means the API refused; doctor needs the reason."""
