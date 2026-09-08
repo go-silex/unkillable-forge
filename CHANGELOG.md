@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-09-08
+
 ### Added
 
 - `--dry-run` prints the purge plan and rewrites nothing, and never echoes a resolved id — only `len=` and a 12-char sha256 prefix, so the plan is safe to paste into an issue.
@@ -326,7 +328,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 - Cloudflare Pages host for team decks and guides
 - Plugin marketplace manifest (`.claude-plugin/marketplace.json`)
 
-[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.17.0...HEAD
+[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.18.0...HEAD
+[1.18.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.17.0...silex-forge/v1.18.0
 [1.17.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.16.0...silex-forge/v1.17.0
 [1.16.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.15.0...silex-forge/v1.16.0
 [1.15.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.14.1...silex-forge/v1.15.0
