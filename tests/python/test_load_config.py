@@ -634,7 +634,7 @@ class BrowserRunProbeTests(unittest.TestCase):
 class DoctorOnlineAdvisoryTests(unittest.TestCase):
     """A failing Browser Run probe may only add a warning.
 
-    A token without the Browser Run Write permission still publishes — every
+    A token without the Browser Rendering · Edit permission still publishes — every
     render fails per slug, the deploy does not — so the probe must not move
     online_ok, deploy_ready or deploy_blockers, which is what forge-doctor.sh
     turns into its exit code.
@@ -682,18 +682,20 @@ class DoctorOnlineAdvisoryTests(unittest.TestCase):
         self._env.stop()
         self._td.cleanup()
 
-    def _online(self, probe: dict) -> tuple[dict, dict]:
+    def _online(self, probe: dict, *, pf_ok: bool = True) -> tuple[dict, dict]:
         """doctor_online with the network stubbed out. Returns (payload, preflight)."""
         pf = {
-            "ok": True,
-            "errors": [],
+            "ok": pf_ok,
+            "errors": [] if pf_ok else ["token invalid (400): Invalid API Token"],
             "warnings": [],
             "checks": {"token": "user"},
             "require_kv": True,
         }
         with patch("load_config.preflight_mutations", return_value=pf):
-            with patch("load_config.browser_run_probe", return_value=probe):
-                return doctor_online(self.cfg), pf
+            with patch("load_config.browser_run_probe", return_value=probe) as spy:
+                payload = doctor_online(self.cfg)
+        self.probe_calls = spy.call_count
+        return payload, pf
 
     def test_failing_probe_adds_one_warning_and_moves_nothing(self) -> None:
         ok, _ = self._online({"ok": True, "checked": True, "reason": None})
@@ -721,8 +723,27 @@ class DoctorOnlineAdvisoryTests(unittest.TestCase):
 
     def test_passing_probe_reports_a_check_without_touching_preflight(self) -> None:
         payload, pf = self._online({"ok": True, "checked": True, "reason": None})
-        self.assertEqual("ok", payload["online_checks"]["browser_run"])
+        # "permission ok", not "ok": one blank page is not 33 real payloads.
+        self.assertEqual("permission ok", payload["online_checks"]["browser_run"])
         self.assertEqual({"token": "user"}, pf["checks"])
+
+    def test_a_failed_preflight_is_never_probed(self) -> None:
+        """The warning promises the publish still succeeds — only true alone.
+
+        A revoked token or a deleted Pages project fails the preflight, so the
+        publish does not succeed. Probing there would spend a second doomed
+        request and blame Browser Run for a credential already condemned in
+        online_issues.
+        """
+        payload, _ = self._online(
+            {"ok": False, "checked": True, "reason": "unreachable"}, pf_ok=False
+        )
+        self.assertEqual(0, self.probe_calls)
+        self.assertEqual([], payload["online_warnings"])
+        self.assertNotIn("browser_run", payload["online_checks"])
+        self.assertFalse(payload["browser_run"]["checked"])
+        self.assertIn("already reported", payload["browser_run"]["reason"])
+        self.assertFalse(payload["online_ok"])
 
     def test_unchecked_probe_is_silent(self) -> None:
         """Nothing to probe is not a finding: doctor already named the gap."""

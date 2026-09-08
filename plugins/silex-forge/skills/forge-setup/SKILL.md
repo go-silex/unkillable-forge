@@ -43,7 +43,7 @@ Reached only after the last configuration step (token) and the final
 ✅ forge-doctor.sh --online exit 0 — ready (hub OK AND deploy_ready AND online_ok)
 ⚠️ optional Shlink shortlinks — Pages SHLINK_* + local CLI (step 6b)
 ⚠️ recommended external craft plugins (step 7)
-⚠️ optional OG thumbnails — existing token needs Browser Run Write (step 7b, probed by --online)
+⚠️ optional OG thumbnails — existing token needs Browser Rendering · Edit (step 7b, probed by --online)
 ```
 
 An offline `forge-doctor.sh` exit 0 is **not** the criterion: it only proves the
@@ -52,7 +52,7 @@ ready offline, so `--online` decides — in step 8, and on step 0's exit-`0`
 shortcut.
 
 The OG line stays a `⚠`: `forge-doctor.sh --online` now proves that permission
-with an advisory Browser Run probe — `browser_run: ok` among its online checks,
+with an advisory Browser Run probe — `browser_run: permission ok` among its online checks,
 otherwise one `⚠` line naming the reason. A failing probe changes no exit code,
 so the exit-0 criterion above is unaffected. Step 7b has the detail.
 
@@ -571,7 +571,7 @@ Order:
 2. Password manager available → fill from your ops vault (do **not** echo the token in chat)
 3. Otherwise **ask for the token** (one question) and write the same way
 
-Permissions: Pages Edit · Workers KV Storage Edit · Account Settings Read · **Browser Run Write**. A token missing Browser Run Write makes every render fail per slug; the publish still succeeds. Verify that permission with `forge-doctor.sh --online` (step 7b) instead of discovering it at publish time. Workers KV Storage Write still covers CLI `--share` via REST.
+Permissions: Pages Edit · Workers KV Storage Edit · Account Settings Read · **Browser Rendering · Edit** — that is the dashboard group name, unchanged by the Browser Rendering → Browser Run product rename, so a token minted by searching the dropdown for "Browser Run" has no render permission. A token missing it makes every render fail per slug; the publish still succeeds. Verify that permission with `forge-doctor.sh --online` (step 7b) instead of discovering it at publish time. Workers KV Storage Write still covers CLI `--share` via REST.
 
 **KV fallback:** if the token lacks KV scope (or REST is rejected), `publish.sh`
 retries with `wrangler login` OAuth (`wrangler kv … --remote`,
@@ -694,7 +694,8 @@ Browser Run REST (`html` payload, JPEG out), invoked from `gen-og-images.sh`
 via `lib/og_render.py`.
 
 No chrome/chromium/ffmpeg/jq on the publisher machine. `python3` plus the
-existing `CLOUDFLARE_API_TOKEN` with **Browser Run Write** is enough. A token
+existing `CLOUDFLARE_API_TOKEN` with **Browser Rendering · Edit** is enough (the
+dashboard group name; Browser Run is the product). A token
 missing that permission makes every render fail per slug; the publish still
 succeeds.
 
@@ -730,12 +731,23 @@ card. Everyone should pull.
 
 Doctor reports no local OG toolchain — there is none, the renderer is
 server-side. `forge-doctor.sh --online` instead probes Browser Run once (a
-64×64 JPEG), advisory only: `browser_run: ok` among the online checks, or one
+64×64 JPEG, measured 133 ms of browser time), advisory only:
+`browser_run: permission ok` among the online checks, or one
 `⚠ Browser Run unavailable — OG thumbnails will fail per slug (publish still
-succeeds): <reason>` line. It never changes the exit code. The probe is
-skipped, with no network call, when the token or the account id is missing —
-that case is already reported as a deploy blocker.
+succeeds): <reason>` line. It never changes the exit code. It is skipped, with
+no network call, in two cases: the token or the account id is missing (already
+a deploy blocker), and the rest of the live pass failed — after a revoked token
+or a deleted Pages project the publish does **not** succeed, so the sentence
+would be false and the request wasted.
 
+`permission ok` is the whole claim: the credential may render. Plan limits
+decide whether a real publish can (Cloudflare docs, read 2026-09-08) — Workers
+**Paid** allows 30 Quick Actions requests/s and includes 10 browser hours per
+month, while Workers **Free** allows **1 request every 10 s** and 10 browser
+minutes per day. On a client-owned forge on Free, a single probe passes and a
+33-slug `--rebuild-index` takes `429 Too many requests`; publish continues and
+leaves the previous cards in place. Upgrade the account, or re-run the rebuild
+in batches.
 
 ## Step 8 — Final doctor (`--online`) and report
 
@@ -751,7 +763,7 @@ bash "$FORGE_ROOT/scripts/forge-doctor.sh" --online
 The verdict is the **`--online`** exit code; the offline run above is only there
 to separate a config problem from a live one.
 
-`--online` also runs the advisory Browser Run probe (step 7b): `browser_run: ok`,
+`--online` also runs the advisory Browser Run probe (step 7b): `browser_run: permission ok`,
 or one `⚠` line naming the reason. It never changes the exit code, so it neither
 blocks nor gates this report.
 
@@ -770,7 +782,7 @@ Report (only on exit 0):
 **hub_root**   : [path OK]
 **artifacts**  : [path OK | created]
 **doctor**     : exit 0 (`--online` ready)
-**og**         : browser_run ok | ⚠ advisory from --online (thumbnails only)
+**og**         : browser_run permission ok | ⚠ advisory (permission only, not capacity)
 
 **Next**
 - Generate: `silex-craft@silex-plugins` → write under $artifacts/<slug>/

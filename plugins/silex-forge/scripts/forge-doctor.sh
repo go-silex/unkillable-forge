@@ -165,9 +165,10 @@ if online:
         print(f"    {k}: {v}")
 
 # online_warnings only exists on an --online payload, and it carries the
-# advisories that change no exit code (Browser Run render permission, KV REST
-# fallback). Appended once, so the three status branches below print each
-# warning exactly one time.
+# advisories that change no exit code. Today that is the Browser Run render
+# permission and nothing else: preflight_mutations' only other warning needs
+# require_kv false, which doctor_online never passes. Appended once, so the
+# three status branches below print each warning exactly one time.
 warnings = list(d.get("warnings") or [])
 if online:
     warnings += list(d.get("online_warnings") or [])

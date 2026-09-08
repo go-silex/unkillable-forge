@@ -331,6 +331,26 @@ class ForgeEnvTests(_Tmp):
         self.assertIn("CLOUDFLARE_ACCOUNT_ID missing", message)
         self.assertIsNone(re.search(r"[0-9a-f]{32}", message))
 
+    def test_render_refuses_before_it_inlines_the_payload(self) -> None:
+        """Ordering, not decoration: inlining first costs up to 45 MB per slug.
+
+        _screenshot() re-resolves the credential, so render()'s own check reads
+        as redundant — a cleanup that drops it would still pass every other
+        test while moving the refusal to after a full inline pass, once per
+        slug in gen-og-images.sh.
+        """
+        html = _artifact(self.td / "a", "<html><head></head><body>x</body></html>")
+        env = self._isolated(self.td / "absent.env")
+
+        def never(*_a: object, **_k: object) -> dict:
+            self.fail("render() inlined the payload before refusing")
+
+        with patch.dict("os.environ", env):
+            with patch.object(og_render, "build_payload", never):
+                with self.assertRaises(og_render.OgRenderError) as ctx:
+                    og_render.render(html)
+        self.assertIn("CLOUDFLARE_API_TOKEN missing", str(ctx.exception))
+
 
 class _Response:
     """Minimal urlopen stand-in: a context manager with read()."""
@@ -427,7 +447,7 @@ class ProbeTests(_Tmp):
         self.assertIn("Unauthorized to render", message)
 
     def test_http_error_is_refused_with_the_api_reason(self) -> None:
-        """A 403 is what a token without Browser Run Write actually returns."""
+        """A 403 is what a token without Browser Rendering · Edit returns."""
 
         def fake(request: urllib.request.Request, timeout: object = None) -> _Response:
             raise urllib.error.HTTPError(

@@ -309,11 +309,12 @@ run_at "$CRASH/forge-doctor.sh" --quiet
 pass "a truncated payload degrades to deploy-blocked, never a silent 0"
 
 # ── advisory · a failing Browser Run probe warns, it never blocks ─────────────
-# A token without the Browser Run Write permission renders no thumbnail, but
+# A token without the Browser Rendering · Edit permission renders no thumbnail, but
 # the publish itself still succeeds — so the probe rides in online_warnings
-# and must leave the exit code at 0. The operator has to see it anyway: before
-# this, the human report printed `warnings` only, so every online advisory
-# (this one and the KV-REST fallback) was invisible.
+# and must leave the exit code at 0. The operator has to see it anyway: the
+# human report printed `warnings` only, and this advisory is the first thing
+# online_warnings can ever hold -- preflight's own warning needs require_kv
+# false, which doctor_online never passes -- so nothing printed it.
 ADV="$TD/advisory/scripts"
 mkdir -p "$ADV/lib"
 cp "$DOCTOR" "$ADV/"

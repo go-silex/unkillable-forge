@@ -278,7 +278,7 @@ plugins/silex-forge/scripts/forge-doctor.sh
 plugins/silex-forge/scripts/publish.sh --rebuild-index  # hub → wrangler Pages
 ```
 
-`--write` merges the discovered keys into `forge.env` (prints **key names only**) and persists the confirmed `pages_project` into an **existing** `forge.config.json` — it never creates that file. Never discoverable: `CLOUDFLARE_API_TOKEN` (API token permissions: Pages Edit · Workers KV Storage Edit · Account Settings Read · **Browser Run Write** — not the OAuth scopes above) and `hub_root` (local vault path). Both come from the operator via **`/forge-setup`**.
+`--write` merges the discovered keys into `forge.env` (prints **key names only**) and persists the confirmed `pages_project` into an **existing** `forge.config.json` — it never creates that file. Never discoverable: `CLOUDFLARE_API_TOKEN` (API token permissions: Pages Edit · Workers KV Storage Edit · Account Settings Read · **Browser Rendering · Edit** — the dashboard group name, not the OAuth scopes above) and `hub_root` (local vault path). Both come from the operator via **`/forge-setup`**.
 
 | `forge-discover.sh` exit | Meaning | Next |
 |---|---|---|
@@ -297,9 +297,12 @@ Project-name defaults are two, on purpose: `forge-discover.sh` → `silex-forge`
 `--json` (payload) and `--quiet` (one stderr line on any non-zero exit) follow the same codes, including a `load_config` crash: `--json` still emits a JSON document (`ok: false` + one `issues[]` line naming `lib/load_config.py`), `--quiet` still one stderr line, both exit `1`. A missing token is exit `2`, not a hub problem — and never a silent `0`. An empty `public_host` is a config **issue** (exit 1), never an exit-2 blocker.
 
 With `--online`, the human report prints `online_warnings` as `⚠` lines. It
-printed only the offline `warnings` before, so everything computed by the live
-pass was invisible — including the pre-existing `KV REST unreachable` fallback
-warning.
+printed only the offline `warnings` before, which hid nothing until now:
+`preflight_mutations` appends its single warning (`KV REST unreachable`) only
+when `require_kv` is false, and `doctor_online` always passes `require_kv=True`,
+so on the doctor path that list was permanently empty. The Browser Run advisory
+is the first value it can carry — which is what made the gap worth closing.
+`online_checks` and `online_issues` were printed all along.
 
 `publish.sh` refuses to deploy while doctor reports `ok: false`: it dies naming `/forge-setup` instead of falling back to the example config. `--share <slug>` verifies the hub artifact exists before any clone or deploy.
 
@@ -356,9 +359,12 @@ A forge on someone else's Cloudflare account: `forge-provision.sh` + `"vault_mar
 Rendered **before** `wrangler pages deploy` by Cloudflare Browser Run REST
 (`html` payload, JPEG out), invoked from `gen-og-images.sh` via `lib/og_render.py`.
 Publisher machines need `python3` and the existing `CLOUDFLARE_API_TOKEN` with
-**Browser Run Write** beside Pages Edit / Workers KV Edit / Account Settings
-Read — not chrome/chromium/ffmpeg/jq. A token missing Browser Run Write makes
-every render fail per slug; the publish still succeeds.
+**Browser Rendering · Edit** beside Pages Edit / Workers KV Edit / Account
+Settings Read — not chrome/chromium/ffmpeg/jq. That is the dashboard group
+name: the product was renamed Browser Rendering → Browser Run, the permission
+group was not, so a token minted by searching for "Browser Run" carries no
+render permission. A token missing it makes every render fail per slug; the
+publish still succeeds.
 
 Storage is unchanged: `site/a/<slug>/og.jpg` in the Pages snapshot, a copy in
 the hub SSOT, `og.src` hub-only proof (v2 digest = canonical HTML + subresources).
@@ -414,6 +420,15 @@ after the upgrade (~33 renders, well inside the 10 browser-hours/month included
 on Workers Paid). That is a recommendation, not a prerequisite — nothing
 breaks if skipped.
 
+Plan limits (Cloudflare docs, read 2026-09-08). Workers **Paid**: 10 browser
+hours/month included, then $0.09/h; Quick Actions 30 requests/s — a 33-slug
+rebuild is nothing. Workers **Free**: 10 browser *minutes* per day and Quick
+Actions **1 request every 10 s**, so a client-owned forge on Free takes `429
+Too many requests` on most of a `--rebuild-index` while a single probe always
+fits. That asymmetry is why `browser_run: permission ok` says *permission*: it
+proves the credential renders, never that the account can render 33 payloads
+back to back.
+
 A publisher still on the previous engine computes a v1 digest and will
 re-render and re-persist a slug a v2 machine already proved, and vice versa.
 Consequence is bounded churn (extra renders, different JPEG bytes uploaded),
@@ -422,7 +437,7 @@ never a deleted card. Everyone should pull.
 There is no local toolchain left for doctor to report — the renderer is
 server-side — so `forge-doctor.sh --online` proves the credential instead: one
 64×64 JPEG through `og_render.probe()`, against the same endpoint the renderer
-POSTs to. It surfaces as `browser_run: ok` among the online checks, or as one
+POSTs to. It surfaces as `browser_run: permission ok` among the online checks, or as one
 `⚠ Browser Run unavailable — OG thumbnails will fail per slug (publish still
 succeeds): <reason>` line. Advisory only: it never moves `ok` / `online_ok` /
 `deploy_ready` / `deploy_blockers` or any exit code, because publish is

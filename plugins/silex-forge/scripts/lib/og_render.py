@@ -10,11 +10,16 @@ Single resolution point for BOTH halves, on purpose:
 
 Two implementations of either half would flip the identity of every thumbnail
 in the catalogue at once -- the same failure mode the single
-share_bar_script() resolution point exists to prevent. Callers MUST shell out
-to this module and MUST NOT re-derive a digest or a payload. For the same
-reason every caller must resolve THIS FILE from the engine clone, never from
-the installed plugin: a clone/installed skew during a rollout makes the two
-copies disagree about the canonical bytes.
+share_bar_script() resolution point exists to prevent. Callers on the digest
+or payload path MUST shell out to this module and MUST NOT re-derive either.
+For the same reason those callers must resolve THIS FILE from the engine
+clone, never from the installed plugin: a clone/installed skew during a
+rollout makes the two copies disagree about the canonical bytes.
+
+probe() is the one deliberate exception, and only because it touches neither
+half: load_config.browser_run_probe imports it in-process from the installed
+plugin to answer "may this token render at all". It computes no digest and
+builds no artifact payload, so a skew there cannot move canonical bytes.
 
 The digest and the payload are built from ONE canonical text, produced by the
 scripts that injected the overlays in the first place (inject-share-bar.py
@@ -100,7 +105,11 @@ DEFAULT_TIMEOUT = 90
 # Write permission cannot be read back from the token verify endpoint, so the
 # only honest check is a real render.
 PROBE_HTML = '<!doctype html><meta charset="utf-8"><title>forge probe</title>'
-PROBE_TIMEOUT = 30
+# A blank 64x64 page measured 133 ms of browser time, so 15 s is already
+# generous. urlopen's timeout is per socket operation, not a wall clock, so
+# this bounds a stalled connection loosely -- keep it well under the 90 s a
+# real render is allowed.
+PROBE_TIMEOUT = 15
 
 # Settle budget before the capture. Every subresource is inlined as a data:
 # URI, so the page makes almost no network requests and gotoOptions'
@@ -506,7 +515,11 @@ def _config_account_id() -> str:
         from load_config import resolved_account_id  # noqa: PLC0415
 
         return str(resolved_account_id() or "").strip()
-    except Exception:
+    except (Exception, SystemExit):
+        # SystemExit, not just Exception: load_config._read_json raises
+        # SystemExit("config unreadable") on malformed JSON, which is the
+        # likeliest way this call fails. A bare "except Exception" would let
+        # it escape and kill the render batch this fallback exists to serve.
         return ""
 
 
@@ -521,8 +534,13 @@ def _credentials(token: str = "", account: str = "") -> tuple[str, str]:
     that resolved the pair itself passes it in, so doctor can never blame a
     value it just resolved.
     """
-    token = token or os.environ.get("CLOUDFLARE_API_TOKEN", "")
-    account = account or os.environ.get("CLOUDFLARE_ACCOUNT_ID", "") or _config_account_id()
+    # .strip() like every other resolver here (resolved_account_id,
+    # resolve_api_token, token_present): an id pasted from the dashboard with
+    # a trailing space would otherwise build ".../accounts/<id> /..." and
+    # raise InvalidURL, whose message embeds the whole id in a per-slug
+    # warning -- against the acct[:8] redaction the rest of the forge uses.
+    token = (token or os.environ.get("CLOUDFLARE_API_TOKEN", "")).strip()
+    account = (account or os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")).strip() or _config_account_id()
     if not token:
         raise OgRenderError(
             "CLOUDFLARE_API_TOKEN missing -- put it in ~/.config/silex/forge.env (chmod 600)"
@@ -546,8 +564,13 @@ def _screenshot(body: bytes, timeout: int, token: str = "", account: str = "") -
     """
     token, account = _credentials(token, account)
 
-    # cacheTTL=0: Quick Actions cache responses for 5s by default, which would
-    # serve a stale card to the retry that follows a failed render.
+    # cacheTTL=0 as a QUERY parameter, measured 2026-09-08: the endpoint
+    # rejects it in the body ("HTTP 400 Unrecognized key: cacheTTL") and
+    # accepts it in the query string (200, JPEG). Quick Actions cache
+    # responses for 5s by default; whether the query form disables that is
+    # not observable from here. It cannot serve a wrong card either way --
+    # the cache key is the request body, so an identical body deserves an
+    # identical card and a failed render caches nothing.
     url = (
         "https://api.cloudflare.com/client/v4/accounts/"
         f"{account}/browser-rendering/screenshot?cacheTTL=0"

@@ -151,6 +151,9 @@ S="$FORGE_ROOT/scripts/publish.sh"
 
 # Internal + mint share
 "$S" <slug> [path] --share --title "…" --type deck
+
+# Catalogue subtitle (optional; also settable as description in meta.json)
+"$S" <slug> [path] --title "…" --type deck --desc "one line under the title"
 ```
 
 Useful types: `deck` · `talk` · `guide` · `diagram` · `gallery` · `html`.

@@ -754,7 +754,7 @@ def browser_run_probe(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     """Advisory: can this token render an OG thumbnail on Browser Run.
 
     Returns {ok, checked, reason} and never raises. The renderer needs the
-    Browser Run Write permission, which cannot be read back from the token
+    Browser Rendering · Edit permission, which cannot be read back from the token
     verify endpoint _verify_api_token uses — the only honest check is one real
     render. A token without it still publishes; only the per-slug thumbnails
     fail, so this must never flip a verdict.
@@ -801,12 +801,29 @@ def doctor_online(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     online_warnings = list(pf.get("warnings") or [])
     perm = forge_env_permissions()
 
-    # Advisory: costs one 64x64 JPEG and reports as a warning only. It must
-    # not reach online_ok/deploy_ready — a publish with a token that cannot
-    # render still deploys the site, it just ships no new thumbnails.
-    browser_run = browser_run_probe(cfg)
+    # Advisory: one 64x64 JPEG (measured 133 ms of browser time), reported as
+    # a warning only. It must not reach online_ok/deploy_ready — a publish
+    # with a token that cannot render still deploys the site, it just ships no
+    # new thumbnails.
+    #
+    # Gated on pf["ok"]: the warning states "publish still succeeds", which is
+    # only true when the render permission is the ONLY thing missing. On a
+    # revoked token, an unreachable account or a deleted Pages project the
+    # publish does NOT succeed, and probing there would spend a second doomed
+    # request to blame Browser Run for a credential the report already
+    # condemned two lines above.
+    if pf["ok"]:
+        browser_run = browser_run_probe(cfg)
+    else:
+        browser_run = {
+            "ok": False,
+            "checked": False,
+            "reason": "online preflight failed — the credential is already reported",
+        }
     if browser_run["ok"]:
-        online_checks["browser_run"] = "ok"
+        # "permission ok", not "ok": one blank page proves the token may
+        # render, never that 33 real payloads will (size, settle, plan rate).
+        online_checks["browser_run"] = "permission ok"
     elif browser_run["checked"]:
         online_warnings.append(
             "Browser Run unavailable — OG thumbnails will fail per slug "
