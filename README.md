@@ -75,7 +75,7 @@ and CI runs the suite on `macos-latest` plus a `bash:3.2` container.
 | `bash` ≥ 3.2, `python3` ≥ 3.9 (stdlib only), `git`, `curl` | everything |
 | `wrangler` **or** `npx` | `wrangler pages deploy` |
 | `flock` | optional — a portable `mkdir` lock is used when absent, or when `flock` has no `-w` (BusyBox) |
-| `CLOUDFLARE_API_TOKEN` with **Browser Run Write** | OG thumbnails via Cloudflare Browser Run — no chrome/ffmpeg/jq. A token missing it makes every render fail per slug; the publish still succeeds |
+| `CLOUDFLARE_API_TOKEN` with **Browser Rendering · Edit** | OG thumbnails via Cloudflare Browser Run — no chrome/ffmpeg/jq. The dashboard permission group is still named Browser Rendering. A token missing it makes every render fail per slug; the publish still succeeds. `forge-doctor.sh --online` verifies the permission |
 
 ### Install the plugin
 
@@ -162,7 +162,7 @@ Two different Cloudflare credentials — do not mint one from the other's list:
 | Credential | Used by | Needs |
 |---|---|---|
 | `wrangler login` **OAuth** | `forge-discover.sh`, `forge-provision.sh`, `--share` KV fallback | scopes `pages (write)`, `workers_kv (write)` |
-| `CLOUDFLARE_API_TOKEN` in `forge.env` | `publish.sh` — every deploy | permissions Account · Cloudflare Pages · **Edit** · Account · Workers KV Storage · **Edit** · Account · Account Settings · **Read** · Account · Browser Run · **Write**. A token missing Browser Run Write makes every render fail per slug; the publish still succeeds |
+| `CLOUDFLARE_API_TOKEN` in `forge.env` | `publish.sh` — every deploy | permissions Account · Cloudflare Pages · **Edit** · Account · Workers KV Storage · **Edit** · Account · Account Settings · **Read** · Account · Browser Rendering · **Edit** (the group name did not follow the Browser Run product rename). A token missing it makes every render fail per slug; the publish still succeeds — `forge-doctor.sh --online` is what proves that last permission |
 
 Discovery is OAuth-only and never sees a token; deploy is token-only and
 `publish.sh` dies without one.
@@ -245,6 +245,10 @@ plugins/silex-forge/scripts/forge-doctor.sh --online   # + live Cloudflare check
 Exit `2` is the case a token-less laptop used to report as `OK`. Each blocker is
 printed with the command that clears it.
 
+`--online` also runs an advisory Browser Run probe — one 64×64 JPEG that proves
+the token's Browser Rendering · Edit permission, reported as `browser_run: permission ok` or as
+one `⚠ Browser Run unavailable …` line, with no effect on any exit code.
+
 | File | Role |
 |---|---|
 | `~/.config/silex/forge.config.json` | `hub_root`, `pages_project`, `public_host`, `vault_markers` (local, not git) |
@@ -286,7 +290,8 @@ canonical HTML + subresources). `--force` remains a `gen-og-images.sh` flag;
 default 80 — not ffmpeg `-q:v`. A dry run does not POST. Best-effort: missing
 token / Browser Run failure warns and publish continues. A render that fails
 leaves the previous thumbnail in place, and the per-slug warning now names
-the reason.
+the reason. Check the permission before publishing with
+`forge-doctor.sh --online` instead of discovering it as one warning per slug.
 
 `touch $hub/<artifacts_dir>/<slug>/og.keep` pins that slug's published card
 in the hub: `gen-og-images.sh` never re-renders it (`--force` does not

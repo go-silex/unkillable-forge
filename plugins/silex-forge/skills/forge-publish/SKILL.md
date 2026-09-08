@@ -151,6 +151,11 @@ S="$FORGE_ROOT/scripts/publish.sh"
 
 # Internal + mint share
 "$S" <slug> [path] --share --title "…" --type deck
+
+# Catalogue subtitle. `--desc` is the ONLY durable source: every publish
+# rewrites meta.json's description from it, so re-publishing without --desc
+# clears the field (only `shared` survives from the previous meta).
+"$S" <slug> [path] --title "…" --type deck --desc "one line under the title"
 ```
 
 Useful types: `deck` · `talk` · `guide` · `diagram` · `gallery` · `html`.
@@ -163,6 +168,7 @@ Other:
 "$S" --list
 "$S" --remove <slug>
 "$S" --rebuild-index
+"$S" --rebuild-index --force-og   # re-render every OG card, not only the stale ones
 ```
 
 ## Rules

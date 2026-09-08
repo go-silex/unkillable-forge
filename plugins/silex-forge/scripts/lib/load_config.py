@@ -745,18 +745,88 @@ def preflight_mutations(
     }
 
 
+def _exc_one_line(exc: BaseException) -> str:
+    """Collapse an exception to one line: doctor may not traceback."""
+    return " ".join(f"{exc.__class__.__name__}: {exc}".split())
+
+
+def browser_run_probe(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Advisory: can this token render an OG thumbnail on Browser Run.
+
+    Returns {ok, checked, reason} and never raises. The Browser Rendering ·
+    Edit permission cannot be read back from the token verify endpoint, so the
+    check is one real render. It must never flip a verdict: a token without
+    that permission still publishes and only loses its thumbnails.
+    Reasoning and measurements: PR #55.
+    """
+    cfg = cfg or load_config()
+    token = resolve_api_token()
+    account = resolved_account_id(cfg)
+    if not token or not account:
+        # Nothing to test, and doctor already reports the missing value.
+        return {
+            "ok": False,
+            "checked": False,
+            "reason": "token or account id missing — already reported",
+        }
+
+    # Lazy: og_render imports load_config lazily too, so a module-level import
+    # here would close the cycle.
+    try:
+        import og_render
+    except Exception as exc:
+        return {"ok": False, "checked": True, "reason": _exc_one_line(exc)}
+
+    try:
+        # The resolved pair travels with the call — resolved_account_id() reads
+        # sources og_render does not.
+        og_render.probe(token=token, account=account)
+    except og_render.OgRenderError as exc:
+        return {"ok": False, "checked": True, "reason": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "checked": True, "reason": _exc_one_line(exc)}
+    return {"ok": True, "checked": True, "reason": None}
+
+
 def doctor_online(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Optional online doctor: token, account, Pages project, KV namespace (KV required)."""
+    """Optional online doctor: token, account, Pages project, KV namespace (KV
+    required), plus the advisory Browser Run render probe."""
     base = doctor(cfg)
     pf = preflight_mutations(cfg, require_kv=True)
     online_issues = list(pf.get("errors") or [])
+    online_checks = dict(pf.get("checks") or {})
+    online_warnings = list(pf.get("warnings") or [])
     perm = forge_env_permissions()
+
+    # Advisory, warning-only, and gated on pf["ok"] because the warning says
+    # "publish still succeeds", which holds only when the render permission is
+    # the sole gap. One probe = one render (measured 133 ms and 2492 ms of
+    # browser time on two runs). Reasoning: PR #55.
+    if pf["ok"]:
+        browser_run = browser_run_probe(cfg)
+    else:
+        browser_run = {
+            "ok": False,
+            "checked": False,
+            "reason": "online preflight failed — the credential is already reported",
+        }
+    if browser_run["ok"]:
+        # "permission ok", not "ok": one blank page proves the token may
+        # render, never that 33 real payloads will (size, settle, plan rate).
+        online_checks["browser_run"] = "permission ok"
+    elif browser_run["checked"]:
+        online_warnings.append(
+            "Browser Run unavailable — OG thumbnails will fail per slug "
+            f"(publish still succeeds): {browser_run['reason']}"
+        )
+
     return {
         **base,
         "online_ok": pf["ok"],
-        "online_checks": pf.get("checks") or {},
+        "online_checks": online_checks,
         "online_issues": online_issues,
-        "online_warnings": pf.get("warnings") or [],
+        "online_warnings": online_warnings,
+        "browser_run": browser_run,
         "forge_env_permissions": perm,
         "deploy_ready": base.get("deploy_ready") and perm["ok"] and pf["ok"],
     }
@@ -839,8 +909,11 @@ def doctor(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     if not perm["ok"] and perm.get("issue"):
         warnings.append(perm["issue"])
 
-    # No OG toolchain probe: the renderer is Browser Run, reached with python3
-    # and the publish token (already reported). The real signal is a per-slug
+    # No local OG toolchain probe: there is no local toolchain left, the
+    # renderer is Browser Run reached with python3 and the publish token
+    # (already reported). Whether that token may actually render is the
+    # advisory browser_run_probe() in doctor_online() — it needs the network,
+    # so doctor() stays offline. The per-slug signal remains a
     # "browser-run render failed — <reason>" from gen-og-images.sh.
 
     deploy_blockers: list[str] = []

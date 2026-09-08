@@ -308,4 +308,85 @@ run_at "$CRASH/forge-doctor.sh" --quiet
   || fail "--quiet must stay one stderr line on a truncated payload, got $ERR_LINES: $ERR"
 pass "a truncated payload degrades to deploy-blocked, never a silent 0"
 
+# ── advisory · a failing Browser Run probe warns, it never blocks ─────────────
+# A token without the Browser Rendering · Edit permission renders no thumbnail, but
+# the publish itself still succeeds — so the probe rides in online_warnings
+# and must leave the exit code at 0. The operator has to see it anyway: the
+# human report printed `warnings` only, and this advisory is the first thing
+# online_warnings can ever hold -- preflight's own warning needs require_kv
+# false, which doctor_online never passes -- so nothing printed it.
+ADV="$TD/advisory/scripts"
+mkdir -p "$ADV/lib"
+cp "$DOCTOR" "$ADV/"
+
+cat > "$ADV/lib/load_config.py" <<'EOF'
+REASON = "browser run HTTP 403: Actor lacks permission"
+
+_BASE = {
+    "ok": True,
+    "issues": [],
+    "warnings": [],
+    "config_source": "stub",
+    "fallback": False,
+    "hub_root": "/stub/hub",
+    "artifacts_root": "/stub/hub/artifacts",
+    "local_path": "/stub/forge.config.json",
+    "example_path": "/stub/forge.config.example.json",
+    "forge_env": "/stub/forge.env",
+    "has_token": True,
+    "deploy_ready": True,
+    "deploy_blockers": [],
+    "cloudflare_account_id": "a" * 32,
+    "shares_kv_namespace_id": "b" * 32,
+    "pages_project": "silex-forge",
+    "forge_env_permissions": {"ok": True, "mode": "600", "issue": None},
+    "skill": "forge-setup",
+}
+
+
+def doctor():
+    return dict(_BASE)
+
+
+def doctor_online():
+    d = dict(_BASE)
+    d["online_ok"] = True
+    d["online_checks"] = {"token": "user", "account": "ok"}
+    d["online_issues"] = []
+    d["online_warnings"] = [
+        "Browser Run unavailable — OG thumbnails will fail per slug "
+        "(publish still succeeds): " + REASON
+    ]
+    d["browser_run"] = {"ok": False, "checked": True, "reason": REASON}
+    return d
+EOF
+
+run_at "$ADV/forge-doctor.sh" --online
+[ "$RC" -eq 0 ] || fail "a failing Browser Run probe must stay exit 0, got $RC: $OUT $ERR"
+echo "$OUT" | grep -q 'Browser Run unavailable' \
+  || fail "the online report must surface the Browser Run advisory, got: $OUT"
+echo "$OUT" | grep -q 'publish still succeeds' \
+  || fail "the advisory must say the publish still succeeds, got: $OUT"
+echo "$OUT" | grep -q 'Actor lacks permission' \
+  || fail "the advisory must carry the API reason, got: $OUT"
+WARNS="$(printf '%s\n' "$OUT" | grep -c 'Browser Run unavailable' || true)"
+[ "$WARNS" -eq 1 ] \
+  || fail "the advisory must be printed exactly once, got $WARNS: $OUT"
+printf '%s\n' "$OUT" | grep -q '⚠ Browser Run unavailable' \
+  || fail "the advisory must be marked ⚠, not ✗ (it blocks nothing), got: $OUT"
+pass "failing Browser Run probe → exit 0 with one ⚠ advisory line"
+
+run_at "$ADV/forge-doctor.sh" --online --quiet
+[ "$RC" -eq 0 ] || fail "--quiet must exit 0 on an advisory-only failure, got $RC: $ERR"
+[ -z "$OUT" ] || fail "--quiet must not print to stdout, got: $OUT"
+[ -z "$ERR" ] || fail "--quiet must stay silent for an advisory, got: $ERR"
+pass "--quiet stays silent when only the advisory failed"
+
+run_at "$ADV/forge-doctor.sh"
+[ "$RC" -eq 0 ] || fail "the offline run must exit 0 on this fixture, got $RC: $OUT $ERR"
+if echo "$OUT" | grep -q 'Browser Run'; then
+  fail "the offline run must not report an online advisory, got: $OUT"
+fi
+pass "offline run reports no Browser Run advisory"
+
 echo "all forge-doctor behavioral checks passed"
