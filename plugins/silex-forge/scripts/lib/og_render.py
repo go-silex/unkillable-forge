@@ -104,15 +104,18 @@ DEFAULT_TIMEOUT = 90
 # Browser Run reachability probe (forge-doctor.sh --online). The Browser Run
 # Write permission cannot be read back from the token verify endpoint, so the
 # only honest check is a real render.
-# The probe page carries a nonce so no two probes can share a Quick Actions
-# cache entry (responses are cached ~5 s by default, keyed on the request
-# body). A constant body is the one way this check could report a cached
-# green for a credential that has since been revoked.
+# Constant on purpose. Quick Actions caches a response ~5 s keyed on the
+# request body, so a second probe inside that window is replayed for free
+# (measured: identical bytes and an identical X-Browser-Ms-Used at 0.15 s
+# wall, against 3.8 s for the render) -- which is what /forge-setup wants,
+# since it runs --online twice. It cannot fake a green either: the same
+# cached body with a revoked token answers HTTP 401, so authentication is
+# enforced ahead of the cache.
 PROBE_HTML = '<!doctype html><meta charset="utf-8"><title>forge probe</title>'
-# A blank 64x64 page measured 133 ms of browser time, so 15 s is already
-# generous. urlopen's timeout is per socket operation, not a wall clock, so
-# this bounds a stalled connection loosely -- keep it well under the 90 s a
-# real render is allowed.
+# A blank 64x64 page measured 0.13-2.5 s of browser time (cold instance vs
+# warm) and 3.8 s wall, so 15 s is generous. urlopen's timeout is per socket
+# operation, not a wall clock, so this bounds a stalled connection loosely --
+# keep it well under the 90 s a real render is allowed.
 PROBE_TIMEOUT = 15
 
 # Settle budget before the capture. Every subresource is inlined as a data:
@@ -568,14 +571,13 @@ def _screenshot(body: bytes, timeout: int, token: str = "", account: str = "") -
     """
     token, account = _credentials(token, account)
 
-    # No cacheTTL: measured 2026-09-08, the endpoint rejects it in the body
-    # ("HTTP 400 Unrecognized key: cacheTTL") and accepts it in the query
-    # string without documenting it anywhere -- it appears in neither the
-    # screenshot endpoint page, the Quick Actions index, nor llms.txt, so
-    # what it does there is unknowable. Renders do not need it: the cache is
-    # keyed on the request body, so an identical body deserves an identical
-    # card and a failed render caches nothing. The probe does not need it
-    # either -- its body carries a nonce (see PROBE_HTML).
+    # No cacheTTL. Measured 2026-09-08: the endpoint rejects it in the body
+    # ("HTTP 400 Unrecognized key: cacheTTL"), accepts it in the query string,
+    # and documents it in neither the screenshot endpoint page, the Quick
+    # Actions index, nor llms.txt. Nothing here needs it. The ~5 s response
+    # cache is keyed on the request body, so an identical body deserves an
+    # identical card, a failed render caches nothing, and a cache hit is
+    # still authenticated (same body + revoked token = HTTP 401).
     url = (
         "https://api.cloudflare.com/client/v4/accounts/"
         f"{account}/browser-rendering/screenshot"
@@ -616,12 +618,9 @@ def render(html_path: Path, quality: int = DEFAULT_QUALITY, timeout: int = DEFAU
 
 
 def probe_payload() -> dict:
-    """The smallest render Browser Run will accept: a 64x64 blank page.
-
-    Nonced per call: two probes must never collide in the response cache.
-    """
+    """The smallest render Browser Run will accept: a 64x64 blank page."""
     return {
-        "html": f"{PROBE_HTML}<!-- {os.urandom(8).hex()} -->",
+        "html": PROBE_HTML,
         "viewport": {"width": 64, "height": 64},
         "gotoOptions": {"waitUntil": "load", "timeout": 10000},
         "screenshotOptions": {"type": "jpeg", "quality": 1},

@@ -731,7 +731,8 @@ card. Everyone should pull.
 
 Doctor reports no local OG toolchain — there is none, the renderer is
 server-side. `forge-doctor.sh --online` instead probes Browser Run once (a
-64×64 JPEG, measured 133 ms of browser time), advisory only:
+64×64 JPEG — 0.13–2.5 s of browser time, and a second `--online` inside ~5 s
+is replayed from cache for free), advisory only:
 `browser_run: permission ok` among the online checks, or one
 `⚠ Browser Run unavailable — OG thumbnails will fail per slug (publish still
 succeeds): <reason>` line. It never changes the exit code. It is skipped, with

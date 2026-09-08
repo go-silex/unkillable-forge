@@ -431,18 +431,23 @@ class ProbeTests(_Tmp):
         self.assertEqual({"width": 64, "height": 64}, body["viewport"])
         self.assertEqual("jpeg", body["screenshotOptions"]["type"])
         self.assertNotIn("clip", body["screenshotOptions"])
-        self.assertIn("forge probe", body["html"])
+        self.assertEqual(og_render.PROBE_HTML, body["html"])
 
-    def test_two_probes_cannot_share_a_cache_entry(self) -> None:
-        """Quick Actions caches ~5 s on the request body.
+    def test_the_probe_body_is_stable_and_carries_no_cache_parameter(self) -> None:
+        """Two probes send the same bytes, on purpose.
 
-        A constant probe body is the one way this check could answer from
-        cache for a credential revoked in the meantime, so the page carries a
-        nonce and no `cacheTTL` parameter is relied on.
+        Quick Actions caches a response ~5 s keyed on the request body, so a
+        constant body makes the second `--online` of a /forge-setup run free.
+        Measured against the live API: a cache hit replays the bytes and the
+        billing figure at 0.15 s wall, and the same body with a revoked token
+        still answers HTTP 401 — authentication is enforced ahead of the
+        cache, so a cache hit cannot manufacture a green. `cacheTTL` is
+        therefore not sent (the endpoint rejects it in the body anyway).
         """
         seen: list[dict] = []
 
         def fake(request: urllib.request.Request, timeout: object = None) -> _Response:
+            self.assertNotIn("cacheTTL", request.full_url)
             seen.append(json.loads(request.data))
             return _Response(b"\xff\xd8\xff\xd9")
 
@@ -451,7 +456,7 @@ class ProbeTests(_Tmp):
                 og_render.probe()
                 og_render.probe()
 
-        self.assertNotEqual(seen[0]["html"], seen[1]["html"])
+        self.assertEqual(seen[0], seen[1])
         self.assertNotIn("cacheTTL", seen[0])
 
     def test_in_band_failure_is_refused_with_the_api_reason(self) -> None:

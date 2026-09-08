@@ -801,8 +801,9 @@ def doctor_online(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     online_warnings = list(pf.get("warnings") or [])
     perm = forge_env_permissions()
 
-    # Advisory: one 64x64 JPEG (measured 133 ms of browser time), reported as
-    # a warning only. It must not reach online_ok/deploy_ready — a publish
+    # Advisory: one 64x64 JPEG (measured 0.13-2.5 s of browser time depending
+    # on whether the instance is warm; a repeat inside ~5 s is served from
+    # cache for free), reported as a warning only. It must not reach online_ok/deploy_ready — a publish
     # with a token that cannot render still deploys the site, it just ships no
     # new thumbnails.
     #
