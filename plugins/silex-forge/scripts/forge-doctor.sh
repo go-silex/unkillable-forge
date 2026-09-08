@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# forge-doctor.sh — check the forge install: local config + deploy credentials
+# forge-doctor.sh — check the forge install: local config, deploy credentials,
+# and (with --online) what those credentials can actually do on Cloudflare —
+# including one advisory Browser Run render probe.
 #
 #   forge-doctor.sh           # human report
 #   forge-doctor.sh --json    # JSON only
@@ -34,7 +36,9 @@ for a in "$@"; do
 Usage: forge-doctor.sh [--json] [--quiet] [--online]
   Checks ~/.config/silex/forge.config.json (example fallback) and the
   Cloudflare credentials in ~/.config/silex/forge.env.
-  --online : also check token/account/project/KV against the Cloudflare API.
+  --online : also check token/account/project/KV against the Cloudflare API,
+             and probe Browser Run (advisory: OG thumbnails only — it never
+             changes an exit code).
 
 Exit: 0 ready · 1 config KO (run the forge-setup skill) · 2 deploy blocked
       (each blocker is reported with the command that fixes it).
@@ -160,7 +164,13 @@ if online:
     for k, v in (d.get("online_checks") or {}).items():
         print(f"    {k}: {v}")
 
-warnings = d.get("warnings") or []
+# online_warnings only exists on an --online payload, and it carries the
+# advisories that change no exit code (Browser Run render permission, KV REST
+# fallback). Appended once, so the three status branches below print each
+# warning exactly one time.
+warnings = list(d.get("warnings") or [])
+if online:
+    warnings += list(d.get("online_warnings") or [])
 if ok and deploy and online_ok:
     print("  status   : OK")
     for w in warnings:

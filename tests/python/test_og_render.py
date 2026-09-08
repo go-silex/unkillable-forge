@@ -1,18 +1,25 @@
-"""Unit tests for lib/og_render.py — digest v2 + payload, no network.
+"""Unit tests for lib/og_render.py — digest v2, payload, Browser Run probe.
 
-render() is not exercised here: it POSTs to Browser Run. What is pinned is the
-identity contract gen-og-images.sh and persist_og_to_hub must share, and the
-payload invariants that decide what Cloudflare actually receives.
+No network: the one class that exercises the HTTP path (ProbeTests) stubs
+urllib.request.urlopen and inspects the recorded request. What is pinned is
+the identity contract gen-og-images.sh and persist_og_to_hub must share, the
+payload invariants that decide what Cloudflare actually receives, and the fact
+that the doctor probe reaches the very endpoint render() posts to.
 """
 
 from __future__ import annotations
 
 import base64
+import io
+import json
 import os
+import re
 import shutil
 import sys
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -253,19 +260,25 @@ class PayloadTests(_Tmp):
 class ForgeEnvTests(_Tmp):
     """Credentials handling.
 
-    Every case pins FORGE_ENV *and* FORGE_ENV_FILE at a temp file and clears
-    the CLOUDFLARE_* pair, so a run on a real operator machine can never fall
-    through to ~/.config/silex/forge.env. An earlier revision resolved
-    load_config.forge_env_path() first, which reads FORGE_ENV only, ignored the
-    FORGE_ENV_FILE these tests set, read the real credentials file and printed
-    the production token in an assertion message. Assertions here therefore
-    compare booleans, never a credential value.
+    Every case pins FORGE_ENV, FORGE_ENV_FILE *and* FORGE_CONFIG at temp paths
+    and clears the CLOUDFLARE_* pair, so a run on a real operator machine can
+    never fall through to ~/.config/silex/forge.env — nor, since _credentials()
+    gained its config fallback, to ~/.config/silex/forge.config.json, whose
+    cloudflare_account_id would make a refusal case pass in CI and fail here.
+    An earlier revision resolved load_config.forge_env_path() first, which
+    reads FORGE_ENV only, ignored the FORGE_ENV_FILE these tests set, read the
+    real credentials file and printed the production token in an assertion
+    message. Assertions here therefore compare booleans, never a credential
+    value.
     """
 
     def _isolated(self, env: Path) -> dict[str, str]:
         return {
             "FORGE_ENV_FILE": str(env),
             "FORGE_ENV": str(env),
+            # Absent on purpose: _merged_config() then falls back to the
+            # example config, whose cloudflare_account_id is empty.
+            "FORGE_CONFIG": str(self.td / "absent.config.json"),
             "CLOUDFLARE_API_TOKEN": "",
             "CLOUDFLARE_ACCOUNT_ID": "",
         }
@@ -297,6 +310,211 @@ class ForgeEnvTests(_Tmp):
             og_render.load_forge_env()
             self.assertTrue(os.environ["CLOUDFLARE_API_TOKEN"] == "tok")
             self.assertTrue(os.environ["CLOUDFLARE_ACCOUNT_ID"] == "acct")
+
+    def test_no_account_anywhere_is_still_refused(self) -> None:
+        """The config fallback must not reach the operator's own config here.
+
+        FORGE_CONFIG is pinned at an absent path, so the fallback resolves the
+        example config's empty cloudflare_account_id and the refusal is the
+        same in CI and on a configured publisher machine. Written without
+        FORGE_CONFIG, this case would pass in CI and fail here — and its
+        assertion message would carry a real account id.
+        """
+        env = self.td / "token-only.env"
+        env.write_text("CLOUDFLARE_API_TOKEN=tok\n", encoding="utf-8")
+        env.chmod(0o600)
+        with patch.dict("os.environ", self._isolated(env)):
+            og_render.load_forge_env()
+            with self.assertRaises(og_render.OgRenderError) as ctx:
+                og_render._credentials()
+        message = str(ctx.exception)
+        self.assertIn("CLOUDFLARE_ACCOUNT_ID missing", message)
+        self.assertIsNone(re.search(r"[0-9a-f]{32}", message))
+
+
+class _Response:
+    """Minimal urlopen stand-in: a context manager with read()."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> "_Response":
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+
+class ProbeTests(_Tmp):
+    """probe() — what forge-doctor.sh --online asks Browser Run.
+
+    The credentials are pinned in the environment (both keys set, so
+    load_forge_env() never reaches a real forge.env) and urlopen is stubbed:
+    no request leaves the process. FORGE_CONFIG is pinned too: a case that
+    blanks CLOUDFLARE_ACCOUNT_ID reaches _credentials()' config fallback,
+    which would otherwise read the operator's own forge.config.json.
+    """
+
+    def _env(self) -> dict[str, str]:
+        absent = str(self.td / "absent.env")
+        return {
+            "FORGE_ENV_FILE": absent,
+            "FORGE_ENV": absent,
+            "FORGE_CONFIG": str(self.td / "absent.config.json"),
+            "CLOUDFLARE_API_TOKEN": "tok",
+            "CLOUDFLARE_ACCOUNT_ID": "acct-1234",
+        }
+
+    def test_probe_hits_the_endpoint_render_uses_and_writes_nothing(self) -> None:
+        """A probe against another endpoint would prove nothing about a render."""
+        html = _artifact(self.td / "a", "<html><head></head><body>x</body></html>")
+        seen: list[urllib.request.Request] = []
+
+        def fake(request: urllib.request.Request, timeout: object = None) -> _Response:
+            seen.append(request)
+            return _Response(b"\xff\xd8\xff\xd9")
+
+        with patch.dict("os.environ", self._env()):
+            with patch("urllib.request.urlopen", fake):
+                before = sorted(p.name for p in self.td.rglob("*"))
+                self.assertIsNone(og_render.probe())
+                after = sorted(p.name for p in self.td.rglob("*"))
+                og_render.render(html)
+
+        probe_req, render_req = seen
+        self.assertEqual(render_req.full_url, probe_req.full_url)
+        self.assertIn("browser-rendering/screenshot", probe_req.full_url)
+        self.assertEqual("POST", probe_req.get_method())
+        self.assertEqual("Bearer tok", probe_req.get_header("Authorization"))
+        # The probe writes no file: doctor is a read-only check.
+        self.assertEqual(before, after)
+
+    def test_probe_payload_is_a_64px_blank_page_with_no_settle_wait(self) -> None:
+        """One doctor run costs one render: SETTLE_MS buys nothing here."""
+        seen: list[dict] = []
+
+        def fake(request: urllib.request.Request, timeout: object = None) -> _Response:
+            seen.append(json.loads(request.data))
+            return _Response(b"\xff\xd8\xff\xd9")
+
+        with patch.dict("os.environ", self._env()):
+            with patch("urllib.request.urlopen", fake):
+                og_render.probe()
+
+        body = seen[0]
+        self.assertEqual(
+            {"html", "viewport", "gotoOptions", "screenshotOptions"}, set(body)
+        )
+        self.assertEqual({"width": 64, "height": 64}, body["viewport"])
+        self.assertEqual("jpeg", body["screenshotOptions"]["type"])
+        self.assertNotIn("clip", body["screenshotOptions"])
+
+    def test_in_band_failure_is_refused_with_the_api_reason(self) -> None:
+        """A 200 carrying JSON means the API refused; doctor needs the reason."""
+
+        def fake(request: urllib.request.Request, timeout: object = None) -> _Response:
+            return _Response(b'{"errors":[{"message":"Unauthorized to render"}]}')
+
+        with patch.dict("os.environ", self._env()):
+            with patch("urllib.request.urlopen", fake):
+                with self.assertRaises(og_render.OgRenderError) as ctx:
+                    og_render.probe()
+        message = str(ctx.exception)
+        self.assertIn("no JPEG", message)
+        self.assertIn("Unauthorized to render", message)
+
+    def test_http_error_is_refused_with_the_api_reason(self) -> None:
+        """A 403 is what a token without Browser Run Write actually returns."""
+
+        def fake(request: urllib.request.Request, timeout: object = None) -> _Response:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                403,
+                "Forbidden",
+                {},
+                io.BytesIO(b'{"errors":[{"message":"Actor lacks permission"}]}'),
+            )
+
+        with patch.dict("os.environ", self._env()):
+            with patch("urllib.request.urlopen", fake):
+                with self.assertRaises(og_render.OgRenderError) as ctx:
+                    og_render.probe()
+        message = str(ctx.exception)
+        self.assertIn("HTTP 403", message)
+        self.assertIn("Actor lacks permission", message)
+
+    def test_probe_cli_reports_ok(self) -> None:
+        def fake(request: urllib.request.Request, timeout: object = None) -> _Response:
+            return _Response(b"\xff\xd8\xff\xd9")
+
+        buf = StringIO()
+        with patch.dict("os.environ", self._env()):
+            with patch("urllib.request.urlopen", fake):
+                with patch("sys.stdout", buf):
+                    rc = og_render.main(["probe"])
+        self.assertEqual(0, rc)
+        self.assertEqual("browser run: ok", buf.getvalue().strip())
+
+    def test_account_id_falls_back_to_the_local_config(self) -> None:
+        """forge.config.json's cloudflare_account_id is a documented source.
+
+        publish.sh exports the resolved id, but gen-og-images.sh only eval's
+        export_env into shell variables, so a standalone run reaches this
+        module with forge.env as its only source. Refusing here what
+        load_config resolves would fail a machine the rest of the forge
+        considers configured.
+        """
+        html = _artifact(self.td / "a", "<html><head></head><body>x</body></html>")
+        cfg = self.td / "forge.config.json"
+        cfg.write_text(
+            json.dumps({"cloudflare_account_id": "acct-from-config"}), encoding="utf-8"
+        )
+        seen: list[str] = []
+
+        def fake(request: urllib.request.Request, timeout: object = None) -> _Response:
+            seen.append(request.full_url)
+            return _Response(b"\xff\xd8\xff\xd9")
+
+        env = self._env()
+        env["CLOUDFLARE_ACCOUNT_ID"] = ""
+        env["FORGE_CONFIG"] = str(cfg)
+        with patch.dict("os.environ", env):
+            with patch("urllib.request.urlopen", fake):
+                og_render.probe()
+                og_render.render(html)
+        self.assertEqual(2, len(seen))
+        for url in seen:
+            self.assertIn("/accounts/acct-from-config/", url)
+
+    def test_supplied_credentials_are_used_without_reading_forge_env(self) -> None:
+        """forge-doctor.sh resolves the pair itself and owns the perms verdict.
+
+        The designated forge.env is world-readable here: load_forge_env()
+        refuses that mode, so a probe that still read it would report an
+        env-permission problem as a Browser Run failure.
+        """
+        loose = self.td / "loose.env"
+        loose.write_text("CLOUDFLARE_API_TOKEN=from-file\n", encoding="utf-8")
+        loose.chmod(0o644)
+        seen: list[urllib.request.Request] = []
+
+        def fake(request: urllib.request.Request, timeout: object = None) -> _Response:
+            seen.append(request)
+            return _Response(b"\xff\xd8\xff\xd9")
+
+        env = self._env()
+        env["FORGE_ENV_FILE"] = str(loose)
+        env["FORGE_ENV"] = str(loose)
+        env["CLOUDFLARE_API_TOKEN"] = ""
+        env["CLOUDFLARE_ACCOUNT_ID"] = ""
+        with patch.dict("os.environ", env):
+            with patch("urllib.request.urlopen", fake):
+                self.assertIsNone(og_render.probe(token="tok-9", account="acct-9"))
+        self.assertIn("/accounts/acct-9/", seen[0].full_url)
+        self.assertEqual("Bearer tok-9", seen[0].get_header("Authorization"))
 
 
 class CliTests(_Tmp):

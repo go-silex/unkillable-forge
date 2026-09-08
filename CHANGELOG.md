@@ -9,6 +9,20 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+### Added
+
+- `forge-doctor.sh --online` now proves the token's Browser Run permission with one advisory 64×64 JPEG render (`lib/og_render.py`, which keeps the endpoint and gains a `probe` subcommand, wrapped by `load_config.browser_run_probe()`). The `--json` payload gains `browser_run`, `online_checks.browser_run` reads `ok` when the render succeeds, and a failure appends exactly one line to `online_warnings` — `Browser Run unavailable — OG thumbnails will fail per slug (publish still succeeds): <reason>`. It is advisory by design: `ok`, `online_ok`, `deploy_ready`, `issues`, `deploy_blockers` and every exit code are untouched, because a token missing Browser Run Write still deploys and only loses its thumbnails. It is skipped, with no network call, when the token or the account id is missing — that is already a deploy blocker and doctor does not report the same gap twice. Nothing verified this permission after 1.18.0 moved rendering server-side, and the provision wizard still minted a 3-permission token: such a token deploys fine and then fails every render, one warning per slug, in the middle of a publish. No such publish is on record — the probe answers at setup time instead. Cost is one render per `--online` run; offline `forge-doctor.sh` is unchanged and still makes no network call.
+
+### Changed
+
+- `forge-provision.sh` stage 5 and `.env.example` now name the four permissions the token actually needs — Pages Edit, Workers KV Storage Edit, Account Settings Read, Browser Run Write. Both still described the 3-permission token from before the 1.18.0 cutover, so an operator following the wizard end to end minted a token that could deploy but could not render a single thumbnail.
+
+### Fixed
+
+- The human `forge-doctor.sh` report prints the `--online` warnings. `online_warnings` was computed and never displayed, so the live pass could only ever be read through `--json` — which also hid the pre-existing `KV REST unreachable — publish --share will try wrangler OAuth if needed` fallback warning from every operator who ran the human report.
+- `lib/og_render.py` resolves the account id through `load_config.resolved_account_id()` when neither the environment nor `forge.env` carries it, instead of refusing `CLOUDFLARE_ACCOUNT_ID missing` for the `cloudflare_account_id` the local `forge.config.json` provides. `publish.sh` exports the resolved value, so its renders were unaffected; a standalone `gen-og-images.sh` run only `eval`s `export_env` into shell variables, and `forge-doctor.sh`'s probe runs in-process, so both saw the narrower source. The doctor advisory now also hands `probe()` the pair it resolved — a check that refused a value doctor had just accepted would name the wrong cause — and a supplied credential skips the `forge.env` read entirely, so a loose file mode stays the env-permission blocker it already is instead of resurfacing as a Browser Run failure.
+- `plugins/silex-forge/skills/forge-publish/SKILL.md` documents `--force-og`; it was the one `publish.sh` flag the skill never named.
+
 ## [1.18.0] - 2026-09-08
 
 ### Added

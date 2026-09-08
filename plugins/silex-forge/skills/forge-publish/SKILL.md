@@ -163,6 +163,7 @@ Other:
 "$S" --list
 "$S" --remove <slug>
 "$S" --rebuild-index
+"$S" --rebuild-index --force-og   # re-render every OG card, not only the stale ones
 ```
 
 ## Rules

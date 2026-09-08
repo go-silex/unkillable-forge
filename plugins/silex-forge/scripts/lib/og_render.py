@@ -96,6 +96,12 @@ OG_HEIGHT = 630
 DEFAULT_QUALITY = 80
 DEFAULT_TIMEOUT = 90
 
+# Browser Run reachability probe (forge-doctor.sh --online). The Browser Run
+# Write permission cannot be read back from the token verify endpoint, so the
+# only honest check is a real render.
+PROBE_HTML = '<!doctype html><meta charset="utf-8"><title>forge probe</title>'
+PROBE_TIMEOUT = 30
+
 # Settle budget before the capture. Every subresource is inlined as a data:
 # URI, so the page makes almost no network requests and gotoOptions'
 # networkidle0 ("no connection for 500 ms") is satisfied about half a second
@@ -490,11 +496,33 @@ def build_payload(html_path: Path, quality: int = DEFAULT_QUALITY) -> dict:
     }
 
 
-def render(html_path: Path, quality: int = DEFAULT_QUALITY, timeout: int = DEFAULT_TIMEOUT) -> bytes:
-    """POST the payload to Browser Run and return the JPEG bytes."""
-    load_forge_env()
-    token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
-    account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+def _config_account_id() -> str:
+    """forge.config.json's cloudflare_account_id, or "" when unreadable.
+
+    Lazy import: load_config imports this module lazily too (browser_run_probe),
+    so a module-level import would close the cycle.
+    """
+    try:
+        from load_config import resolved_account_id  # noqa: PLC0415
+
+        return str(resolved_account_id() or "").strip()
+    except Exception:
+        return ""
+
+
+def _credentials(token: str = "", account: str = "") -> tuple[str, str]:
+    """What the caller already resolved, else the environment, or a refusal.
+
+    The account id falls back to load_config's resolution, which also reads
+    forge.config.json's cloudflare_account_id. Resolving it more narrowly here
+    would refuse a value the rest of the forge accepts: publish.sh exports the
+    resolved id, but a standalone gen-og-images.sh run only eval's export_env
+    into shell variables, and forge-doctor.sh's probe runs in-process. A caller
+    that resolved the pair itself passes it in, so doctor can never blame a
+    value it just resolved.
+    """
+    token = token or os.environ.get("CLOUDFLARE_API_TOKEN", "")
+    account = account or os.environ.get("CLOUDFLARE_ACCOUNT_ID", "") or _config_account_id()
     if not token:
         raise OgRenderError(
             "CLOUDFLARE_API_TOKEN missing -- put it in ~/.config/silex/forge.env (chmod 600)"
@@ -503,13 +531,20 @@ def render(html_path: Path, quality: int = DEFAULT_QUALITY, timeout: int = DEFAU
         raise OgRenderError(
             "CLOUDFLARE_ACCOUNT_ID missing -- forge-discover.sh prints it, then forge-doctor.sh"
         )
+    return token, account
 
-    body = json.dumps(build_payload(html_path, quality)).encode("utf-8")
-    if len(body) > MAX_PAYLOAD_BYTES:
-        raise OgRenderError(
-            f"render payload {len(body) // (1024 * 1024)} MB exceeds the "
-            f"{MAX_PAYLOAD_BYTES // (1024 * 1024)} MB ceiling"
-        )
+
+def _screenshot(body: bytes, timeout: int, token: str = "", account: str = "") -> bytes:
+    """POST one screenshot request body and return the JPEG bytes.
+
+    The single request path, shared by render() and probe(): a probe that
+    reached another endpoint, or resolved the credential differently, would
+    prove nothing about the render it stands in for. It takes the already
+    encoded body so render() weighs the exact bytes it sends against
+    MAX_PAYLOAD_BYTES without serialising a multi-megabyte payload twice, and
+    the resolved credential so one call resolves it once.
+    """
+    token, account = _credentials(token, account)
 
     # cacheTTL=0: Quick Actions cache responses for 5s by default, which would
     # serve a stale card to the retry that follows a failed render.
@@ -535,6 +570,49 @@ def render(html_path: Path, quality: int = DEFAULT_QUALITY, timeout: int = DEFAU
     if payload[:3] != b"\xff\xd8\xff":
         raise OgRenderError(f"browser run returned no JPEG: {_api_error(payload)}")
     return payload
+
+
+def render(html_path: Path, quality: int = DEFAULT_QUALITY, timeout: int = DEFAULT_TIMEOUT) -> bytes:
+    """POST the payload to Browser Run and return the JPEG bytes."""
+    load_forge_env()
+    # Refuse a missing credential before inlining a multi-megabyte payload.
+    token, account = _credentials()
+
+    body = json.dumps(build_payload(html_path, quality)).encode("utf-8")
+    if len(body) > MAX_PAYLOAD_BYTES:
+        raise OgRenderError(
+            f"render payload {len(body) // (1024 * 1024)} MB exceeds the "
+            f"{MAX_PAYLOAD_BYTES // (1024 * 1024)} MB ceiling"
+        )
+    return _screenshot(body, timeout, token, account)
+
+
+def probe_payload() -> dict:
+    """The smallest render Browser Run will accept: a 64x64 blank page."""
+    return {
+        "html": PROBE_HTML,
+        "viewport": {"width": 64, "height": 64},
+        "gotoOptions": {"waitUntil": "load", "timeout": 10000},
+        "screenshotOptions": {"type": "jpeg", "quality": 1},
+    }
+
+
+def probe(timeout: int = PROBE_TIMEOUT, token: str = "", account: str = "") -> None:
+    """Raise OgRenderError when this token cannot render on Browser Run.
+
+    Deliberately minimal: the cheapest possible real proof that the credential
+    is accepted by the endpoint the renderer uses. No file is written and there
+    is no waitForTimeout -- SETTLE_MS buys nothing on a blank page, it would
+    only bill 2.5 s of browser time per doctor run.
+
+    A caller that already resolved the pair (forge-doctor.sh's advisory) passes
+    it in: forge.env is then neither read nor mode-gated here, so the probe
+    reports on Browser Run and nothing else -- doctor owns the env-permission
+    verdict and must not report it twice under another name.
+    """
+    if not (token and account):
+        load_forge_env()
+    _screenshot(json.dumps(probe_payload()).encode("utf-8"), timeout, token, account)
 
 
 def _api_error(raw: bytes) -> str:
@@ -591,6 +669,12 @@ def _cmd_render(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_probe(args: argparse.Namespace) -> int:
+    probe(args.timeout)
+    print("browser run: ok")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="og_render.py",
@@ -618,6 +702,12 @@ def main(argv: list[str] | None = None) -> int:
     p_render.add_argument("--quality", type=int, default=DEFAULT_QUALITY)
     p_render.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     p_render.set_defaults(func=_cmd_render)
+
+    p_probe = sub.add_parser(
+        "probe", help="prove this token can render on Browser Run (no file written)"
+    )
+    p_probe.add_argument("--timeout", type=int, default=PROBE_TIMEOUT)
+    p_probe.set_defaults(func=_cmd_probe)
 
     args = parser.parse_args(argv)
     try:

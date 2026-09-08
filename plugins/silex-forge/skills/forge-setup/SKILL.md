@@ -43,13 +43,18 @@ Reached only after the last configuration step (token) and the final
 ✅ forge-doctor.sh --online exit 0 — ready (hub OK AND deploy_ready AND online_ok)
 ⚠️ optional Shlink shortlinks — Pages SHLINK_* + local CLI (step 6b)
 ⚠️ recommended external craft plugins (step 7)
-⚠️ optional OG thumbnails — existing token needs Browser Run Write (step 7b)
+⚠️ optional OG thumbnails — existing token needs Browser Run Write (step 7b, probed by --online)
 ```
 
 An offline `forge-doctor.sh` exit 0 is **not** the criterion: it only proves the
 values are filled in. A revoked token or a deleted Pages project still reads as
 ready offline, so `--online` decides — in step 8, and on step 0's exit-`0`
 shortcut.
+
+The OG line stays a `⚠`: `forge-doctor.sh --online` now proves that permission
+with an advisory Browser Run probe — `browser_run: ok` among its online checks,
+otherwise one `⚠` line naming the reason. A failing probe changes no exit code,
+so the exit-0 criterion above is unaffected. Step 7b has the detail.
 
 Missing token is **deploy blocked** (doctor exit 2), not hub KO (exit 1).
 
@@ -128,6 +133,9 @@ Flags: `--json` / `-j`, `--quiet` / `-q`, `--online`, `-h` / `--help`. No others
 On exit `0` the token is already present (`deploy_ready` requires it), so the
 live check can run now — and must: an offline `0` still says ready with a
 revoked token or a deleted Pages project. Doctor's own last line points here.
+
+`--online` also runs an advisory Browser Run probe (OG thumbnails, step 7b): it
+never changes the exit code, so the table below is unaffected.
 
 ```bash
 : "${S:?bind S in the § Step 0 block above first}"
@@ -345,7 +353,8 @@ Skip if step 0 exited 0 or 2.
 
 Hub only. **No `--online` here** (token is still step 6, so a live check would
 fail closed on a machine that is merely unfinished). The live check runs in
-**step 8**, and on the exit-`0` shortcut below.
+**step 8**, and on the exit-`0` shortcut below. That run also carries the
+advisory Browser Run probe (step 7b), which never changes its exit code.
 
 ```bash
 : "${FORGE_ROOT:?run § Shell setup first}"
@@ -562,7 +571,7 @@ Order:
 2. Password manager available → fill from your ops vault (do **not** echo the token in chat)
 3. Otherwise **ask for the token** (one question) and write the same way
 
-Permissions: Pages Edit · Workers KV Storage Edit · Account Settings Read · **Browser Run Write**. A token missing Browser Run Write makes every render fail per slug; the publish still succeeds. Workers KV Storage Write still covers CLI `--share` via REST.
+Permissions: Pages Edit · Workers KV Storage Edit · Account Settings Read · **Browser Run Write**. A token missing Browser Run Write makes every render fail per slug; the publish still succeeds. Verify that permission with `forge-doctor.sh --online` (step 7b) instead of discovering it at publish time. Workers KV Storage Write still covers CLI `--share` via REST.
 
 **KV fallback:** if the token lacks KV scope (or REST is rejected), `publish.sh`
 retries with `wrangler login` OAuth (`wrangler kv … --remote`,
@@ -719,7 +728,13 @@ re-render and re-persist a slug a v2 machine already proved, and vice versa.
 Bounded churn (extra renders, different JPEG bytes uploaded), never a deleted
 card. Everyone should pull.
 
-Doctor no longer reports an OG toolchain at all.
+Doctor reports no local OG toolchain — there is none, the renderer is
+server-side. `forge-doctor.sh --online` instead probes Browser Run once (a
+64×64 JPEG), advisory only: `browser_run: ok` among the online checks, or one
+`⚠ Browser Run unavailable — OG thumbnails will fail per slug (publish still
+succeeds): <reason>` line. It never changes the exit code. The probe is
+skipped, with no network call, when the token or the account id is missing —
+that case is already reported as a deploy blocker.
 
 
 ## Step 8 — Final doctor (`--online`) and report
@@ -736,6 +751,10 @@ bash "$FORGE_ROOT/scripts/forge-doctor.sh" --online
 The verdict is the **`--online`** exit code; the offline run above is only there
 to separate a config problem from a live one.
 
+`--online` also runs the advisory Browser Run probe (step 7b): `browser_run: ok`,
+or one `⚠` line naming the reason. It never changes the exit code, so it neither
+blocks nor gates this report.
+
 | `--online` exit | Report |
 |---|---|
 | `0` | Ready. Print the report below. |
@@ -751,6 +770,7 @@ Report (only on exit 0):
 **hub_root**   : [path OK]
 **artifacts**  : [path OK | created]
 **doctor**     : exit 0 (`--online` ready)
+**og**         : browser_run ok | ⚠ advisory from --online (thumbnails only)
 
 **Next**
 - Generate: `silex-craft@silex-plugins` → write under $artifacts/<slug>/

@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -19,7 +20,9 @@ from load_config import (  # noqa: E402
     PagesEnvFetchError,
     VAULT_MARKERS,
     _verify_api_token,
+    browser_run_probe,
     doctor,
+    doctor_online,
     engine_root_from_plugin,
     fetch_pages_plain_var,
     forge_env_permissions,
@@ -509,6 +512,233 @@ class InferHubLayoutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             hub = Path(td)
             self.assertEqual(infer_hub_layout(hub), ("artifacts", []))
+
+
+class BrowserRunProbeTests(unittest.TestCase):
+    """browser_run_probe: advisory, offline-safe, and it never raises.
+
+    og_render is stubbed in sys.modules — the real one would POST to
+    Cloudflare. The stub also carries its own OgRenderError, which is what the
+    lazy import inside browser_run_probe has to resolve against.
+    """
+
+    CFG = {"cloudflare_account_id": "acct123"}
+
+    def _stub(self) -> types.ModuleType:
+        mod = types.ModuleType("og_render")
+
+        class OgRenderError(RuntimeError):
+            pass
+
+        def unexpected(*_a: object, **_k: object) -> None:
+            self.fail("og_render.probe ran without a usable credential")
+
+        mod.OgRenderError = OgRenderError
+        mod.probe = unexpected
+        return mod
+
+    @patch("load_config.resolved_account_id", return_value="acct123")
+    @patch("load_config.resolve_api_token", return_value="")
+    def test_missing_token_is_never_probed(self, _tok: object, _acct: object) -> None:
+        """No credential, no request: doctor already reports the absence."""
+        with patch.dict(sys.modules, {"og_render": self._stub()}):
+            res = browser_run_probe(self.CFG)
+        self.assertFalse(res["checked"])
+        self.assertFalse(res["ok"])
+        self.assertIn("already reported", res["reason"])
+
+    @patch("load_config.resolved_account_id", return_value="")
+    @patch("load_config.resolve_api_token", return_value="tok")
+    def test_missing_account_is_never_probed(self, _tok: object, _acct: object) -> None:
+        with patch.dict(sys.modules, {"og_render": self._stub()}):
+            res = browser_run_probe(self.CFG)
+        self.assertFalse(res["checked"])
+        self.assertFalse(res["ok"])
+
+    @patch("load_config.resolved_account_id", return_value="acct123")
+    @patch("load_config.resolve_api_token", return_value="tok")
+    def test_render_refusal_becomes_the_reason(self, _tok: object, _acct: object) -> None:
+        mod = self._stub()
+
+        def refuse(**_k: object) -> None:
+            raise mod.OgRenderError("browser run HTTP 403: Actor lacks permission")
+
+        mod.probe = refuse
+        with patch.dict(sys.modules, {"og_render": mod}):
+            res = browser_run_probe(self.CFG)
+        self.assertEqual(
+            {
+                "ok": False,
+                "checked": True,
+                "reason": "browser run HTTP 403: Actor lacks permission",
+            },
+            res,
+        )
+
+    @patch("load_config.resolved_account_id", return_value="acct123")
+    @patch("load_config.resolve_api_token", return_value="tok")
+    def test_unexpected_exception_is_swallowed_on_one_line(
+        self, _tok: object, _acct: object
+    ) -> None:
+        """forge-doctor.sh must report, never traceback."""
+        mod = self._stub()
+
+        def crash(**_k: object) -> None:
+            raise ValueError("kaboom\n  second line")
+
+        mod.probe = crash
+        with patch.dict(sys.modules, {"og_render": mod}):
+            res = browser_run_probe(self.CFG)
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["checked"])
+        self.assertEqual("ValueError: kaboom second line", res["reason"])
+
+    @patch("load_config.resolved_account_id", return_value="acct123")
+    @patch("load_config.resolve_api_token", return_value="tok")
+    def test_successful_probe_reports_ok(self, _tok: object, _acct: object) -> None:
+        mod = self._stub()
+        mod.probe = lambda **_k: None
+        with patch.dict(sys.modules, {"og_render": mod}):
+            res = browser_run_probe(self.CFG)
+        self.assertEqual({"ok": True, "checked": True, "reason": None}, res)
+
+    def test_the_resolved_credential_travels_with_the_call(self) -> None:
+        """The account id may live in forge.config.json alone.
+
+        resolved_account_id() honours that fallback, og_render's own reader
+        sees only forge.env — so a probe left to re-resolve would refuse
+        "CLOUDFLARE_ACCOUNT_ID missing" for a value doctor had just resolved.
+        """
+        mod = self._stub()
+        seen: dict[str, object] = {}
+
+        def record(**kwargs: object) -> None:
+            seen.update(kwargs)
+
+        mod.probe = record
+        with tempfile.TemporaryDirectory() as td:
+            with patch.dict(
+                os.environ,
+                {
+                    "CLOUDFLARE_API_TOKEN": "tok",
+                    "FORGE_ENV": str(Path(td) / "absent.env"),
+                },
+            ):
+                os.environ.pop("CLOUDFLARE_ACCOUNT_ID", None)
+                with patch.dict(sys.modules, {"og_render": mod}):
+                    res = browser_run_probe({"cloudflare_account_id": "acct-from-config"})
+        self.assertEqual({"ok": True, "checked": True, "reason": None}, res)
+        self.assertEqual({"token": "tok", "account": "acct-from-config"}, seen)
+
+
+class DoctorOnlineAdvisoryTests(unittest.TestCase):
+    """A failing Browser Run probe may only add a warning.
+
+    A token without the Browser Run Write permission still publishes — every
+    render fails per slug, the deploy does not — so the probe must not move
+    online_ok, deploy_ready or deploy_blockers, which is what forge-doctor.sh
+    turns into its exit code.
+    """
+
+    WARNING = (
+        "Browser Run unavailable — OG thumbnails will fail per slug "
+        "(publish still succeeds): browser run HTTP 403: Actor lacks permission"
+    )
+
+    def setUp(self) -> None:
+        self._td = tempfile.TemporaryDirectory()
+        root = Path(self._td.name)
+        hub = root / "hub"
+        for marker in VAULT_MARKERS:
+            (hub / marker).mkdir(parents=True)
+        (hub / "artifacts").mkdir()
+        self.cfg = {
+            "version": 1,
+            "hub_root": str(hub),
+            "artifacts_dir": "artifacts",
+            "public_host": "forge.example.com",
+            "forge_repo": FORGE_REPO_HTTPS,
+            "site_dir": "site",
+            "registry_dir": "registry",
+            "internal_prefix": "a",
+        }
+        # A deploy-ready fixture: only then can a regression on deploy_ready be
+        # observed. forge.env is absent, which forge_env_permissions accepts.
+        self._env = patch.dict(
+            os.environ,
+            {
+                "FORGE_ENV": str(root / "absent.env"),
+                "CLOUDFLARE_API_TOKEN": "tok",
+                "CLOUDFLARE_ACCOUNT_ID": "acct123",
+                "FORGE_SHARES_KV_ID": "kv123",
+                "CF_ACCESS_TEAM_DOMAIN": "team.cloudflareaccess.com",
+                "CF_ACCESS_AUD": "aud",
+            },
+            clear=False,
+        )
+        self._env.start()
+
+    def tearDown(self) -> None:
+        self._env.stop()
+        self._td.cleanup()
+
+    def _online(self, probe: dict) -> tuple[dict, dict]:
+        """doctor_online with the network stubbed out. Returns (payload, preflight)."""
+        pf = {
+            "ok": True,
+            "errors": [],
+            "warnings": [],
+            "checks": {"token": "user"},
+            "require_kv": True,
+        }
+        with patch("load_config.preflight_mutations", return_value=pf):
+            with patch("load_config.browser_run_probe", return_value=probe):
+                return doctor_online(self.cfg), pf
+
+    def test_failing_probe_adds_one_warning_and_moves_nothing(self) -> None:
+        ok, _ = self._online({"ok": True, "checked": True, "reason": None})
+        ko, _ = self._online(
+            {
+                "ok": False,
+                "checked": True,
+                "reason": "browser run HTTP 403: Actor lacks permission",
+            }
+        )
+        self.assertTrue(ok["deploy_ready"], ok["deploy_blockers"])
+        for key in (
+            "ok",
+            "online_ok",
+            "deploy_ready",
+            "deploy_blockers",
+            "issues",
+            "online_issues",
+            "warnings",
+        ):
+            self.assertEqual(ok[key], ko[key], key)
+        self.assertEqual([], ok["online_warnings"])
+        self.assertEqual([self.WARNING], ko["online_warnings"])
+        self.assertNotIn("browser_run", ko["online_checks"])
+
+    def test_passing_probe_reports_a_check_without_touching_preflight(self) -> None:
+        payload, pf = self._online({"ok": True, "checked": True, "reason": None})
+        self.assertEqual("ok", payload["online_checks"]["browser_run"])
+        self.assertEqual({"token": "user"}, pf["checks"])
+
+    def test_unchecked_probe_is_silent(self) -> None:
+        """Nothing to probe is not a finding: doctor already named the gap."""
+        payload, _ = self._online(
+            {
+                "ok": False,
+                "checked": False,
+                "reason": "token or account id missing — already reported",
+            }
+        )
+        self.assertEqual([], payload["online_warnings"])
+        self.assertNotIn("browser_run", payload["online_checks"])
+
+    def test_offline_doctor_carries_no_browser_run_key(self) -> None:
+        """doctor() is offline: the probe needs the network."""
+        self.assertNotIn("browser_run", doctor(self.cfg))
 
 
 if __name__ == "__main__":
