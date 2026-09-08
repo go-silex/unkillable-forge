@@ -634,7 +634,7 @@ class BrowserRunProbeTests(unittest.TestCase):
 class DoctorOnlineAdvisoryTests(unittest.TestCase):
     """A failing Browser Run probe may only add a warning.
 
-    A token without the Browser Rendering · Edit permission still publishes — every
+    A token without the Browser Run · Edit permission still publishes — every
     render fails per slug, the deploy does not — so the probe must not move
     online_ok, deploy_ready or deploy_blockers, which is what forge-doctor.sh
     turns into its exit code.

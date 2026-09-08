@@ -75,7 +75,7 @@ and CI runs the suite on `macos-latest` plus a `bash:3.2` container.
 | `bash` ≥ 3.2, `python3` ≥ 3.9 (stdlib only), `git`, `curl` | everything |
 | `wrangler` **or** `npx` | `wrangler pages deploy` |
 | `flock` | optional — a portable `mkdir` lock is used when absent, or when `flock` has no `-w` (BusyBox) |
-| `CLOUDFLARE_API_TOKEN` with **Browser Rendering · Edit** | OG thumbnails via Cloudflare Browser Run — no chrome/ffmpeg/jq. The dashboard permission group is still named Browser Rendering. A token missing it makes every render fail per slug; the publish still succeeds. `forge-doctor.sh --online` verifies the permission |
+| `CLOUDFLARE_API_TOKEN` with **Browser Run · Edit** | OG thumbnails via Cloudflare Browser Run — no chrome/ffmpeg/jq. A token missing it makes every render fail per slug; the publish still succeeds. `forge-doctor.sh --online` verifies the permission |
 
 ### Install the plugin
 
@@ -162,7 +162,7 @@ Two different Cloudflare credentials — do not mint one from the other's list:
 | Credential | Used by | Needs |
 |---|---|---|
 | `wrangler login` **OAuth** | `forge-discover.sh`, `forge-provision.sh`, `--share` KV fallback | scopes `pages (write)`, `workers_kv (write)` |
-| `CLOUDFLARE_API_TOKEN` in `forge.env` | `publish.sh` — every deploy | permissions Account · Cloudflare Pages · **Edit** · Account · Workers KV Storage · **Edit** · Account · Account Settings · **Read** · Account · Browser Rendering · **Edit** (the group name did not follow the Browser Run product rename). A token missing it makes every render fail per slug; the publish still succeeds — `forge-doctor.sh --online` is what proves that last permission |
+| `CLOUDFLARE_API_TOKEN` in `forge.env` | `publish.sh` — every deploy | permissions Account · Cloudflare Pages · **Edit** · Account · Workers KV Storage · **Edit** · Account · Account Settings · **Read** · Account · Browser Run · **Edit** (the account's own `tokens/permission_groups` lists `Browser Run Write`; the docs page still says "Browser Rendering"). A token missing it makes every render fail per slug; the publish still succeeds — `forge-doctor.sh --online` is what proves that last permission |
 
 Discovery is OAuth-only and never sees a token; deploy is token-only and
 `publish.sh` dies without one.
@@ -246,7 +246,7 @@ Exit `2` is the case a token-less laptop used to report as `OK`. Each blocker is
 printed with the command that clears it.
 
 `--online` also runs an advisory Browser Run probe — one 64×64 JPEG that proves
-the token's Browser Rendering · Edit permission, reported as `browser_run: permission ok` or as
+the token's Browser Run · Edit permission, reported as `browser_run: permission ok` or as
 one `⚠ Browser Run unavailable …` line, with no effect on any exit code.
 
 | File | Role |

@@ -102,7 +102,7 @@ DEFAULT_QUALITY = 80
 DEFAULT_TIMEOUT = 90
 
 # Browser Run reachability probe (forge-doctor.sh --online). The
-# Browser Rendering · Edit permission cannot be read back from the token
+# Browser Run · Edit permission cannot be read back from the token
 # verify endpoint, so the check is a real render. Reasoning: PR #55.
 PROBE_HTML = '<!doctype html><meta charset="utf-8"><title>forge probe</title>'
 # Two real renders of this page measured 133 ms and 2492 ms of browser time,

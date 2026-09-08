@@ -484,7 +484,7 @@ class ProbeTests(_Tmp):
         self.assertIn("Unauthorized to render", message)
 
     def test_http_error_is_refused_with_the_api_reason(self) -> None:
-        """A 403 is what a token without Browser Rendering · Edit returns."""
+        """A 403 is what a token without Browser Run · Edit returns."""
 
         def fake(request: urllib.request.Request, timeout: object = None) -> _Response:
             raise urllib.error.HTTPError(
