@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+### Fixed
+
+- `write_source_to_hub` kept `meta.json` across a file-source publish and deleted everything else, including `og.jpg` / `og.src` / `og.keep`. A failed Browser Run render does not delete a JPEG, but there was nothing left to keep: persist no-op'd and the second `build_from_hub` shipped catalogue cards with `p=false` (⊞). Measured on `unkillable-bootcamp` / `frenchlog-bootcamp` (HTML republish 2026-09-08). Those three files now survive the replace; a source that brings its own `og.*` still overwrites.
+- `persist_og_to_hub` mismatch skip now prints `hub_source` vs `proof_source`. After a successful Browser Run (`gov-kernel`: 91 kb, `✓ og thumbs`, then inject2) persist can still skip and the second `build_from_hub` ships `p=false`; that path already warned on stderr, likely uncaptured. `cmd_publish` now also warns if the hub still has no `og.jpg` after persist. Persist still copies only on digest match and still refuses a mismatch — no force-copy. A separate warn covers the rarer jpg-without-`og.src` hole (would not have fired on `gov-kernel`).
+- `gen-index.py` baked `date.today()` into `site/index.html` (`index YYYY-MM-DD`), so every calendar day re-hashed the catalogue shell. Missing `meta.date` also fell back to today in `build-site-from-hub.py`, rolling `manifest.json` card dates. The shell no longer embeds today; a missing date stays empty (`—` in the UI). `write_hub_meta` keeps an existing `date` on republish.
+
 ## [1.19.1] - 2026-09-08
 
 ### Fixed
