@@ -114,11 +114,24 @@ persist_og_to_hub new-deck
   || fail "persist blessed a mixed source/image generation"
 pass "a concurrent hub source change refuses stale image persistence"
 
-# No og.jpg produced (chrome/ffmpeg missing) must stay a silent no-op.
+# No og.jpg produced (chrome/ffmpeg missing) must stay a no-op.
 rm -f "$WORK/repo/site/a/new-deck/og.jpg" "$ARTIFACTS_ROOT/new-deck/og.jpg"
 persist_og_to_hub new-deck || fail "persist_og_to_hub must tolerate a missing og.jpg"
 [ ! -f "$ARTIFACTS_ROOT/new-deck/og.jpg" ] || fail "persist created an og.jpg out of nothing"
 pass "missing og.jpg is a no-op"
+
+# A just-rendered JPEG without og.src cannot be copied (would bless an unbound
+# image). Warn when the hub has no card yet — that is the first-publish hole
+# where the second build_from_hub then ships p=false.
+rm -f "$DEPLOY_OG" "$DEPLOY_SRC" \
+  "$ARTIFACTS_ROOT/new-deck/og.jpg" "$ARTIFACTS_ROOT/new-deck/og.src"
+printf 'FAKE_OG' > "$DEPLOY_OG"
+skip_out="$(persist_og_to_hub new-deck 2>&1)" || fail "jpg-without-proof must still return 0"
+[ ! -f "$ARTIFACTS_ROOT/new-deck/og.jpg" ] \
+  || fail "persist copied og.jpg without a proof"
+echo "$skip_out" | grep -qF "site has og.jpg but no og.src" \
+  || fail "persist must warn when a render left og.jpg without og.src: $skip_out"
+pass "jpg without proof warns and does not copy"
 
 # Unknown slug must not create a hub directory.
 persist_og_to_hub ghost-slug || fail "persist_og_to_hub must tolerate an unknown slug"

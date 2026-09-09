@@ -386,7 +386,8 @@ does not POST.
 
 Best-effort: missing token / Browser Run failure warns and publish continues.
 A render that fails leaves the previous thumbnail in place, and the per-slug
-warning now names the reason.
+warning now names the reason. A file-source publish keeps hub `og.jpg`,
+`og.src` and `og.keep` so that keep-on-fail can actually leave the previous card.
 
 The page renders from an inline HTML string, so it has an opaque origin and no
 base URL. Two consequences, both measured:

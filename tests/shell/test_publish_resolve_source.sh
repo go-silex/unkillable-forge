@@ -94,6 +94,54 @@ resolve_source "$art"
   || fail "directory: content was staged into \$WORK/src instead of being used in place"
 pass "directory with index.html is adopted in place"
 
+# --- write_source_to_hub: file publish must keep the previous OG card --------
+# The keep-on-fail contract is empty if a file-source replace deletes og.jpg
+# before render runs. meta.json was already preserved; the card files were not.
+hub_slug="$TD/hub/artifacts/keep-og"
+mkdir -p "$hub_slug"
+printf 'OLD-HTML\n' > "$hub_slug/index.html"
+printf '{"slug":"keep-og"}\n' > "$hub_slug/meta.json"
+printf 'OLD-OG\n' > "$hub_slug/og.jpg"
+printf 'OLD-SRC\n' > "$hub_slug/og.src"
+: > "$hub_slug/og.keep"
+printf 'TOSS\n' > "$hub_slug/extra.txt"
+ARTIFACTS_ROOT="$TD/hub/artifacts"
+WORK="$TD/w-wipe"
+mkdir -p "$WORK"
+resolve_source "$TD/deck.html"
+write_source_to_hub "keep-og"
+diff -q "$TD/deck.html" "$hub_slug/index.html" >/dev/null \
+  || fail "wipe: new index.html was not copied"
+[ "$(cat "$hub_slug/og.jpg")" = "OLD-OG" ] \
+  || fail "wipe: file-source publish deleted og.jpg"
+[ "$(cat "$hub_slug/og.src")" = "OLD-SRC" ] \
+  || fail "wipe: file-source publish deleted og.src"
+[ -f "$hub_slug/og.keep" ] \
+  || fail "wipe: file-source publish deleted og.keep"
+[ -f "$hub_slug/meta.json" ] \
+  || fail "wipe: meta.json must stay for write_hub_meta"
+[ ! -e "$hub_slug/extra.txt" ] \
+  || fail "wipe: non-OG extra files must still be replaced"
+[ -f "$hub_slug/build-id.txt" ] \
+  || fail "wipe: build-id.txt must be rewritten"
+pass "file-source publish keeps og.jpg, og.src, og.keep"
+
+# A source directory that carries its own card must still overwrite.
+src_dir="$TD/src-with-og"
+mkdir -p "$src_dir"
+printf 'NEW-HTML\n' > "$src_dir/index.html"
+printf 'NEW-OG\n' > "$src_dir/og.jpg"
+WORK="$TD/w-wipe-srcog"
+mkdir -p "$WORK"
+SRC_DIR=""
+resolve_source "$src_dir"
+write_source_to_hub "keep-og"
+[ "$(cat "$hub_slug/og.jpg")" = "NEW-OG" ] \
+  || fail "wipe: source-provided og.jpg did not overwrite the kept card"
+[ "$(cat "$hub_slug/index.html")" = "NEW-HTML" ] \
+  || fail "wipe: source directory index.html was not copied"
+pass "source-provided og.jpg overwrites the kept card"
+
 # --- fail-closed paths -------------------------------------------------------
 expect_die "missing path dies" "$TD/absent.html" "source not found"
 

@@ -290,7 +290,8 @@ canonical HTML + subresources). `--force` remains a `gen-og-images.sh` flag;
 default 80 — not ffmpeg `-q:v`. A dry run does not POST. Best-effort: missing
 token / Browser Run failure warns and publish continues. A render that fails
 leaves the previous thumbnail in place, and the per-slug warning now names
-the reason. Check the permission before publishing with
+the reason. A file-source publish keeps hub `og.jpg`, `og.src` and `og.keep`
+across the content replace. Check the permission before publishing with
 `forge-doctor.sh --online` instead of discovering it as one warning per slug.
 
 `touch $hub/<artifacts_dir>/<slug>/og.keep` pins that slug's published card

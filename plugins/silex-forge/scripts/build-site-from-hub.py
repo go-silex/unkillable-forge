@@ -19,7 +19,6 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import date
 from pathlib import Path
 
 _LIB = Path(__file__).resolve().parent / "lib"
@@ -64,7 +63,7 @@ def _load_meta(slug_dir: Path, slug: str) -> dict:
         "title": slug,
         "description": "",
         "type": "html",
-        "date": date.today().isoformat(),
+        "date": "",
         "path": f"/a/{slug}/",
         "list_on_index": True,
         "visibility": "internal",
@@ -79,7 +78,7 @@ def _sanitize_registry(meta: dict, slug: str, prefix: str) -> dict:
         "title": meta.get("title") or slug,
         "description": meta.get("description") or "",
         "type": meta.get("type") or "html",
-        "date": meta.get("date") or date.today().isoformat(),
+        "date": meta.get("date") or "",
         "path": f"/{prefix}/{slug}/",
         "list_on_index": bool(meta.get("list_on_index", True)),
         "visibility": meta.get("visibility") or "internal",

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date
 from pathlib import Path
 
 _LIB = Path(__file__).resolve().parent / "lib"
@@ -152,7 +151,6 @@ def to_manifest(items: list[dict]) -> list[dict]:
 
 
 def render(manifest: list[dict]) -> str:
-    today = date.today().isoformat()
     _ = manifest  # written separately to manifest.json for the worker
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="light">
@@ -389,7 +387,6 @@ footer a:hover{{color:var(--blue)}}
   <span><b id="statTotal">0</b> au catalogue</span>
   <span><b id="statPublic">0</b> publiques</span>
   <span><b id="statShared">0</b> partagées</span>
-  <span>index {today}</span>
   <span id="shareSync" class="share-sync" title="État share synchronisé depuis KV (live)"></span>
 </div>
 

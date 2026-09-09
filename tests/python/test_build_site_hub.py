@@ -131,6 +131,30 @@ class BuildFromHubTests(unittest.TestCase):
         self.assertFalse((self.repo / "site" / "a" / "not-an-artifact").exists())
         self.assertFalse((self.repo / "registry" / "not-an-artifact.json").exists())
 
+    def test_missing_meta_date_is_not_today(self) -> None:
+        d = self.art / "undated"
+        d.mkdir()
+        (d / "index.html").write_text(
+            "<html><body>undated</body></html>\n", encoding="utf-8"
+        )
+        (d / "meta.json").write_text(
+            json.dumps({"slug": "undated", "title": "Undated", "type": "html"}),
+            encoding="utf-8",
+        )
+        self.assertEqual(0, self._build())
+        reg = json.loads((self.repo / "registry" / "undated.json").read_text(encoding="utf-8"))
+        self.assertEqual("", reg["date"])
+
+    def test_missing_meta_json_does_not_stamp_today(self) -> None:
+        d = self.art / "raw"
+        d.mkdir()
+        (d / "index.html").write_text(
+            "<html><body>raw</body></html>\n", encoding="utf-8"
+        )
+        self.assertEqual(0, self._build())
+        reg = json.loads((self.repo / "registry" / "raw.json").read_text(encoding="utf-8"))
+        self.assertEqual("", reg["date"])
+
 
 if __name__ == "__main__":
     unittest.main()

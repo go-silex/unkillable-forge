@@ -849,7 +849,7 @@ data = {
   "title": os.environ.get("TITLE") or slug,
   "description": os.environ.get("DESC", ""),
   "type": os.environ.get("TYP", "html"),
-  "date": os.environ.get("DAY", ""),
+  "date": old.get("date") or os.environ.get("DAY", ""),
   "path": f"/{prefix}/{slug}/",
   "list_on_index": True,
   "visibility": "internal",
@@ -887,8 +887,17 @@ write_source_to_hub() {
     info "source = hub SSOT (in-place)"
     return 0
   fi
-  # replace content but keep meta until write_hub_meta
-  find "$dest" -mindepth 1 -maxdepth 1 ! -name 'meta.json' -exec rm -rf {} +
+  # Replace craft files but keep meta until write_hub_meta, and keep the OG
+  # card (jpg + proof + pin). A file-source publish stages only index.html;
+  # wiping og.jpg made "a failed render leaves the previous thumbnail" a lie
+  # — persist then no-op'd and the second build_from_hub shipped p=false.
+  # A source that brings its own og.* still overwrites via the copy below.
+  find "$dest" -mindepth 1 -maxdepth 1 \
+    ! -name 'meta.json' \
+    ! -name 'og.jpg' \
+    ! -name 'og.src' \
+    ! -name 'og.keep' \
+    -exec rm -rf {} +
   cp -a "$SRC_DIR"/. "$dest"/
   date -u +%Y%m%dT%H%M%SZ > "$dest/build-id.txt"
   ok "hub SSOT ← $dest"
@@ -951,7 +960,17 @@ persist_og_to_hub() {
   # build_from_hub excludes og.src. Its presence therefore proves that this run
   # checked the existing source/image pair or completed a render. A failed
   # Browser Run render never produces one.
-  [ -f "$src" ] && [ -f "$proof" ] || return 0
+  if [ ! -f "$src" ] || [ ! -f "$proof" ]; then
+    # A JPEG without a proof cannot be copied (would bless an unbound image).
+    # The second build_from_hub then drops the site JPEG and the catalogue
+    # ships p=false. Warn only when the hub has no card yet — rebuilds copy
+    # hub og.jpg without og.src by design.
+    if [ -f "$src" ] && [ ! -f "$proof" ] \
+        && [ -d "$hub_dir" ] && [ ! -f "$hub_dir/og.jpg" ]; then
+      warn "OG persist skipped for $slug — site has og.jpg but no og.src; the next build_from_hub will ship the catalogue without a card"
+    fi
+    return 0
+  fi
   [ -d "$hub_dir" ] && [ -f "$hub_dir/index.html" ] || return 0
 
   local proof_source="" proof_image="" hub_source="" deploy_image=""
@@ -962,15 +981,17 @@ persist_og_to_hub() {
   if [ -z "$proof_source" ] || [ -z "$proof_image" ] \
       || [ "$hub_source" != "$proof_source" ] \
       || [ "$deploy_image" != "$proof_image" ]; then
-    warn "OG persist skipped for $slug — source/image proof changed while the hub was syncing"
+    warn "OG persist skipped for $slug — source/image proof changed while the hub was syncing (hub_source=${hub_source:-empty} proof_source=${proof_source:-empty})"
     return 0
   fi
 
   # Copy the image first. If the second copy is interrupted, the old sidecar's
   # image digest no longer matches and the next publish fails stale rather than
   # blessing a mixed generation.
-  cp -f "$src" "$hub_dir/og.jpg"
-  cp -f "$proof" "$hub_dir/og.src"
+  cp -f "$src" "$hub_dir/og.jpg" \
+    || warn "OG persist failed to copy og.jpg for $slug"
+  cp -f "$proof" "$hub_dir/og.src" \
+    || warn "OG persist failed to copy og.src for $slug"
 }
 
 
@@ -1690,6 +1711,9 @@ cmd_publish() {
   # the excluded engine-owned block, so the source/image proof remains valid.
   inject_og_for_slug "$slug" "$title" "$desc" "$path_url"
   persist_og_to_hub "$slug"
+  if [ -f "$dest/og.jpg" ] && [ ! -f "${ARTIFACTS_ROOT}/${slug}/og.jpg" ]; then
+    warn "OG persist did not land ${slug}/og.jpg on the hub — the next build_from_hub will ship the catalogue without a card"
+  fi
   # Second chance for the published slug: build-site-from-hub only warns when
   # its own inject fails, so this is the one call that must land.
   local publish_inj
