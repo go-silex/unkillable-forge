@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+## [1.19.2] - 2026-09-09
+
 ### Fixed
 
 - `write_source_to_hub` kept `meta.json` across a file-source publish and deleted everything else, including `og.jpg` / `og.src` / `og.keep`. A failed Browser Run render does not delete a JPEG, but there was nothing left to keep: persist no-op'd and the second `build_from_hub` shipped catalogue cards with `p=false` (⊞). Measured on `unkillable-bootcamp` / `frenchlog-bootcamp` (HTML republish 2026-09-08). Those three files now survive the replace; a source that brings its own `og.*` still overwrites.
