@@ -1,6 +1,7 @@
 # Pas de SPA fallback — 404.html structurel gère les chemins morts.
 # Racine = catalogue (shell public ; DATA via /api/catalogue).
-/login /login.html 302
+# Pas de règle /login : Pages sert déjà login.html sur /login et renvoie
+# /login.html → /login (308). Une règle /login → /login.html bouclait à l'infini.
 
 # Anciens chemins live (avant /a/ prefix) → nouveaux
 /silex-talk-mcp /a/silex-talk-mcp/ 301

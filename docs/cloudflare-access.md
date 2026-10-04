@@ -13,7 +13,7 @@ your host. Client-owned setup notes live in
 |---|---|
 | `/` catalogue shell · `/a/<slug>/` | Team (Access JWT) unless visibility is **public** |
 | `/s/<slug>/<key>/` | Anyone with the secret link (Access **Bypass**) |
-| `/login` | Access **Allow** team — issues the JWT cookie Functions read |
+| `/login` | Access **Allow** team — issues the JWT cookie Functions read, then sends the visitor back to `?next` |
 | `*.pages.dev` | Denied by middleware on every path |
 
 Open `/p/` paths are **gone**. External share = keyed `/s/…` only.
@@ -39,10 +39,20 @@ curl -sS -I "https://<your-host>/" | grep -i x-forge-acl        # must print vis
 # 2 · the engine fails closed: a private artifact must redirect, not answer.
 #     No -L — following the redirect reaches /login, a public shell, which
 #     does carry the header and would look like a pass.
-curl -sS -I "https://<your-host>/a/<any-slug>/"                 # must be 302, location: /login
+curl -sS -I "https://<your-host>/a/<any-slug>/"                 # must be 302, location: /login?next=%2Fa%2F<any-slug>%2F
 ```
 
 An artifact path never carries `x-forge-acl` when it fail-closes: `loginRedirect()` answers before `withAcl()` runs. Checking for the header on `/a/…` therefore fails on a *correctly* configured forge. A `200` on check 2 means the origin is serving artifacts anonymously — do not create a Bypass policy until it is a `302`.
+
+### Login round-trip
+
+```
+/a/<slug>/ (no JWT) → 302 /login?next=%2Fa%2F<slug>%2F
+  → Access login → callback sets CF_Authorization → /login?next=… (JWT)
+  → middleware 302 /a/<slug>/
+```
+
+`next` is resolved with the URL parser and kept only if it stays on the same origin (and is not `/login` itself); anything else falls back to `/`. `/login` without a verified JWT serves `login.html`, which never redirects. `site/_redirects` must not map `/login` → `/login.html`: Pages already answers `/login.html` with `308 → /login`, so that rule is an infinite loop.
 
 | Origin | Catalogue + `/a` | Share `/s` |
 |---|---|---|
