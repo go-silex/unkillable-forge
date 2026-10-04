@@ -9,6 +9,11 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+### Fixed
+
+- Team login looped forever after Cloudflare Access: `site/_redirects` sent `/login` → `/login.html` (302) and Pages answers `/login.html` with `308 → /login`, so an authenticated `/login` bounced until the browser gave up (reproduced under `wrangler pages dev`). The rule is gone; Pages serves `login.html` on `/login` by itself.
+- A refused private read now comes back to the page it asked for: `/a/<slug>/` answers `302 /login?next=<path>`, Access carries `next` through its `redirect_url`, and `/login` with a verified JWT answers `302 <next>`. `next` is resolved with the URL parser and dropped unless it stays same-origin — a prefix check would accept `/%09/evil.tld`, which browsers read as `//evil.tld`. `login.html` no longer redirects anywhere; it only shows when the identity could not be verified. `forge-provision.sh` accepts `/login?next=…` on its fail-closed probe.
+
 ## [1.19.2] - 2026-09-09
 
 ### Fixed

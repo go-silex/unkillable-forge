@@ -6,6 +6,8 @@
  *   /api/catalogue       public OK (filtered)
  *   /a/<slug>/*          vis KV: public | shared | private  (+ JWT cookie)
  *   /s/*                 KV key + vis:shared (Function)
+ *   /login               Access Allow app → once the JWT verifies, 302 back to
+ *                        ?next (same-origin only); refused /a/ reads carry it
  *   /manifest.json       never to clients (worker reads via ASSETS)
  *
  * Fail-closed: missing/unknown vis = private (no share-key inference).
@@ -19,6 +21,7 @@ import {
 } from "./_lib/access"
 
 const SHARE_PREFIX = "/s/"
+const LOGIN_PATHS: Record<string, true> = { "/login": true, "/login.html": true }
 
 function isPagesDev(host: string): boolean {
   return host === "pages.dev" || host.endsWith(".pages.dev")
@@ -35,11 +38,31 @@ function plain404(): Response {
   })
 }
 
-function loginRedirect(): Response {
+/**
+ * Same-origin path to return to after login, else "/".
+ *
+ * Resolved with the URL parser, not prefix checks: browsers drop tab/newline
+ * and read "\" as "/", so "/\t/evil.tld" or "/\evil.tld" turn into the
+ * protocol-relative "//evil.tld" — an open redirect a string test lets through.
+ */
+function safeNext(raw: string | null, origin: string): string {
+  if (!raw || !raw.startsWith("/")) return "/"
+  let u: URL
+  try {
+    u = new URL(raw, origin)
+  } catch {
+    return "/"
+  }
+  if (u.origin !== origin || u.pathname.startsWith("//")) return "/"
+  if (LOGIN_PATHS[u.pathname]) return "/"
+  return u.pathname + u.search + u.hash
+}
+
+function loginRedirect(next: string): Response {
   return new Response(null, {
     status: 302,
     headers: {
-      location: "/login",
+      location: next === "/" ? "/login" : `/login?next=${encodeURIComponent(next)}`,
       "cache-control": "no-store",
     },
   })
@@ -94,6 +117,19 @@ export const onRequest: PagesFunction<ForgeEnv> = async (context) => {
   }
 
   if (isPublicShell(path)) {
+    // /login sits behind the Access Allow app, so a verified JWT here means the
+    // login just happened: send the visitor back to the page that was refused.
+    // Without one (Access not in front, or the JWT is rejected) serve the
+    // static page — never bounce onward, that is how /login used to loop.
+    if (LOGIN_PATHS[path] && (await isTeamRequest(context.request, context.env))) {
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: safeNext(url.searchParams.get("next"), url.origin),
+          "cache-control": "no-store",
+        },
+      })
+    }
     const res = await context.next()
     return withAcl(res)
   }
@@ -114,7 +150,7 @@ export const onRequest: PagesFunction<ForgeEnv> = async (context) => {
       return withAcl(res)
     }
     if (vis === "shared") return plain404()
-    return loginRedirect()
+    return loginRedirect(safeNext(path + url.search, url.origin))
   }
 
   // Other static (css leftover, random files): team or 404

@@ -584,7 +584,8 @@ if [ "$ART_STATUS" = "200" ]; then
   say  "Check it with:   curl -sS -I https://${PUBLIC_HOST}/a/welcome/"
   say  "Remove any Bypass on /a/*, then: publish.sh --rebuild-index"
   fail "the origin is serving artifacts anonymously — do NOT create a Bypass policy. Stage 11 is refused until /a/welcome/ answers 302 → /login without a cookie. Fix that, then re-run this wizard: it resumes and keeps every answer you gave."
-elif [ "$ART_STATUS" != "302" ] || [ "$ART_LOC" != "/login" ]; then
+# The refusal carries the page it refused: "/login" or "/login?next=<path>".
+elif [ "$ART_STATUS" != "302" ] || { [ "$ART_LOC" != "/login" ] && [ "${ART_LOC#/login\?next=}" = "$ART_LOC" ]; }; then
   warn "/a/welcome/ answered ${ART_STATUS:-nothing}${ART_LOC:+ → $ART_LOC}, expected 302 → /login."
   note "The engine is live on / but an anonymous artifact read is not being"
   note "redirected to the login page, so its fail-closed path is unproven."

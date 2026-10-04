@@ -3,11 +3,15 @@
 <head>
   <meta charset="UTF-8">
   <title>Forge Silex — connexion</title>
-  <meta http-equiv="refresh" content="0;url=/">
   <meta name="robots" content="noindex,nofollow">
+  <!-- Pas de renvoi automatique : /login est la cible du 302 des pages privées.
+       Une connexion réussie est renvoyée par le middleware vers ?next ; cette
+       page ne s'affiche que si l'identité n'a pas pu être vérifiée. -->
 </head>
 <body>
-  <p>Connexion équipe… <a href="/">catalogue</a></p>
-  <script>location.replace("/");</script>
+  <p>Connexion équipe non reconnue par la forge.</p>
+  <p>Si tu viens de te connecter, la session Cloudflare Access n'a pas été validée
+    (variables <code>CF_ACCESS_TEAM_DOMAIN</code> / <code>CF_ACCESS_AUD</code> du projet Pages).</p>
+  <p><a href="/">Catalogue</a></p>
 </body>
 </html>
