@@ -9,6 +9,13 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+## [1.20.1] - 2026-10-07
+
+### Changed
+
+- The CLI shortlink display domain now defaults to `unkill.si` in `forge.config.example.json`, `load_config` and `publish.sh`, including `--share` and dry-run output. Existing `shlink_domain` and `SHLINK_DOMAIN` overrides keep their precedence; the skills, discovery hint and shortlink docs follow the new canonical domain.
+- `s.unkillablecompanies.com` and `s.gosilex.com` remain compatible for existing links and REST API access. `SHLINK_API_URL`, Pages env enrichment and Functions' Shlink upsert algorithm are unchanged; Functions still return the API's `shortUrl`. The Forge public host stays `forge.unkillablecompanies.com`, with share keys, content and authentication unchanged. This config-only cutover needs no production engine upload.
+
 ## [1.20.0] - 2026-10-07
 
 ### Changed
@@ -370,7 +377,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 - Cloudflare Pages host for team decks and guides
 - Plugin marketplace manifest (`.claude-plugin/marketplace.json`)
 
-[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.18.0...HEAD
+[Unreleased]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.20.1...HEAD
+[1.20.1]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.20.0...silex-forge/v1.20.1
 [1.18.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.17.0...silex-forge/v1.18.0
 [1.17.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.16.0...silex-forge/v1.17.0
 [1.16.0]: https://github.com/go-silex/silex-forge/compare/silex-forge/v1.15.0...silex-forge/v1.16.0

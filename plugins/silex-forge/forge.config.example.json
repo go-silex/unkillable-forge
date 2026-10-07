@@ -5,7 +5,7 @@
   "artifacts_dir": "00_COCKPIT/Forge/artifacts",
   "public_host": "forge.unkillablecompanies.com",
   "forge_repo": "https://github.com/go-silex/silex-forge.git",
-  "shlink_domain": "s.unkillablecompanies.com",
+  "shlink_domain": "unkill.si",
   "site_dir": "site",
   "registry_dir": "registry",
   "internal_prefix": "a",
