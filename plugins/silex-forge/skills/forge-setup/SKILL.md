@@ -614,7 +614,7 @@ npx wrangler pages secret list --project-name="${FORGE_PAGES_PROJECT}"
 | Need | Role |
 |---|---|
 | `shlink` CLI on PATH | mint shortlink on `--share` |
-| `shlink_domain` in forge config | host printed in the URL |
+| `shlink_domain` in forge config | host printed in the URL (default `unkill.si`; custom hosts stay supported) |
 
 Without the CLI → warning → long URL.
 Laptop does not use `SHLINK_API_URL`; Pages Functions use Pages env only.

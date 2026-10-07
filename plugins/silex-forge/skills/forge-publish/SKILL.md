@@ -188,7 +188,7 @@ Other:
 - Hub SSOT updated under `$artifacts/<slug>/`
 - Access: see `docs/cloudflare-access.md`
 
-Optional shortlink (`s.unkillablecompanies.com/f-<slug>`): Pages `SHLINK_*` and/or local `shlink` CLI — best-effort.
+Optional shortlink (`unkill.si/f-<slug>` on Silex production): Pages `SHLINK_*` and/or local `shlink` CLI — best-effort.
 
 ## Env / config
 

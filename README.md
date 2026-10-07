@@ -351,7 +351,12 @@ Best-effort. Failures are silent — you still get the long `/s/…` URL.
 | Path | Needs |
 |---|---|
 | **UI / Functions** | Pages env: `SHLINK_API_KEY` + `SHLINK_API_URL` (full create URL, **no default**) |
-| **CLI** (`publish.sh --share`) | Local `shlink` CLI + `shlink_domain` in forge config |
+| **CLI** (`publish.sh --share`) | Local `shlink` CLI + `shlink_domain` in forge config (default `unkill.si`; custom hosts override it) |
+
+Silex production shortlinks use `https://unkill.si/f-<slug>`. The legacy
+`s.unkillablecompanies.com` and `s.gosilex.com` hosts remain compatible for
+existing links and REST API access; `SHLINK_API_URL` does not need to change.
+Functions return Shlink's `shortUrl`, independently of the CLI display domain.
 
 ---
 

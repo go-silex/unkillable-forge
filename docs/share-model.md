@@ -30,12 +30,19 @@ publish --share / toolbar Shared    │
 - **Unlisted**: share does not add a catalogue card
 - **Shortlink** (best-effort → `f-<slug>` on your Shlink domain):
   - **Functions**: Pages env `SHLINK_API_KEY` + `SHLINK_API_URL` (full create URL, **no default**) — direct-URL fallback
-  - **CLI** `publish.sh --share`: local `shlink` CLI + `shlink_domain` in forge config
+  - **CLI** `publish.sh --share`: local `shlink` CLI + `shlink_domain` in forge config (default `unkill.si`; custom hosts override it)
 - **Toolbar** on `/a/<slug>/` (team):
   - **Private** — copy `/a/<slug>/`
   - **Public** — upsert `f-<slug>` → `/a/<slug>/`
   - **Shared** — upsert the same `f-<slug>` → `/s/<slug>/<key>/`
   - Copying in Public or Shared mode revalidates the alias; Shlink failure is shown before falling back to the direct URL
+
+Silex production's canonical short URL is `https://unkill.si/f-<slug>`.
+The legacy `s.unkillablecompanies.com` and `s.gosilex.com` hosts remain
+compatible for existing shortlinks and REST API calls. Keep a working
+`SHLINK_API_URL`: Functions return Shlink's `shortUrl` and do not use the
+CLI's `shlink_domain`. This domain change leaves the Forge public host,
+share keys and visibility rules unchanged.
 
 ## Commands
 

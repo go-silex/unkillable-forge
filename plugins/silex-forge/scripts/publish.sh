@@ -25,7 +25,7 @@ if [ -f "$LIB_DIR/load_config.py" ] && command -v python3 >/dev/null 2>&1; then
 fi
 
 FORGE_REPO="${_ENV_FORGE_REPO:-${FORGE_REPO:-https://github.com/go-silex/silex-forge.git}}"
-SHLINK_DOMAIN="${_ENV_SHLINK_DOMAIN:-${FORGE_SHLINK_DOMAIN:-${SHLINK_DOMAIN:-s.unkillablecompanies.com}}}"
+SHLINK_DOMAIN="${_ENV_SHLINK_DOMAIN:-${FORGE_SHLINK_DOMAIN:-${SHLINK_DOMAIN:-unkill.si}}}"
 ARTIFACTS_ROOT="${FORGE_ARTIFACTS_ROOT:-}"
 INTERNAL_PREFIX="${FORGE_INTERNAL_PREFIX:-a}"
 # forge.config.json is the only source of the host and the Pages project, and
