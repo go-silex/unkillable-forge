@@ -304,7 +304,7 @@ def _merged_config() -> dict[str, Any]:
         cfg = dict(base)
         cfg["_config_source"] = str(EXAMPLE_PATH.resolve())
         cfg["_config_fallback"] = True
-    cfg.setdefault("shlink_domain", "s.gosilex.com")
+    cfg.setdefault("shlink_domain", "s.unkillablecompanies.com")
     cfg.setdefault("types", ["deck", "talk", "guide", "diagram", "gallery", "html", "other"])
     cfg.setdefault("pages_project", "silex-forge")
     cfg.setdefault("cloudflare_account_id", "")
@@ -966,9 +966,9 @@ def export_env(cfg: dict[str, Any] | None = None) -> str:
     cfg = cfg or load_config()
     art = artifacts_root(cfg)
     pairs = {
-        "FORGE_PUBLIC_HOST": cfg.get("public_host", "forge.gosilex.com"),
+        "FORGE_PUBLIC_HOST": cfg.get("public_host", "forge.unkillablecompanies.com"),
         "FORGE_REPO": cfg.get("forge_repo", ""),
-        "FORGE_SHLINK_DOMAIN": cfg.get("shlink_domain", "s.gosilex.com"),
+        "FORGE_SHLINK_DOMAIN": cfg.get("shlink_domain", "s.unkillablecompanies.com"),
         "FORGE_HUB_ROOT": cfg.get("hub_root") or "",
         "FORGE_ARTIFACTS_DIR": cfg.get("artifacts_dir") or "",
         "FORGE_ARTIFACTS_ROOT": str(art) if art else "",

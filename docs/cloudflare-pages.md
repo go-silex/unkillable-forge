@@ -1,7 +1,7 @@
 # Cloudflare Pages — Silex team-prod instance
 
 **Scope:** this page describes the **Silex** production forge — Pages project
-`silex-forge`, host `forge.gosilex.com`. On your own Cloudflare account, do not
+`silex-forge`, host `forge.unkillablecompanies.com`. On your own Cloudflare account, do not
 reproduce these values: run `plugins/silex-forge/scripts/forge-provision.sh`,
 which creates the project, the KV namespace and the Access apps with your host
 and writes `"vault_markers": []` — see
@@ -13,8 +13,14 @@ and writes `"vault_markers": []` — see
 |---|---|
 | Pages project | `silex-forge` (your own forge: whatever `pages_project` says — the wizard defaults to `forge`) |
 | Mode | **Direct Upload** (`wrangler pages deploy`) |
-| Custom domain | `forge.gosilex.com` → CNAME to the project `pages.dev` (proxied) |
+| Canonical custom domain | `forge.unkillablecompanies.com` → `silex-forge-6mm.pages.dev` (proxied) |
+| Legacy custom domain | `forge.gosilex.com` → same Pages project, kept registered; web navigation is redirected to the canonical host at the Cloudflare edge |
 | Production | wrangler `--branch=main` (label only — no git-connected deploy) |
+
+The canonical domain was attached and its HTTPS certificate activated on
+2026-10-07; the cutover deploy then switched `PUBLIC_HOST` and `SHLINK_API_URL`
+to it without changing the KV binding. Access reuses the existing applications
+and AUDs; see [hostname cutover](./cloudflare-access.md#canonical-hostname-cutover-2026-10-07).
 
 ## Why not Git Integration
 
@@ -93,7 +99,7 @@ Set in the Cloudflare dashboard / API — **never commit values**.
 |---|---|---|
 | `CF_ACCESS_TEAM_DOMAIN` | plain | Access team host |
 | `CF_ACCESS_AUD` | plain | comma-separated application AUDs |
-| `PUBLIC_HOST` | plain | canonical host for share URLs (e.g. `forge.gosilex.com`) |
+| `PUBLIC_HOST` | plain | canonical host for share URLs (e.g. `forge.unkillablecompanies.com`) |
 | `SHLINK_API_KEY` | secret | Shlink API key — shortlinks on share |
 | `SHLINK_API_URL` | plain | full create URL — **no default** |
 | `FORGE_SHARE_SECRET` | secret | ops bypass for **POST/DELETE `/api/share` only** |

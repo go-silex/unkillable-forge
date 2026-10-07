@@ -21,7 +21,7 @@ Open-source **engine + Claude plugin** for a team artifact host pattern:
 
 | Topic | Why |
 |---|---|
-| **`forge.gosilex.com` production** | Hosted Silex service — internal ops |
+| **`forge.unkillablecompanies.com` production** | Hosted Silex service — internal ops |
 | **Your Cloudflare account / Access apps** | You own your fork’s infrastructure |
 | **HTML craft** (slides, onepager) | [`silex-craft@silex-plugins`](https://github.com/go-silex/silex-plugins) |
 | **Lost share keys** | Keys are in KV only; rotate via toolbar or `--share` |

@@ -383,11 +383,11 @@ the other keys.
 One question: is this the **shared Silex** Cloudflare account, or the
 **client's own** account?
 
-**Shared Silex** — keep `public_host=forge.gosilex.com` and
+**Shared Silex** — keep `public_host=forge.unkillablecompanies.com` and
 `pages_project=silex-forge` from the example config. Continue 5b with no
 `--project` unless doctor/discover already named a different one.
 
-**Client's own account** — do **not** inherit `forge.gosilex.com` /
+**Client's own account** — do **not** inherit `forge.unkillablecompanies.com` /
 `silex-forge`. Ask (one at a time) for the public host (no `https://`) and
 the Pages project name. Persist them into the **existing** local config
 (this skill already created it; never create the file here):

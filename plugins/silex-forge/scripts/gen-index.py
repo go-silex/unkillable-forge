@@ -8,6 +8,7 @@ from clients; the Function reads it via ASSETS.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -150,7 +151,7 @@ def to_manifest(items: list[dict]) -> list[dict]:
     return out
 
 
-def render(manifest: list[dict]) -> str:
+def render(manifest: list[dict], host: str) -> str:
     _ = manifest  # written separately to manifest.json for the worker
     return f"""<!DOCTYPE html>
 <html lang="fr" data-theme="light">
@@ -163,7 +164,7 @@ def render(manifest: list[dict]) -> str:
 <meta name="theme-color" content="#031635">
 <link rel="icon" type="image/png" href="/images/favicon.png">
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://forge.gosilex.com/">
+<meta property="og:url" content="https://{host}/">
 <meta property="og:title" content="Silex Forge">
 <meta property="og:description" content="Artefacts HTML d'équipe — decks, talks, guides.">
 <meta property="og:site_name" content="Silex">
@@ -444,7 +445,7 @@ footer a:hover{{color:var(--blue)}}
 </p>
 
 <footer>
-  <span>© Silex · forge.gosilex.com</span>
+  <span>© Silex · {host}</span>
   <a href="https://gosilex.com">gosilex.com</a>
 </footer>
 </div>
@@ -776,7 +777,8 @@ def main() -> int:
     items = load_items()
     manifest = to_manifest(items)
     SITE.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(render(manifest), encoding="utf-8")
+    host = os.environ.get("PUBLIC_HOST", "forge.unkillablecompanies.com")
+    OUT.write_text(render(manifest, host), encoding="utf-8")
     MANIFEST.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )

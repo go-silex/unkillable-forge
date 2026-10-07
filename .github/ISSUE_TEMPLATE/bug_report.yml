@@ -9,7 +9,7 @@ body:
         Thanks for the report. **Do not** paste share keys, API tokens, or full `forge.env` contents.
 
         HTML craft issues → [silex-plugins](https://github.com/go-silex/silex-plugins).  
-        Production `forge.gosilex.com` → see [SUPPORT.md](../SUPPORT.md).
+        Production `forge.unkillablecompanies.com` → see [SUPPORT.md](../SUPPORT.md).
 
   - type: textarea
     id: what-happened

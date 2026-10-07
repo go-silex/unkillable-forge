@@ -1,4 +1,4 @@
-# Share model — forge.gosilex.com
+# Share model — forge.unkillablecompanies.com
 
 ## Why not an open public path (`/p/` — removed)
 
@@ -69,7 +69,7 @@ Publishing is restricted to trusted team members. Artifact HTML is active same-o
 Ops bypass: header `X-Forge-Share-Secret` on **POST/DELETE `/api/share` only** (Pages secret) — not catalogue, `/a/*`, or `/api/visibility`.
 
 - `GET /api/share` → `{ slug, active }` only (no raw key)
-- `POST /api/share` → `{ shareUrl, shortUrl?, … }` once (canonical origin `https://forge.gosilex.com`)
+- `POST /api/share` → `{ shareUrl, shortUrl?, … }` once (canonical origin `https://forge.unkillablecompanies.com`)
 - Share URLs are **never** injected into `/a/` HTML
 
 ## Landing = live share state (KV)

@@ -25,14 +25,14 @@ if [ -f "$LIB_DIR/load_config.py" ] && command -v python3 >/dev/null 2>&1; then
 fi
 
 FORGE_REPO="${_ENV_FORGE_REPO:-${FORGE_REPO:-https://github.com/go-silex/silex-forge.git}}"
-SHLINK_DOMAIN="${_ENV_SHLINK_DOMAIN:-${FORGE_SHLINK_DOMAIN:-${SHLINK_DOMAIN:-s.gosilex.com}}}"
+SHLINK_DOMAIN="${_ENV_SHLINK_DOMAIN:-${FORGE_SHLINK_DOMAIN:-${SHLINK_DOMAIN:-s.unkillablecompanies.com}}}"
 ARTIFACTS_ROOT="${FORGE_ARTIFACTS_ROOT:-}"
 INTERNAL_PREFIX="${FORGE_INTERNAL_PREFIX:-a}"
 # forge.config.json is the only source of the host and the Pages project, and
 # both are resolved here — before source_cf_credentials reads forge.env — so a
 # stale credentials file can never redirect the deploy to another project or
 # stamp another host into the deployed [vars]. Point elsewhere with FORGE_CONFIG.
-PUBLIC_HOST="${FORGE_PUBLIC_HOST:-forge.gosilex.com}"
+PUBLIC_HOST="${FORGE_PUBLIC_HOST:-forge.unkillablecompanies.com}"
 PAGES_PROJECT="${FORGE_PAGES_PROJECT:-silex-forge}"
 # Exported for patch_wrangler_for_deploy (deployed wrangler.toml [vars]) and for
 # the python helpers that read it — not a user-facing override.

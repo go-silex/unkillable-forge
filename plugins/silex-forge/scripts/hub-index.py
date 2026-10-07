@@ -140,7 +140,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--registry", required=True, help="path to registry/ dir")
     ap.add_argument("--hub", default=None)
-    ap.add_argument("--host", default=os.environ.get("PUBLIC_HOST", "forge.gosilex.com"))
+    ap.add_argument("--host", default=os.environ.get("PUBLIC_HOST", "forge.unkillablecompanies.com"))
     ap.add_argument("--slug", default="", help="only update this slug (+ always rewrite catalogue)")
     args = ap.parse_args()
 

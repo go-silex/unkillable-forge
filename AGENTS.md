@@ -2,11 +2,11 @@
 
 ## Mission
 
-**forge.gosilex.com** = team HTML artifact host (decks, talks, guides).
+**forge.unkillablecompanies.com** = team HTML artifact host (decks, talks, guides). The legacy `forge.gosilex.com` hostname remains registered and redirects web navigation (GET/HEAD) to it.
 
 | Host | Job |
 |---|---|
-| `forge.gosilex.com` | Internal artifacts + keyed share links |
+| `forge.unkillablecompanies.com` | Internal artifacts + keyed share links |
 | `demo.gosilex.com` | Client demos (funnel) — other repo |
 | `share.gosilex.com` | Product ACL target (silex-share) — not this runtime |
 | Vercel | **Forbidden** for this flow |
