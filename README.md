@@ -3,13 +3,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/go-silex/silex-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/go-silex/silex-forge/actions/workflows/ci.yml)
 
-**Team HTML artifact host** — [forge.gosilex.com](https://forge.gosilex.com)
+**Team HTML artifact host** — [forge.unkillablecompanies.com](https://forge.unkillablecompanies.com)
 
 Publish decks, talks, and guides behind Cloudflare Access. Share unlisted links with a path key. Optional shortlinks via Shlink. Engine in git; HTML stays in the shared hub.
 
 | | |
 |---|---|
-| **Live** | `https://forge.gosilex.com` |
+| **Live** | `https://forge.unkillablecompanies.com` (legacy `forge.gosilex.com` redirects here) |
 | **Audience** | Silex team (Access) · external = secret `/s/…` links |
 | **Not** | `demo.gosilex.com` (client funnel) · Vercel |
 | **Deploy** | Cloudflare Pages Direct Upload (`wrangler`) from your laptop |
@@ -26,7 +26,7 @@ silex-hub / artifacts/<slug>/     SSOT HTML (shared vault, not git)
 temp tree (functions + site skeleton + hub HTML)
         │
         ▼  wrangler pages deploy
-forge.gosilex.com                 live
+forge.unkillablecompanies.com       live
 ```
 
 - **git** → plugin, Pages Functions, site skeleton  
@@ -325,7 +325,7 @@ not POST. Instead of deploying it prints the plan:
 ▸ dry run — no deploy, no KV mutation
   project : silex-forge
   account : 1a2b3c4d…
-  host    : forge.gosilex.com
+  host    : forge.unkillablecompanies.com
   branch  : main
   dir     : /tmp/tmp.XXXX/repo/site
   files   : 214
@@ -339,8 +339,8 @@ exits non-zero on the same missing token, unreachable account or absent Pages
 project that would stop a real deploy. The real hub is never written, no KV
 entry is touched, and no shortlink is minted.
 
-Team URL: `https://forge.gosilex.com/a/<slug>/`  
-Share URL: `https://forge.gosilex.com/s/<slug>/<key>/`
+Team URL: `https://forge.unkillablecompanies.com/a/<slug>/`  
+Share URL: `https://forge.unkillablecompanies.com/s/<slug>/<key>/`
 
 ---
 

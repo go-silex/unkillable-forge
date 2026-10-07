@@ -1,11 +1,45 @@
 # Cloudflare Access — Silex team-prod instance
 
-**Scope:** the **Silex** production forge (`forge.gosilex.com`, Pages project
+**Scope:** the **Silex** production forge (`forge.unkillablecompanies.com`, Pages project
 `silex-forge`). Configuring your own forge? Do not create these apps by hand and
 do not point them at our host — `plugins/silex-forge/scripts/forge-provision.sh`
-creates the same three applications on your account, in the safe order, with
+creates the standard three-application layout on your account, in the safe order, with
 your host. Client-owned setup notes live in
 [artifacts-config.md](./artifacts-config.md).
+
+## Canonical hostname cutover (2026-10-07)
+
+`forge.unkillablecompanies.com` is the canonical host of the Pages project
+`silex-forge`: `PUBLIC_HOST` and the Shlink create URL deployed to Pages point at
+it, so share URLs, the CSRF `Origin` check and cookie-authenticated mutations
+(`/api/visibility`, `/api/share`) all use it. The `SHARES` KV, the existing share
+keys and the Access applications are unchanged — no key was re-minted and no
+Access AUD or policy moved.
+
+`forge.gosilex.com` stays registered in Pages, DNS and Access as a legacy host.
+At the Cloudflare edge, a redirect rule on the old zone answers `302` for
+`GET`/`HEAD` and preserves path and query, so existing links in artifacts, mail
+and chat keep working. `/api/*` and `/cdn-cgi/*` are not redirected. Programmatic
+clients must use the canonical host: a cookie-authenticated mutation sent to the
+legacy host fails the `Origin` check with `csrf_origin`.
+
+The existing login, root Bypass and share Bypass applications each include both
+hostnames, with their AUDs, identity providers, team policies and session
+durations unchanged. Reusing the login application means that `CF_ACCESS_AUD`
+needs no change for either hostname.
+
+Access administration was performed with the BW `cloudflare/global-api-key`
+credential (`X-Auth-Email` / `X-Auth-Key`). The scoped
+`cloudflare/gosilex-api-token` works for DNS but returns an empty Access app list;
+that response is not evidence that the applications are absent.
+
+Validation of the host pair included a real Access-issued JWT with a temporary,
+exact-token, IP-restricted service policy and a five-minute session. A deployed
+private artifact returned `200` with the cookie and `302` without it, including its
+private image resource. The temporary policy and service credential were
+removed, and the original policies were verified unchanged. An interactive
+Google sign-in was not exercised.
+
 
 ## Goal
 
@@ -25,8 +59,9 @@ After Functions are live and `/` answers `x-forge-acl: vis-v4` while
 
 | App | Domain path | Policy |
 |---|---|---|
-| **Silex Forge · login** | `forge.gosilex.com/login` | Allow team emails / IdP group |
-| **Silex Forge · public surface** | `forge.gosilex.com/`, `/a/*`, `/s/*`, `/api/*` | **Bypass** everyone (Functions enforce visibility) |
+| **Silex Forge · login** | `forge.unkillablecompanies.com/login`, `forge.gosilex.com/login` | Existing Allow team emails + Mickael policies |
+| **Silex Forge** | `forge.unkillablecompanies.com`, `forge.gosilex.com` | Host-wide **Bypass** everyone; Functions enforce visibility |
+| **Silex Forge · share public** | `forge.unkillablecompanies.com/s`, `forge.gosilex.com/s` | **Bypass** everyone; Function requires the KV share key |
 | **Silex Forge · pages.dev** | `<project>.pages.dev` | Allow team + middleware 403 on every path |
 
 **Order matters:** deploy fail-closed Functions **first**, verify the header, then flip host Bypass. Bypass before Functions = public leak. `forge-provision.sh` enforces this: its Bypass stage is unreachable until both checks below pass on the live host — either one failing aborts the wizard, there is no "continue anyway". Configuring by hand, run them yourself:
@@ -56,7 +91,8 @@ An artifact path never carries `x-forge-acl` when it fail-closes: `loginRedirect
 
 | Origin | Catalogue + `/a` | Share `/s` |
 |---|---|---|
-| `forge.gosilex.com` | Worker visibility | Function + KV |
+| `forge.unkillablecompanies.com` (canonical) | Worker visibility | Function + KV |
+| `forge.gosilex.com` (legacy; web navigation redirects here) | Same Worker visibility and Access login AUD | Same Function + KV |
 | `<project>.pages.dev` | middleware 403 | middleware 403 |
 
 ## Setup checklist
@@ -103,9 +139,9 @@ Functions fail closed if either is missing.
 ## Smoke tests
 
 ```bash
-curl -sI "https://forge.gosilex.com/login"                 # 302 → Access
-curl -sI "https://forge.gosilex.com/a/<private-slug>/"      # 302 without cookie
-curl -sI "https://forge.gosilex.com/s/<slug>/<key>/"        # 200 without cookie if key valid
+curl -sI "https://forge.unkillablecompanies.com/login"                 # 302 → Access
+curl -sI "https://forge.unkillablecompanies.com/a/<private-slug>/"      # 302 without cookie
+curl -sS -o /dev/null -w '%{http_code}\n' "$EXISTING_SHARE_URL" # GET: 200 without cookie if key valid; never print the key
 
 # pages.dev must not be an open origin
 curl -sI "https://<project>.pages.dev/" | head -5

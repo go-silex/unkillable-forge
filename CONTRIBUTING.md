@@ -168,7 +168,7 @@ See [SECURITY.md](SECURITY.md). Do not open public issues for vulnerabilities.
 
 - **Setup / publish on Gosilex infra** → internal team channel (not a public support obligation)
 - **Engine bugs / plugin install** → GitHub Issues
-- **Hosted `forge.gosilex.com` uptime** → Silex ops (see [SUPPORT.md](SUPPORT.md))
+- **Hosted `forge.unkillablecompanies.com` uptime** → Silex ops (see [SUPPORT.md](SUPPORT.md))
 
 ## License
 

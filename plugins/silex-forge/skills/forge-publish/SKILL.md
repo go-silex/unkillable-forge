@@ -1,13 +1,13 @@
 ---
 name: forge-publish
 description: >-
-  Publish a standalone HTML artifact to forge.gosilex.com (Cloudflare Access
+  Publish a standalone HTML artifact to forge.unkillablecompanies.com (Cloudflare Access
   internally; optional share via /s/<slug>/<key>/). Triggers: "publish forge",
-  "forge publish", "put on forge", "forge.gosilex.com", "publish the deck",
+  "forge publish", "put on forge", "forge.unkillablecompanies.com", "forge.gosilex.com", "publish the deck",
   "forge artifact".
 ---
 
-# forge-publish — publish to forge.gosilex.com
+# forge-publish — publish to forge.unkillablecompanies.com
 
 Publishes a **self-contained HTML** file (or a folder with `index.html`) to the
 Silex internal artifact host.
@@ -17,7 +17,7 @@ Generating HTML = **`silex-craft@silex-plugins`** (`silex-slides` · `silex-onep
 
 | | |
 |---|---|
-| Host | `https://forge.gosilex.com` |
+| Host | `https://forge.unkillablecompanies.com` |
 | Default | `/a/<slug>/` — **Cloudflare Access** (team) |
 | Share | `/s/<slug>/<key>/` — Access Bypass, **key**, unlisted |
 | SSOT | **hub** `$artifacts/<slug>/` (path via local forge.config) |
@@ -68,7 +68,7 @@ Any non-zero doctor exit → stop. Name `/forge-setup`.
 `publish.sh` **hard-stops** when hub/config is broken (`doctor()["ok"]` is
 false): it prints `issues[]` and names `/forge-setup`. There is no
 `ARTIFACTS_ROOT` escape hatch — a partial machine cannot deploy to
-`forge.gosilex.com` using the example fallback.
+`forge.unkillablecompanies.com` using the example fallback.
 
 Publish also needs `~/.config/silex/forge.env` (Pages token + account + KV id
 + Access). A missing token is doctor exit 2, not a warning. See repo
@@ -182,13 +182,13 @@ Other:
 
 ## After publish
 
-- Team URL: `https://forge.gosilex.com/a/<slug>/`
+- Team URL: `https://forge.unkillablecompanies.com/a/<slug>/`
 - Share: toolbar **Shared**, or `publish.sh --share <slug>`
-- Catalogue (Access): `https://forge.gosilex.com/`
+- Catalogue (Access): `https://forge.unkillablecompanies.com/`
 - Hub SSOT updated under `$artifacts/<slug>/`
 - Access: see `docs/cloudflare-access.md`
 
-Optional shortlink (`s.gosilex.com/f-<slug>`): Pages `SHLINK_*` and/or local `shlink` CLI — best-effort.
+Optional shortlink (`s.unkillablecompanies.com/f-<slug>`): Pages `SHLINK_*` and/or local `shlink` CLI — best-effort.
 
 ## Env / config
 

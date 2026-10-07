@@ -25,7 +25,7 @@ hub artifacts/<slug>/{index.html, meta.json}
         ↓ forge-publish / publish.sh
 build-site-from-hub.py  →  site/a + registry + catalogue  (temp, never commit)
         ↓ wrangler pages deploy site
-forge.gosilex.com
+forge.unkillablecompanies.com
 ```
 
 One Cloudflare account (via `forge.env`) + one hub + one host.  

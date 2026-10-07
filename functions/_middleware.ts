@@ -1,7 +1,7 @@
 /**
  * ACL + pages.dev lock.
  *
- * forge.gosilex.com (after Access Bypass on / and /a):
+ * forge.unkillablecompanies.com (after Access Bypass on / and /a):
  *   /                    catalogue shell (no private titles in HTML)
  *   /api/catalogue       public OK (filtered)
  *   /a/<slug>/*          vis KV: public | shared | private  (+ JWT cookie)

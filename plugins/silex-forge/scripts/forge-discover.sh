@@ -85,7 +85,7 @@ missing_hint() {
     CF_ACCESS_AUD)
       echo "Zero Trust → Access → the login application → copy its AUD into CF_ACCESS_AUD in ${ENV_PATH}, then re-deploy with publish.sh (Functions fail closed without it)" ;;
     SHLINK_API_URL)
-      echo "only needed for s.gosilex.com shortlinks — set SHLINK_API_URL in ${ENV_PATH}, then re-deploy with publish.sh" ;;
+      echo "only needed for s.unkillablecompanies.com shortlinks — set SHLINK_API_URL in ${ENV_PATH}, then re-deploy with publish.sh" ;;
     *)
       echo "set $1 in ${ENV_PATH}, then re-deploy with publish.sh" ;;
   esac

@@ -9,6 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+## [1.20.0] - 2026-10-07
+
+### Changed
+
+- The Silex production forge is now canonical on `forge.unkillablecompanies.com` (Shlink: `s.unkillablecompanies.com`). `forge.config.example.json`, the `load_config` / `publish.sh` / `hub-index.py` defaults, the landing page (`gen-index.py` now takes the `og:url` and footer host from the `PUBLIC_HOST` that `publish.sh` already exports, defaulting to the new host), `404.html`, the skills and the docs follow. Share keys, KV and Access applications are unchanged; `forge.gosilex.com` stays registered as a legacy host whose web navigation is redirected at the Cloudflare edge.
+
 ### Fixed
 
 - Team login looped forever after Cloudflare Access: `site/_redirects` sent `/login` → `/login.html` (302) and Pages answers `/login.html` with `308 → /login`, so an authenticated `/login` bounced until the browser gave up (reproduced under `wrangler pages dev`). The rule is gone; Pages serves `login.html` on `/login` by itself.
