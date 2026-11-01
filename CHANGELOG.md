@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+### Fixed
+
+- The `forge-publish` skill runs `publish.sh` through `bash "$S"` in every example, like it already runs `forge-doctor.sh`. A read-only skill snapshot (Hermes protected skill sources, files in mode 0444) drops the exec bit, so a direct `"$S"` call failed with `Permission denied` (exit 126). Plugin installs that keep the bit behave as before.
+
 ## [1.20.1] - 2026-10-07
 
 ### Changed

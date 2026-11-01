@@ -202,7 +202,9 @@ jobs:
     name: test-py39
     needs: [check]
     if: (github.event_name != 'pull_request' || !github.event.pull_request.draft)
-    runs-on: ubuntu-latest
+    # ubuntu-latest moved to 26.04, for which actions/setup-python publishes no
+    # 3.9 build. Keep the floor on the newest image that still has one.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

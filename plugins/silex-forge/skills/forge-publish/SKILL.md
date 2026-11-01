@@ -103,8 +103,8 @@ artifacts.
 The one recovery command an agent may propose:
 
 ```bash
-publish.sh --reanchor-snapshot --dry-run   # shows the record it would write
-publish.sh --reanchor-snapshot             # operator runs the real one
+bash "$S" --reanchor-snapshot --dry-run   # shows the record it would write
+bash "$S" --reanchor-snapshot             # operator runs the real one
 ```
 
 It is **not** an override. It rewrites only the snapshot record's
@@ -142,20 +142,21 @@ if [ ! -d "${FORGE_ROOT:-}/scripts" ]; then
 fi
 S="$FORGE_ROOT/scripts/publish.sh"
 # in-repo: S=plugins/silex-forge/scripts/publish.sh
+# Always run it through bash: read-only skill snapshots drop the exec bit.
 
 # From hub SSOT (path omitted if $artifacts/<slug>/index.html exists)
-"$S" <slug> --title "…" --type deck
+bash "$S" <slug> --title "…" --type deck
 
 # From a file/folder (also copies to hub SSOT, then wrangler)
-"$S" <slug> <file.html|folder> --title "…" --type deck
+bash "$S" <slug> <file.html|folder> --title "…" --type deck
 
 # Internal + mint share
-"$S" <slug> [path] --share --title "…" --type deck
+bash "$S" <slug> [path] --share --title "…" --type deck
 
 # Catalogue subtitle. `--desc` is the ONLY durable source: every publish
 # rewrites meta.json's description from it, so re-publishing without --desc
 # clears the field (only `shared` survives from the previous meta).
-"$S" <slug> [path] --title "…" --type deck --desc "one line under the title"
+bash "$S" <slug> [path] --title "…" --type deck --desc "one line under the title"
 ```
 
 Useful types: `deck` · `talk` · `guide` · `diagram` · `gallery` · `html`.
@@ -163,12 +164,12 @@ Useful types: `deck` · `talk` · `guide` · `diagram` · `gallery` · `html`.
 Other:
 
 ```bash
-"$S" --share <slug>
-"$S" --unshare <slug>
-"$S" --list
-"$S" --remove <slug>
-"$S" --rebuild-index
-"$S" --rebuild-index --force-og   # re-render every OG card, not only the stale ones
+bash "$S" --share <slug>
+bash "$S" --unshare <slug>
+bash "$S" --list
+bash "$S" --remove <slug>
+bash "$S" --rebuild-index
+bash "$S" --rebuild-index --force-og   # re-render every OG card, not only the stale ones
 ```
 
 ## Rules
@@ -183,7 +184,7 @@ Other:
 ## After publish
 
 - Team URL: `https://forge.unkillablecompanies.com/a/<slug>/`
-- Share: toolbar **Shared**, or `publish.sh --share <slug>`
+- Share: toolbar **Shared**, or `bash "$S" --share <slug>`
 - Catalogue (Access): `https://forge.unkillablecompanies.com/`
 - Hub SSOT updated under `$artifacts/<slug>/`
 - Access: see `docs/cloudflare-access.md`
