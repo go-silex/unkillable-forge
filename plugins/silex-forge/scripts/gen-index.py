@@ -162,7 +162,9 @@ def render(manifest: list[dict], host: str) -> str:
 <meta name="description" content="Catalogue d’artefacts HTML Silex. Pages publiques ici ; le reste derrière Cloudflare Access.">
 <meta name="robots" content="noindex, nofollow, noarchive">
 <meta name="theme-color" content="#031635">
+<link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" href="/images/favicon.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://{host}/">
 <meta property="og:title" content="Silex Forge">

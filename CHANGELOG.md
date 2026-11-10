@@ -11,6 +11,7 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ### Fixed
 
+- Forge now has a favicon on every page. `/favicon.ico` returned 404, so artifacts under `/a/` and `/s/`, `/login` and `404.html` showed no tab icon; only the catalogue linked `/images/favicon.png`. The site skeleton now ships `favicon.ico` (16/32/48), `apple-touch-icon.png` (180) and a new `images/favicon.png`, all drawn from the Unkillable Companies UC logo (it replaces the Silex stone). `/apple-touch-icon.png` joins the public shell in the middleware, and the catalogue, `/login` and `404.html` link the three icons. Artifacts need no change: browsers fall back to `/favicon.ico`.
 - The `forge-publish` skill runs `publish.sh` through `bash "$S"` in every example, like it already runs `forge-doctor.sh`. A read-only skill snapshot (Hermes protected skill sources, files in mode 0444) drops the exec bit, so a direct `"$S"` call failed with `Permission denied` (exit 126). Plugin installs that keep the bit behave as before.
 
 ## [1.20.1] - 2026-10-07
