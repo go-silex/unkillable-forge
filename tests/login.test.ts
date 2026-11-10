@@ -43,6 +43,15 @@ function ctxFor(path: string, team = false) {
 }
 
 describe("login round-trip", () => {
+  it("serves the favicons to an anonymous visitor", async () => {
+    for (const path of ["/favicon.ico", "/apple-touch-icon.png", "/images/favicon.png"]) {
+      const ctx = ctxFor(path)
+      const res = await onRequest(ctx as never)
+      expect(res.status, path).toBe(200)
+      expect(ctx.next, path).toHaveBeenCalled()
+    }
+  })
+
   it("sends a refused private read to login carrying the page it asked for", async () => {
     const res = await onRequest(ctxFor("/a/demo-deck/notes.html?v=2") as never)
     expect(res.status).toBe(302)

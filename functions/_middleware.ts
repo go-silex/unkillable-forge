@@ -83,6 +83,7 @@ function isPublicShell(pathname: string): boolean {
     pathname === "/login.html" ||
     pathname === "/robots.txt" ||
     pathname === "/favicon.ico" ||
+    pathname === "/apple-touch-icon.png" ||
     pathname === "/images/favicon.png"
   )
 }
