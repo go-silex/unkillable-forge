@@ -2,9 +2,9 @@
 """Read-only inventory of one forge instance.
 
 This tool does not publish, reanchor, deploy, or write Cloudflare. It does not
-import artifact HTML, execute scripts, or follow symlinks. Config and env paths
-are explicit: the example config is not merged in, and the env file is never
-sourced.
+import artifact HTML, execute scripts, or follow symlinks while enumerating
+or hashing. Config and env paths are explicit: the example config is not
+merged in, and the env file is never sourced.
 
 The legacy publisher is untouched. Its KV snapshot record is copied here only
 as that record; it is not treated as the live file bytes. Pages file hashes are
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import errno
 import hashlib
 import json
 import os
@@ -314,107 +315,48 @@ def _open_rel(root_fd, rel):
         raise
 
 
-def _compose_link(root_path, parent_rel, raw):
-    """Lexically join a readlink result. None means the target leaves the root."""
-    if os.path.isabs(raw):
-        target = os.path.normpath(raw)
-        if not _lexical_inside(root_path, target):
-            return None
-        rel = os.path.relpath(target, root_path).replace(os.sep, "/")
-    else:
-        base = "" if parent_rel in ("", ".") else parent_rel
-        rel = os.path.normpath(os.path.join(base, raw) if base else raw).replace(
-            os.sep, "/"
-        )
-    if rel.startswith("../") or rel == ".." or os.path.isabs(rel):
-        return None
-    return rel
-
-
-def _link_parts(key):
-    if key in ("", "."):
-        return []
-    return [part for part in key.split("/") if part not in ("", ".")]
-
-
-def _link_target(root_fd, root_path, key, seen):
-    """Readlink key. Intermediate directory aliases are resolved, not opened."""
-    remaining = _link_parts(key)
-    if not remaining:
-        return "broken", None
-    for _ in range(64):
-        fd = os.dup(root_fd)
-        try:
-            restarted = False
-            for index, name in enumerate(remaining):
-                if name in (".", "..") or "/" in name or "\0" in name:
-                    return "external", None
-                try:
-                    info = os.lstat(name, dir_fd=fd)
-                except OSError:
-                    return "broken", None
-                last = index == len(remaining) - 1
-                if stat.S_ISLNK(info.st_mode):
-                    try:
-                        raw = os.readlink(name, dir_fd=fd)
-                    except OSError:
-                        return "broken", None
-                    parent = "/".join(remaining[:index])
-                    nxt = _compose_link(root_path, parent, raw)
-                    if nxt is None:
-                        return "external", None
-                    if last:
-                        return "link", nxt
-                    tail = remaining[index + 1 :]
-                    joined = nxt if not tail else nxt + "/" + "/".join(tail)
-                    joined = os.path.normpath(joined).replace(os.sep, "/")
-                    if (
-                        joined.startswith("../")
-                        or joined == ".."
-                        or os.path.isabs(joined)
-                    ):
-                        return "external", None
-                    if joined in seen:
-                        return "cycle", None
-                    seen.add(joined)
-                    remaining = _link_parts(joined)
-                    if not remaining:
-                        return "broken", None
-                    restarted = True
-                    break
-                if last:
-                    return "internal", None
-                if not stat.S_ISDIR(info.st_mode):
-                    return "broken", None
-                try:
-                    nxt_fd = os.open(name, _DIR_FLAGS, dir_fd=fd)
-                except OSError:
-                    return "broken", None
-                os.close(fd)
-                fd = nxt_fd
-            if not restarted:
-                return "broken", None
-        finally:
-            os.close(fd)
-    return "cycle", None
+def _root_bound(root_fd, root_path):
+    """True when root_path still names the directory the walk opened."""
+    try:
+        held = os.fstat(root_fd)
+        live = os.stat(root_path)
+    except OSError:
+        return False
+    return (held.st_dev, held.st_ino) == (live.st_dev, live.st_ino)
 
 
 def _classify_link(root_fd, root_path, rel):
-    """Classify a symlink by readlink only. Targets are not opened or hashed."""
-    seen = set()
-    current = rel.replace(os.sep, "/")
-    for _ in range(64):
-        key = os.path.normpath(current).replace(os.sep, "/")
-        if key.startswith("../") or key == ".." or os.path.isabs(key):
-            return "external"
-        if key in seen:
+    """Classify a symlink from the OS canonical path.
+
+    Path.resolve expands each symlink component before applying '..'. This is
+    diagnostic metadata only: the target is not scanned or hashed. Enumeration
+    stays on the no-follow file-descriptor walk.
+    """
+    if not _root_bound(root_fd, root_path):
+        return "external"
+    try:
+        resolved = (Path(root_path) / rel).resolve(strict=False)
+    except RuntimeError:
+        return "cycle"
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
             return "cycle"
-        seen.add(key)
-        kind, nxt = _link_target(root_fd, root_path, key, seen)
-        if kind != "link":
-            return kind
-        current = nxt
-    return "cycle"
+        return "broken"
+    if not _root_bound(root_fd, root_path):
+        return "external"
+    try:
+        resolved.relative_to(Path(root_path))
+    except ValueError:
+        return "external"
+    try:
+        resolved.lstat()
+    except FileNotFoundError:
+        return "broken"
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return "cycle"
+        return "broken"
+    return "internal"
 
 
 def _collapse_ws(text, pending):
@@ -1107,9 +1049,10 @@ def _kv_list_cursor(payload, issues):
 
     Primary list-keys contract: result_info is an optional object
     {count?, cursor?}. cursor is an optional string and is not nullable.
-    Absence of result_info, or of cursor inside that object, is a verified
-    end. A present null, a non-object result_info, or a non-string cursor
-    is not an end. A string cursor is returned unchanged.
+    Absence of result_info, of cursor, or a present empty string, is a
+    verified end. An empty string is not sent as the next query. A present
+    null, a non-object result_info, or a non-string cursor is not an end.
+    A non-empty string cursor is returned unchanged.
     """
     if "result_info" not in payload:
         return "end", None
@@ -1123,6 +1066,8 @@ def _kv_list_cursor(payload, issues):
     if not isinstance(nxt, str):
         _issue(issues, "pagination_incomplete", "kv list did not terminate")
         return "bad", None
+    if nxt == "":
+        return "end", None
     return "next", nxt
 
 

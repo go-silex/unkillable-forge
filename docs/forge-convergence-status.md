@@ -13,12 +13,14 @@ Plan : [forge-convergence-plan.md](forge-convergence-plan.md). Dernière mise à
 
 ## F01 — observations réalisées en lecture seule
 
-### État courant réellement observé
+### Relevés initial puis réseau du collecteur
 
-| Instance | Fichiers du manifeste de déploiement | HTML du manifeste | Pages du snapshot KV | Catalogue authentifié |
-|---|---:|---:|---:|---:|
-| Unkillable | 684 | 201 | 159 | 159 entrées |
-| Roxabi | 16 | 5 | 828 | 0 entrée |
+| Instance | Relevé | Fichiers du déploiement | HTML | Pages du snapshot KV | Catalogue authentifié |
+|---|---|---:|---:|---:|---|
+| Unkillable | Initial F01 | 684 | 201 | 159 | 159 entrées |
+| Unkillable | CLI réel après corrections | 687 | 202 | 160 | Non relu |
+| Roxabi | Initial F01 | 16 | 5 | 828 | 0 entrée |
+| Roxabi | API après vérification du binding | 16 | 5 | 828 | Non relu |
 
 Les colonnes mesurent des ensembles différents. Le snapshot est un registre d'empreintes du hub, pas une preuve de présence en production. Un catalogue vide n'est pas assimilé à un site vide.
 
@@ -107,6 +109,16 @@ Les chemins distants ont aussi été classés par provenance dans des manifestes
 
 Exécution réelle finale du CLI local : code 0, 1 058 fichiers / 160 slugs / 199 HTML. Par rapport au smoke précédent : six chemins locaux supplémentaires, aucun retiré, aucun digest commun modifié. Ce delta n'est pas déclaré publié : le hub a évolué pendant les observations et le manifeste de bascule sera repris sous gel. Les rapports précédents restent conservés ; aucune donnée locale n'a été supprimée ou normalisée par F01.
 
+### Vérification réseau après les dernières corrections
+
+La revue de `7b8a7cc` a trouvé une fin de pagination vide traitée comme un curseur suivant et une résolution lexicale incorrecte de `..` après alias. La fin `cursor: ""` est maintenant traitée comme une fin ; la résolution de diagnostic utilise les règles de `Path.resolve`, sans scanner ni hasher les répertoires externes. **24 tests ciblés ont réussi**, incluant ces deux régressions.
+
+- Unkillable : CLI réellement exécuté avec `--without-history`, `complete: true`, aucune issue ; toutes les valeurs KV demandées lues. Le mode local seul n'est plus l'unique preuve d'intégration.
+- Roxabi : la commande normale refuse correctement une divergence de namespace entre config et env. Un GET du projet de production prouve que `SHARES` correspond à l'env et non à la config. Une sélection **explicite en mémoire** de ce binding vérifié a ensuite exercé le collecteur complet : `complete: true`, aucune issue, valeurs KV lues. Aucun fichier utilisateur modifié.
+- Ce dernier point est un **contournement diagnostique**, pas une correction de configuration : la commande non modifiée reste bloquée. Il disparaîtra avec une configuration corrigée de façon approuvée ou le remplacement du publisher legacy. Les deux essais ont explicitement sauté l'historique, déjà collecté séparément ; ils ne prétendent pas refaire un snapshot transactionnel.
+
+Rapports privés en mode 0600 : `unkillable-inventory-cli-api-proof.json`, SHA-256 `51808e94ea2d6208620e524f26668fa5f0dc2031658e3637f95595af8e1698e5` ; `roxabi-inventory-api-bound-namespace-proof.json`, SHA-256 `21c2f3fff9b055c8b7dc343e890b9a8976bd4fdc6a40180de9b6716967431182`. Nouvelle revue du SHA final et nouvelle CI encore requises.
+
 ### Rapprochement des droits — preuve encore ouverte
 
 | Instance | Identifiants de grant sélectionnés | Publics | Partagés | Privés explicites | Valeur absente |
@@ -130,7 +142,7 @@ L'opérateur a choisi `allow_nonproduction_with_hard_import_gate` : après ferme
 
 | Lot | État | Worktree / branche | PR / SHA / preuves ou blocage |
 |---|---|---|---|
-| F01 | Code corrigé ; revue/CI finales attendues selon gate amendé | `~/.omp/wt/silex-forge/docs-F01-inventory` ; `docs/F01-inventory` | [PR #69](https://github.com/go-silex/silex-forge/pull/69) ; 22 tests + smoke réel verts ; G1b historique ouvert, sans attestation de droits préservés |
+| F01 | Correctifs finaux ; revue/CI attendues selon gate amendé | `~/.omp/wt/silex-forge/docs-F01-inventory` ; `docs/F01-inventory` | [PR #69](https://github.com/go-silex/silex-forge/pull/69) ; 24 tests et vrais parcours API verts ; divergence config/env Roxabi identifiée ; G1b ouvert |
 | F02 | Non démarré | Convention du plan | Attend livraison F01 ; amendement nouveau canon approuvé, création non encore autorisée au SHA exact |
 | F03 | Non démarré | Convention du plan | Attend F01/F02 et preuve d'isolement du nouveau canon par rapport au dépôt legacy figé |
 | F06 | Non démarré | Convention du plan | Attend F02 |

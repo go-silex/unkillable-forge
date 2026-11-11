@@ -906,6 +906,36 @@ class BoundaryRegressionTests(InventoryCase):
             self.assertFalse(result["complete"])
             self.assertTrue(result["issues"])
 
+    def test_explicit_empty_cursor_ends_and_classifies(self) -> None:
+        def get(path):
+            decoded = unquote(path)
+            parsed = urlsplit(decoded)
+            raw = parsed.path
+            if "/values/" in raw:
+                key = unquote(raw.split("/values/", 1)[1])
+                if key == "vis:alpha":
+                    return 200, b"public"
+                return 404, b""
+            if raw.rstrip("/").endswith("/keys"):
+                return _envelope(
+                    [{"name": "vis:alpha", "metadata": {"v": "public"}}],
+                    {"count": 1, "cursor": ""},
+                )
+            if raw.endswith("/files"):
+                return _envelope({"id": CANON_ID, "files": dict(CANON_FILES)})
+            if "/pages/projects/" in raw and "/deployments" not in raw:
+                return _envelope(_project(PROJECT, HOST))
+            return 404, b""
+
+        result = _collect_history_off(self.hub, get)
+        self.assertTrue(result["complete"])
+        row = _vis(result, "alpha")
+        self.assertIsNotNone(row)
+        self.assertEqual("public", row["classification"])
+        self.assertTrue(row["vis_present"])
+        self.assertFalse(row["share_present"])
+
+
 
     def test_listed_value_404_clears_presence(self) -> None:
         result = self._live(
@@ -1136,6 +1166,51 @@ class BoundaryRegressionTests(InventoryCase):
         for path, (data, mtime) in before.items():
             self.assertEqual(data, path.read_bytes())
             self.assertEqual(mtime, path.stat().st_mtime_ns)
+
+    def test_dotdot_after_alias_follows_the_link_not_the_text(self) -> None:
+        art = self.hub / "artifacts"
+        outside = self.tmp / "outside-root"
+        outside.mkdir()
+        outside_page = self.tmp / "page2.html"
+        outside_page.write_bytes(EXT_SENTINEL.encode("ascii"))
+        (art / "ext").symlink_to(outside, target_is_directory=True)
+        (art / "page2.html").write_bytes(b"inside-page2")
+        (art / "page.html").symlink_to("ext/../page2.html")
+        real = art / "real"
+        (real / "deep").mkdir(parents=True)
+        inside = real / "inside.html"
+        inside.write_bytes(b"<html>inside</html>")
+        (art / "alias").symlink_to(Path("real") / "deep", target_is_directory=True)
+        (art / "up.html").symlink_to("alias/../inside.html")
+        before = {
+            path: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in (outside_page, inside)
+        }
+        result = inv.collect_inventory(
+            _config(self.hub, discover=False),
+            _env(),
+            lambda _path: (_ for _ in ()).throw(AssertionError("get")),
+            local_only=True,
+        )
+        by_path = {
+            str(row["path"]).replace("\\", "/"): row
+            for row in result["local_selection"]["files"]
+        }
+        escaped = by_path["page.html"]
+        self.assertTrue(escaped["symlink"])
+        self.assertEqual("external", escaped["diagnostic"])
+        self.assertIsNone(escaped["sha256"])
+        stayed = by_path["up.html"]
+        self.assertTrue(stayed["symlink"])
+        self.assertEqual("internal", stayed["diagnostic"])
+        self.assertIsNone(stayed["sha256"])
+        blob = _blob(result)
+        self.assertNotIn(EXT_SENTINEL, blob)
+        self.assertNotIn(_sha256(EXT_SENTINEL.encode("ascii")), blob)
+        for path, (data, mtime) in before.items():
+            self.assertEqual(data, path.read_bytes())
+            self.assertEqual(mtime, path.stat().st_mtime_ns)
+
 
     def test_html_flag_right_context_is_not_committed_early(self) -> None:
         chunk = int(getattr(inv, "_CHUNK", 1024 * 1024))
