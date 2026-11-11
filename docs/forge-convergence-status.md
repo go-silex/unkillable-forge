@@ -7,7 +7,7 @@ Plan : [forge-convergence-plan.md](forge-convergence-plan.md). Dernière mise à
 - Autorisation opérateur obtenue pour commits, pushes, PR et merges des lots du plan, uniquement après revue indépendante du SHA final et CI verte.
 - Renommage, passage privé, migration/bascule de production, suppression de ressources et retrait de credentials : confirmations distinctes encore requises.
 - Périmètre Roxabi confirmé : préserver les pages de l'ancien déploiement arbre, leurs ressources nécessaires et les publications actuelles, avec URLs et droits conservés.
-- Amendement F02 confirmé : nouveau canon public avec ascendance Silex ; ancien dépôt gardé à son URL et figé jusqu'à archivage final. Création du dépôt encore soumise au SHA exact et au runbook revu.
+- Amendement F02 confirmé : nouveau canon public avec ascendance Silex ; ancien dépôt gardé à son URL et figé jusqu'à archivage final. La préparation privée d'une copie nettoyée de deux identifiants est autorisée ; publication, création et gel restent soumis à G0, aux deux SHA exacts et au runbook revu.
 - Checkouts principaux et changements utilisateur préservés. Le document initial reste dans son worktree ; une copie est incluse dans F01 pour son versionnement.
 - Toute écriture de code/documentation se fait en worktree dédié. Les inventaires de corpus et preuves privées restent hors Git ; aucune valeur de partage n'est publiée.
 
@@ -105,6 +105,8 @@ Les chemins distants ont aussi été classés par provenance dans des manifestes
 
 ### Revue et livraison F01
 
+Les paragraphes de revue ci-dessous sont le journal des itérations. L'état final livré, son SHA revu et ses checks figurent dans la table des lots ; les demandes de nouvelle revue intermédiaires ne rouvrent pas F01.
+
 [PR #69](https://github.com/go-silex/silex-forge/pull/69). Le SHA `70649f742e8aec34415ab6bbb838017ed64f3771` a passé les hooks et toute la CI, dont macOS/Bash 3.2/Python 3.9 et le scan secrets, mais sa revue a encore bloqué sur trois défauts P2 : exemption de redaction par nom de clé, métadonnées de pagination mal typées, diagnostic des alias de répertoire. Ils ont été corrigés avec la frontière droite des flags ; une régression de retour de fonction introduite pendant cette correction a également été corrigée. **22 tests ciblés réussis**. La nouvelle revue indépendante et la nouvelle CI du SHA final, amendement inclus, restent requises.
 
 Exécution réelle finale du CLI local : code 0, 1 058 fichiers / 160 slugs / 199 HTML. Par rapport au smoke précédent : six chemins locaux supplémentaires, aucun retiré, aucun digest commun modifié. Ce delta n'est pas déclaré publié : le hub a évolué pendant les observations et le manifeste de bascule sera repris sous gel. Les rapports précédents restent conservés ; aucune donnée locale n'a été supprimée ou normalisée par F01.
@@ -148,6 +150,18 @@ Ces bornes **ne ferment pas G1b** : les références brutes historiques ne sont 
 
 L'opérateur a choisi `allow_nonproduction_with_hard_import_gate` : après fermeture du code F01, revue indépendante et CI verte du SHA final incluant cet amendement, F01 peut être accepté comme énumération complète avec incertitude de sécurité identifiée. F02 puis le développement hors production restent soumis à leurs autres dépendances. **Aucune importation du corpus historique**, validation de fidélité F10 ou migration de production tant que `UNRESOLVED_HISTORICAL_OWNERSHIP` reste ouvert ; F11/F12 sont bloqués transitivement. G0 et les autorisations distinctes de production sont inchangés. L'assistant poursuit la preuve, l'opérateur la valide ; une nouvelle politique de droits ne sera pas présentée comme équivalence historique.
 
+## F02 — préparation privée ; G0 non accordé
+
+La [PR #70](https://github.com/go-silex/silex-forge/pull/70) prépare les deux gates de writers CI et le runbook, sans exécuter G0. Sur son candidat `fdc397a3359a9e9e734f8f47e03221b7a233c2fe`, la [vraie CI après passage ready](https://github.com/go-silex/silex-forge/actions/runs/43100946506) a exécuté et réussi `check`, `test`, Python 3.9 et les jobs bash/macOS ; le premier run draft avait tout skippé et ne valait pas validation. La revue statique des gates est favorable ; le défaut du préflight anonyme, qui héritait de la configuration Git locale, est corrigé dans le travail en cours et doit être revu au nouveau SHA.
+
+L'audit indépendant de l'ascendance bloque **la copie intégrale inchangée** : deux vrais identifiants Cloudflare (compte et namespace KV), pas des credentials démontrés, restent dans `scripts/purge-git-history.sh` au commit `559a72480c30e61227929ff118b3f77d1ad1851a`. Les détecteurs à mot-clé ne voyaient pas ces valeurs littérales nues. Aucun identifiant brut n'est reproduit ici. Couverture : 234 commits, 2 535 objets, 1 111 blobs ; pas de corpus HTML client identifié. Preuve privée `public-source-boundary-proof.json`, mode 0600, SHA-256 `1e9113ffed91ae35b0c4685801fb0688b60a6ee0ad16b308e935eea0e8ee66c0`.
+
+**Préparation désormais autorisée :** l'opérateur a choisi `prepare_isolated_identifier_clean_history`. Une copie privée isolée a été nettoyée ; aucun ref existant, historique Silex ou Roxabi n'a été réécrit. Le prototype `fdc397a3359a9e9e734f8f47e03221b7a233c2fe` → `7d43e20212b57aaecc00b60c89668329eb6da1e6` a une revue indépendante favorable : 234 commits en bijection, topologie et métadonnées hors signatures conservées, 1 110 blobs inchangés, un seul blob avec exactement deux substitutions, arbre final identique ; les identifiants sont absents de tous les objets physiques. **50 signatures historiques sont retirées dans la copie**, sans altérer les originaux. Preuve privée `candidate-clean-preparation-proof.json`, mode 0600, SHA-256 `29ad61a7b69daa8b72b533c5cdc6b1ae1ef9b36ece5d9e5b2f992b1ee8263676`.
+
+Ce prototype n'est **pas** le seed final : les corrections du runbook et le déclenchement manuel de la CI doivent être committés, revus et vérifiés, puis la copie finale auditée au nouveau SHA. Le protocole proposé distingue `BOOTSTRAP_SHA` original et `SEED_SHA` nettoyé, avec arbre final identique ; il conserve la PR originale et ne fusionne jamais l'histoire nettoyée dans l'ancien main. G0 devra autoriser expressément les deux SHA, le gel et la publication d'un ref de seed immuable avant sa propre CI ; aucune création du canon avant la réussite effective de cette CI exacte. Aucun gel GitHub, publication, nouveau dépôt ou changement Cloudflare exécuté.
+
+Un worktree de registre privé est prêt, sans modification, pour la mise à jour de l'inventaire **après** création effective. La sonde G1b de disponibilité des métadonnées est préparée dans un worktree Roxabi séparé ; aucun appel Cloudflare n'est autorisé par cette préparation.
+
 ## Lots et traçabilité
 
 ### Vague A
@@ -155,7 +169,7 @@ L'opérateur a choisi `allow_nonproduction_with_hard_import_gate` : après ferme
 | Lot | État | Worktree / branche | PR / SHA / preuves ou blocage |
 |---|---|---|---|
 | F01 | **Livré**, sous l'amendement de gate accepté | `~/.omp/wt/silex-forge/docs-F01-inventory` ; `docs/F01-inventory` | [PR #69](https://github.com/go-silex/silex-forge/pull/69), head revu `7ecc82b80d4ac7796aa2f128fd71405be44a585d`, merge `8440d7009ed771fcab2c64642048e96afa9b3a8c` ; [CI verte](https://github.com/go-silex/silex-forge/actions/runs/43094058384) et [secret scan vert](https://github.com/go-silex/silex-forge/actions/runs/43094058552) ; G1b ouvert |
-| F02 | Préparation du runbook et désarmement explicite des writers CI | `~/.omp/wt/silex-forge/chore-F02-canonical-name` ; `chore/F02-canonical-name`, base `8440d70` | PR à préparer ; revue, CI et G0 au SHA exact requis ; ni gel GitHub ni création exécutés |
+| F02 | Préparation en PR ; audit du prototype privé réussi ; G0 non accordé | `~/.omp/wt/silex-forge/chore-F02-canonical-name` ; `chore/F02-canonical-name`, base `8440d70` | [PR #70](https://github.com/go-silex/silex-forge/pull/70) ; CI réelle verte au candidat `fdc397a`, nouvelle revue/CI et seed final encore requis ; préparation privée autorisée uniquement ; ni publication, gel ni création exécutés |
 | F03 | Non démarré | Convention du plan | Attend F01/F02 et preuve d'isolement du nouveau canon par rapport au dépôt legacy figé |
 | F06 | Non démarré | Convention du plan | Attend F02 |
 

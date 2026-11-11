@@ -1,148 +1,193 @@
 # Canonical repository transition (F02)
 
-**Status: planned, not executed.** The intended public canonical repository is
-`go-silex/unkillable-forge`; `go-silex/silex-forge` remains the public legacy
-URL, frozen but not archived until F15. The names are not a rename or redirect:
-older 1.7.3/1.3.0 clients whose installations cannot be updated clone the old
-`main`, so repository separation is the isolation gate. Legacy engine and
-publisher stay frozen; canonical development may proceed in F03 after F02.
-Plugin identity and distribution stay unchanged until F08. Do not make a
-release under the old plugin name from the new repository.
+**Status: preparation only; G0 not granted and transition not executed.** The
+operator authorized preparation of an isolated identifier-clean history only.
+No GitHub creation, ref push, merge, settings change, publication or Cloudflare
+operation follows from that approval. `go-silex/unkillable-forge` is the intended
+new public canonical repository, not a claimed existing repository.
+`go-silex/silex-forge` remains the legacy public URL, frozen and not archived
+until F15. Existing 1.7.3/1.3.0 clients that cannot be updated clone old `main`;
+separate repositories are the isolation boundary. Legacy engine and publisher
+remain frozen; canonical development may proceed in F03 after F02. Plugin
+identity and distribution do not change until F08; no automatic release under
+the old plugin name is authorized.
 
-This is an operator procedure, **not authority to run it**. G1b is open: no
-imports, F10 or production work. No deployment, data migration/import, credential
-or app retirement, scope withdrawal, old repository archive or rename is in F02.
-Do not alter a shared checkout or its remotes. The F01 worktree and dirty main
-checkouts are outside this procedure.
+G1b remains open: no F10, import, migration, production deployment, data
+transfer, credential/app retirement or scope withdrawal. Never rewrite legacy
+or Roxabi history, force-push, retarget shared remotes, archive, or rename a
+repository. The single original bootstrap PR is not replaced by a development
+PR for sanitized history. This runbook's commands after §2 require explicit G0;
+the provenance PR additionally needs the normal explicit merge authorization.
 
-## Inputs and authority
+## 1. Inputs, review and authorization
 
-| Input | Required evidence / decision |
+| Input | Required decision or evidence |
 |---|---|
-| `OLD=go-silex/silex-forge`, `NEW=go-silex/unkillable-forge` | Freshly verify organization ownership, authenticated operator and visibility; 404 can mean lack of access, not availability. The earlier repo lookup could not resolve the new name and planned clone paths were absent; neither guarantees current/global availability. |
-| `APPROVED_SOURCE_SHA` | Full commit SHA of the independently reviewed, CI-green F02 PR head, obtained **after** this runbook is committed and reviewed. Record PR URL, head repository, full source ref, base SHA, exact head SHA, review and required check evidence. No self-referential SHA is assumed here. |
-| `SOURCE_REF` | Exactly `refs/pull/$APPROVED_PR/head` on the public old repository, approved by G0 and verified before and after merge to resolve to `APPROVED_SOURCE_SHA`. This retained PR ref avoids automatic head-branch deletion. If unavailable, stop; do not substitute a ref without fresh G0. Export its history and only destination `refs/heads/main`. |
-| `APPROVED_PR`, `APPROVED_BASE_SHA` | Old bootstrap PR number and its reviewed base SHA. Head, source repository, base and exact SHA must still match the reviewed record immediately before merge. |
-| `WORK` and `CANON_CLONE` | New, distinct, non-existing paths outside all existing worktrees. Private operator-controlled storage with sufficient space; `WORK` contains sensitive inventories, not a Git-tracked directory. |
-| G0 | Operator explicitly approves this runbook, the exact source SHA and source/destination refs, and authority for the described old GitHub changes, empty new public repository, its settings and seed. Review/CI alone is not G0. Any changed SHA, refs, scope or unexpected baseline requires renewed approval. |
-| G1b | Separate future decision; remains open. F02 is not authorization to import, deploy, or change distribution. |
+| `OLD=go-silex/silex-forge`, `NEW=go-silex/unkillable-forge` | Freshly verify authenticated account, organizational ownership and visibility. A prior lookup did not resolve the new name and planned clone paths were absent; neither establishes global or current availability. A 404 may mean insufficient access. |
+| `APPROVED_PR` and `BOOTSTRAP_SHA` | Original old-repository bootstrap PR and its full, independently reviewed, CI-green head SHA. Record its reviewed base as `BASE_SHA`, the PR URL, head repository, review, checks and full public `BOOTSTRAP_REF=refs/pull/$APPROVED_PR/head`. Never embed this runbook's own prospective commit SHA. |
+| `SEED_SHA`, `SEED_REF` | Full SHA of the independently reviewed **clean rewritten** history and a new, explicitly approved public ref such as `refs/heads/canonical-seed/F02`. The two SHAs differ. `SEED_REF` must not exist before creation and is an immutable generated source artifact, not a development branch. Destination is only `refs/heads/main` on `NEW`. |
+| `WORK`, `CANON_CLONE` | Absolute, distinct, new paths outside existing worktrees. `WORK` is private, mode 700, with sufficient space; all artifacts inside are mode 600 as appropriate. Do not use dirty main checkouts or the F01 worktree. |
+| `RULES` | Private mode-600 replacement rules containing only the two previously identified historical values and their reviewed replacements; never put raw values, rules, secret values or raw account identifiers in Git, logs, public PRs or this runbook. |
+| G0 | Explicit operator approval **after** independent private audit and green bootstrap CI, of this runbook, exact `BOOTSTRAP_SHA`, `BASE_SHA`, `BOOTSTRAP_REF`, `SEED_SHA`, `SEED_REF`, destination ref, expected merge parents/tree, signature/extended-header loss, maintenance window and settings. G0 explicitly authorizes **public seed-ref publication before its own CI**, solely to run that CI; exact-seed CI is mandatory before canonical creation. Any changed SHA, ref, scope or unexplained baseline requires fresh approval. G0 is not blanket Cloudflare approval. |
+| G1b | Separate future decision; remains open. |
 
-The only allowed ancestry is the reviewed **public Silex** history reachable
-from the approved public source. Inspect its commit history, tree, license and
-public-release provenance, including reachable objects and inherited files,
-for secrets, account identifiers and actual artifact HTML before approval. MIT
-license and notices must remain intact. Never import private Roxabi history or
-assume a public tip makes every ancestor safe. If the provenance or public
-boundary cannot be proven, stop; do not sanitize or substitute another history
-without a new review and G0.
+Record GitHub actor, organization, PR and source identity, and all operator
+approvals privately. The public boundary is only the reviewed public Silex
+ancestry. Never import private Roxabi history. Preserve MIT license and notices;
+inspect every reachable object and public-release provenance, not just tip.
+Unknown provenance, secret or data exposure blocks publication.
 
-## 1. Fresh preflight and private baseline
+## 2. Authorized isolated preparation, before G0
 
-Before G0, read current repository and organization settings with an account
-that can inspect them, PR details, effective rules (including inherited rules),
-Actions policies and workflow definitions, variables and secret **names and
-access**, app installations and grants, deploy keys, collaborators, external
-integrations, scheduled/dispatch workflows and other writers. Do not print or
-record secret values. Verify all expected writers can be quiesced and schedule
-an admin maintenance window; admins can still change rules and release metadata.
-Read the current `PR_Main` definition and effective `main` rules: preserve the
-existing PR, strict `check`/`test`, thread-resolution, no non-fast-forward or
-branch-deletion protections and no bypass. A classic branch-protection 404 is
-not proof that `main` is unprotected. Check GitHub plan/API capability for the
-new rulesets and their effective enforcement; stop if unavailable.
-
-Old Actions were observed enabled, default token read-only, but the release job
-has `contents: write`; MergeOnGreen can mint an App token from inherited
-`CI_APP_CLIENT_ID` / `CI_APP_PRIVATE_KEY`; its merge call does not pin the
-expected PR head SHA. Its Actions dependencies are commit-SHA pinned.
-Treat these as time-sensitive observations, not a complete writer inventory.
-Explicit repository variables override organization variables; verify their
-actual values on **both** repositories rather than assuming no inherited values
-or secrets. The release job must require `vars.FORGE_RELEASES_ENABLED == 'true'`;
-the entire MergeOnGreen writer job must require
-`vars.FORGE_AUTOMERGE_ENABLED == 'true'` **before token minting**. Verify those
-conditions in the reviewed source and actual CI. Both gates remain false until
-F08 or a separately reviewed, SHA-bound automation design authorizes a change.
-
-Create a private baseline outside Git (`umask 077`; directory mode 700; files
-mode 600). Record timestamp, operator, repository identity, default branch,
-current main SHA, all refs, each tag object SHA and peeled commit, all releases
-including draft/prerelease state, body, timestamps and asset metadata, workflow
-and run inventories, settings, rulesets and writers. Capture all pages and each
-release's assets; download and hash assets if any exist. Compare structured
-fields rather than ordering. Record hashes of relevant manifest files from
-`main` and the approved source with paths and SHA-256; if a manifest is absent,
-record that explicitly. Prior observation was 24 tags and 21 non-immutable
-releases with no assets; re-count, do not use those numbers as an assertion.
-Never commit these inventories, secrets, raw account IDs or artifact HTML.
-
-Useful read-only collection examples, after assigning and validating `OLD` and
-`WORK` as above (API errors or incomplete pagination are fatal):
+Prepare a new private single-ref, no-tags clone of the exact public bootstrap
+head, never `--mirror`, `--all`, a shared checkout or a private-history remote.
+Before preparation validate `BOOTSTRAP_SHA` as a full 40-character lowercase
+hexadecimal commit, numeric `APPROVED_PR`, and
+`BOOTSTRAP_REF=refs/pull/$APPROVED_PR/head`. The operator supplies absolute
+paths and private `RULES`; `SEED_SHA` is derived only after filtering.
+Use a fresh anonymous Git environment and a private non-repository working
+directory with a discovery ceiling to prevent inherited credentials, headers,
+local/global/system config and URL rewrites. Before fetching, require the
+advertised `BOOTSTRAP_REF` to resolve **exactly** to `BOOTSTRAP_SHA`, both
+columns and only one line. Repeat this proof immediately before the merge.
 
 ```bash
 umask 077
-mkdir -m 700 "$WORK"
-gh api "repos/$OLD" > "$WORK/old-repo.json"
-gh api --paginate --slurp "repos/$OLD/rulesets?includes_parents=true&per_page=100" > "$WORK/old-rulesets.json"
-gh api --paginate --slurp "repos/$OLD/releases?per_page=100" > "$WORK/old-releases.json"
-gh api --paginate --slurp "repos/$OLD/actions/runs?per_page=100" > "$WORK/old-runs.json"
-git ls-remote "https://github.com/$OLD.git" > "$WORK/old-refs.txt"
+mkdir -m 700 "$WORK" "$WORK/home" "$WORK/cwd"
+HOME_CLEAN=$(cd "$WORK/home" && pwd -P)
+CWD_CLEAN=$(cd "$WORK/cwd" && pwd -P)
+(
+  cd "$CWD_CLEAN" || exit 1
+  env -i PATH="$PATH" HOME="$HOME_CLEAN" GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 \
+    GIT_CEILING_DIRECTORIES="$CWD_CLEAN" \
+    git ls-remote "https://github.com/$OLD.git" "$BOOTSTRAP_REF"
+) > "$WORK/bootstrap-ref"
+[ "$(wc -l < "$WORK/bootstrap-ref")" -eq 1 ] || exit 1
+[ "$(cut -f1 "$WORK/bootstrap-ref")" = "$BOOTSTRAP_SHA" ] || exit 1
+[ "$(cut -f2 "$WORK/bootstrap-ref")" = "$BOOTSTRAP_REF" ] || exit 1
 ```
 
-Release listings include asset metadata; additionally fetch every release's
-assets endpoint with pagination and compare it to the list, including empty
-lists. Inventory all runs, not just a single recent page. Retain the baseline
-securely for the maintenance window; re-read and compare at each boundary below.
-For expected changes (bootstrap main and documented settings), record exact
-before/after evidence and compare all **other** fields; any unexplained drift is
-a stop, not something to normalize away.
-
-## 2. G0, quiesce and bootstrap merge on old
-
-1. Obtain G0 with the table inputs and maintenance window. Re-read the source
-   ref, PR head/base/reviews/required checks, old settings, rules, writers,
-   tags and releases. Stop if any differ from reviewed/approved evidence.
-2. Set repository-level `FORGE_RELEASES_ENABLED=false` and
-   `FORGE_AUTOMERGE_ENABLED=false` on old; read them back and verify effective
-   values. Disable the old MergeOnGreen workflow **before** the merge; inspect
-   all outstanding runs, including runs created under prior workflow revisions.
-   Drain every write-capable run in `queued`, `requested`, `waiting`, `pending`
-   or `in_progress`, including release and App-token writers. Disabling a
-   workflow or Actions does **not** cancel already-started runs. Do not cancel
-   without separate authorization; wait for completion or stop. Continue to
-   monitor for new runs and unaccounted writers. A disabled workflow is not a
-   substitute for draining it.
-3. Ensure the reviewed source's gates and CI checks are green, then merge only
-   `APPROVED_PR` at exactly `APPROVED_SOURCE_SHA` through existing `PR_Main`,
-   without bypassing checks, threads or hooks. The only approved method is
-   `gh pr merge "$APPROVED_PR" --repo "$OLD" --match-head-commit "$APPROVED_SOURCE_SHA" --merge`.
-   If unavailable, stop; no alternative merge method is authorized. Read the
-   resulting merge commit and PR through the API: verify exactly two parents,
-   in order `APPROVED_BASE_SHA` and `APPROVED_SOURCE_SHA`, its tree equals the
-   approved head tree, and the PR identifies that merge commit. Record this
-   resulting frozen-main SHA. Stop if old main does not equal it.
-4. Drain again after merge, including CI-triggered and previously queued runs;
-   verify no write-capable run in any listed nonterminal state remains. Stop on
-   ambiguous status, inaccessible pages, unexpected writer or drift.
-
-For step 1, with `WORK` already created, verify the retained ref anonymously
-before merging (no system/global configuration, credentials, or URL rewrite):
+Before any later public mutation, validate the derived `SEED_SHA` as a full
+40-character lowercase hexadecimal commit distinct from `BOOTSTRAP_SHA`, and
+`SEED_REF` as a valid, explicitly G0-approved `refs/heads/` ref.
+For preparation, fetch only the approved bootstrap ref into a **fresh isolated**
+bare repository in the same clean environment, confirm the fetched ref equals
+`BOOTSTRAP_SHA`, create a local `main` there, then clone only that ref with
+`--no-local --no-tags --single-branch --branch main` into a fresh private clone:
 
 ```bash
-mkdir -m 700 "$WORK/premerge-home"
-env -i PATH="$PATH" HOME="$WORK/premerge-home" GIT_CONFIG_NOSYSTEM=1 \
-  GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
-  git ls-remote "https://github.com/$OLD.git" "$SOURCE_REF" > "$WORK/premerge-ref"
-[ "$(wc -l < "$WORK/premerge-ref")" -eq 1 ] || exit 1
-[ "$(cut -f1 "$WORK/premerge-ref")" = "$APPROVED_SOURCE_SHA" ] || exit 1
+env -i PATH="$PATH" HOME="$HOME_CLEAN" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git init --bare "$WORK/original.git"
+env -i PATH="$PATH" HOME="$HOME_CLEAN" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -C "$WORK/original.git" fetch --no-tags "https://github.com/$OLD.git" "$BOOTSTRAP_REF:refs/heads/main"
+[ "$(git -C "$WORK/original.git" rev-parse 'refs/heads/main^{commit}')" = "$BOOTSTRAP_SHA" ] || exit 1
+env -i PATH="$PATH" HOME="$HOME_CLEAN" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git clone --no-local --no-tags --single-branch --branch main "$WORK/original.git" "$WORK/filter-clone"
 ```
 
-For step 2, resolve `MERGE_WORKFLOW_ID` from the paginated old workflow
-listing and confirm its name/path matches MergeOnGreen; it must be a numeric ID.
-These are mutations, authorized only by G0:
+The fresh bare repo's own config is used; no shared Git config or remote is
+modified. Inspect its ref list before cloning and stop on unexpected refs.
+Before filtering, verify private `RULES` is mode 600 and has SHA-256 digest
+`f23c7c10038857ed9cd9a562ee99e20b5b3ae91cd9fc3f70ff6892d85dee0f4f`
+without exposing its contents. Verify the installed `git-filter-repo`
+fingerprint is `a40bce548d2c`; run it on this fresh clone, never `--force`:
 
 ```bash
-case "$MERGE_WORKFLOW_ID" in *[!0-9]*|'') exit 1 ;; esac
+git -C "$WORK/filter-clone" filter-repo --replace-text "$RULES" --preserve-commit-hashes --preserve-commit-encoding --replace-refs delete-no-add --prune-empty never --prune-degenerate never
+```
+
+`--preserve-commit-hashes` preserves textual commit references in messages,
+not rewritten commit IDs. Never use `--refs`, `--partial` or sensitive-data
+options that widen ref scope or retain mixed histories.
+
+Only blob replacement is authorized: the independent prototype found the
+two values in one historical blob and no occurrences in non-blob content.
+Do not use message replacement; compare all messages, metadata and trees for
+the final source independently and stop on any change beyond the exact two
+authorized blob substitutions and documented signature/extended-header loss.
+The prototype is evidence for the procedure, not the final seed.
+
+The isolated clone is disposable, not a shared worktree. Preserve the
+filter-repo old/new commit map and original public-source proof privately.
+Create a fresh clean export of the rewritten `main`:
+
+```bash
+env -i PATH="$PATH" HOME="$HOME_CLEAN" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git clone --no-local --no-tags --single-branch --branch main "$WORK/filter-clone" "$WORK/clean-export"
+```
+
+Derive `SEED_SHA` from the rewritten export's `main`, then validate its format
+and inequality to `BOOTSTRAP_SHA`; do not reuse a prototype SHA.
+
+Inspect the fresh export's refs, reflogs,
+replace refs, notes, alternates, shallow dependencies and reachable/unreachable
+objects to prove no old unsanitized objects or other refs leaked into the export.
+Stop if this cannot be shown;
+never rely solely on the filtered working clone's visible refs. No cleanup may
+modify the old repository or other history.
+
+Independently verify and privately review: all reachable commit/tree/blob/tag
+objects for the two exact values and generic secret/identifier patterns;
+synthetic fixtures only if their provenance is verified; no raw findings in
+public logs. Compare old/new commit map, commit count, parent topology, author
+and committer identities and dates, message bytes/encoding, licenses and tip
+tree. Rewritten `SEED_SHA` must differ from `BOOTSTRAP_SHA` but the **tip tree
+must equal** the original bootstrap tree. Fast-export/import drops commit
+signatures and extended headers; original signatures do not certify new commit
+IDs. Record these losses explicitly, not as fully identical history.
+Verify no private Roxabi objects, extra refs, tags, releases, real artifact HTML or credentials
+entered the export. Any content beyond the two authorized historical value
+replacements, metadata/topology change or unexplained audit finding stops G0.
+Obtain independent source/security/provenance review of the exact resulting
+`SEED_SHA`. No ref has been published by this preparation.
+
+This does not purge the existing public legacy repository, its tags, PRs or
+other copies: cleanup qualifies the new canonical ancestry only.
+
+## 3. Fresh baseline and G0
+
+Before requesting G0, read the current PR, exact head/base, reviews and all
+required CI checks; review the default-off release and MergeOnGreen job gates
+and the existing CI `workflow_dispatch` trigger in the reviewed source. The
+release job requires `vars.FORGE_RELEASES_ENABLED == 'true'`; the **entire**
+MergeOnGreen writer job requires `vars.FORGE_AUTOMERGE_ENABLED == 'true'` before
+minting an App token. Capture GitHub settings, all inherited and repository
+rulesets, workflow definitions and runs, organization/repository variables,
+secret **names/access only**, apps, deploy keys, integrations, collaborators,
+schedules, dispatches and other writers. Schedule an admin maintenance window.
+Do not record secret values. Stop if any writer cannot be accounted for.
+
+Preserve existing `PR_Main`: PR, strict `check`/`test`, resolved threads, no
+non-fast-forward/deletion and no bypass. A classic branch protection 404 does
+not imply unprotected `main`. Previously observed old Actions were enabled,
+default token read-only, but release had `contents: write`; MergeOnGreen could
+mint an App token from inherited `CI_APP_CLIENT_ID` / `CI_APP_PRIVATE_KEY`, and
+its merge call lacked an expected-head SHA. Its Actions dependencies were
+commit-SHA pinned. Re-read; these observations are not a current inventory.
+
+Privately baseline timestamp, actor, repo identity/default branch, main SHA,
+all refs, tag object and peeled commit IDs, every release's complete metadata
+and paginated assets, and asset hashes if assets exist. Record relevant manifest
+paths and SHA-256 hashes, including explicit absence, for old main and reviewed
+bootstrap. Compare structured results, with all pages; API errors or inaccessible
+pages stop the operation. Previous 24 tags and 21 non-immutable releases with
+no assets were only observations, not current assertions. Record rules, Actions,
+variables and writers. Keep private evidence out of Git. Compare snapshots at
+each phase boundary: only the approved bootstrap main and generated seed ref,
+plus explicitly authorized settings, may change. No other tag/release drift.
+
+Obtain G0 only after all preflight and private clean review evidence exists.
+Immediately before each operation re-read source, policy, gates, runs, refs,
+releases and settings; stop on drift or incomplete authority.
+
+## 4. Bootstrap old and freeze main, tags and seed ref
+
+After G0, set repository-level false overrides on old, irrespective of inherited
+organization values. Resolve numeric `MERGE_WORKFLOW_ID` from the current
+paginated workflow listing by verified name/path. Disable MergeOnGreen before
+the merge and read it back. Drain **all** write-capable workflows and runs,
+including runs from earlier revisions, in `queued`, `requested`, `waiting`,
+`pending` and `in_progress`; check all pages. Disabling a workflow does not
+cancel runs. Do not cancel without separate authority; wait or stop.
+
+```bash
 gh variable set FORGE_RELEASES_ENABLED --repo "$OLD" --body false
 gh variable set FORGE_AUTOMERGE_ENABLED --repo "$OLD" --body false
 gh api --method PUT "repos/$OLD/actions/workflows/$MERGE_WORKFLOW_ID/disable"
@@ -151,91 +196,128 @@ gh variable get FORGE_AUTOMERGE_ENABLED --repo "$OLD"
 gh api "repos/$OLD/actions/workflows/$MERGE_WORKFLOW_ID"
 ```
 
-Require both outputs `false` and workflow state `disabled_manually`, then drain.
-For step 3, retrieve the merge commit and PR and inspect both parents and tree,
-not just the returned merge status:
+Require `false`, `false`, `disabled_manually`; verify effective settings and
+account for inherited secrets and writers. Repeat §2 anonymous public proof on
+`BOOTSTRAP_REF` and exact `BOOTSTRAP_SHA`, then merge only the original reviewed
+head through existing rules, never force or use another merge method:
 
 ```bash
-gh api "repos/$OLD/pulls/$APPROVED_PR" > "$WORK/merged-pr.json"
-FROZEN_MAIN_SHA=$(gh api "repos/$OLD/commits/main" --jq .sha)
-gh api "repos/$OLD/commits/$FROZEN_MAIN_SHA" > "$WORK/frozen-commit.json"
-gh api "repos/$OLD/commits/$APPROVED_SOURCE_SHA" > "$WORK/source-commit.json"
-jq -e --arg base "$APPROVED_BASE_SHA" --arg head "$APPROVED_SOURCE_SHA" \
-  '.parents | length == 2 and .[0].sha == $base and .[1].sha == $head' "$WORK/frozen-commit.json"
-[ "$(jq -r .commit.tree.sha "$WORK/frozen-commit.json")" = "$(jq -r .commit.tree.sha "$WORK/source-commit.json")" ] || exit 1
-[ "$(jq -r .merge_commit_sha "$WORK/merged-pr.json")" = "$FROZEN_MAIN_SHA" ] || exit 1
+gh pr merge "$APPROVED_PR" --repo "$OLD" --match-head-commit "$BOOTSTRAP_SHA" --merge
 ```
 
-## 3. Freeze old without replacing PR_Main
+Read PR and resulting `main` commit through the API: PR's merge commit must be
+current main, with exactly two ordered parents `BASE_SHA`, `BOOTSTRAP_SHA`, and
+its tree must equal the reviewed bootstrap tree. Record `FROZEN_MAIN_SHA`
+(`MERGE_SHA`), distinct from `BOOTSTRAP_SHA`. Await and inspect the normal
+post-merge main CI, drain all write-capable runs including prior YAML
+`workflow_run` MergeOnGreen runs, and stop on CI failure, unaccounted writer,
+nonterminal run, unexpected ref or baseline drift.
 
-After bootstrap and the second drain, an authorized admin adds **separate,
-active, no-bypass** repository rulesets: (a) target `refs/heads/main`, restrict
-updates and deletion; (b) target **all tags**, restrict creation, update and
-deletion. No bypass actors, including admins; ensure inherited rules also apply.
-Use GitHub's ruleset UI/API and inspect the saved conditions, enforcement,
-`bypass_actors`, and effective branch rules. Do not replace or weaken `PR_Main`.
-The `update` rule must not allow fetch-and-merge. Confirm tag scope covers all
-names, not only existing tags. Disable old repository Actions only **after**
-the drain, re-read permissions, then recheck runs and writer inventory. If any
-unaccounted run or writer can still write, stop. Do not assume disabling Actions
-cancels runs or prevents other integrations from writing.
-
-After drain, create these exact additive payloads (do not modify `PR_Main`);
-save returned ruleset IDs privately and read each one back. `~ALL` targets all
-tag names. Stop on any API error or non-active/non-matching response.
+Add **separate** active no-bypass rulesets, leaving `PR_Main` unchanged: branch
+update/deletion restrictions for both `refs/heads/main` and `SEED_REF`, and
+tag creation/update/deletion restrictions for `~ALL`. Branch creation remains
+allowed so the one absent generated seed ref can be created later. Admins can
+change rules; coordinate the maintenance window. The following payloads use the
+validated `SEED_REF`; check for existing ruleset names/partial prior execution
+before posting and never blindly retry.
 
 ```bash
-cat > "$WORK/freeze-main.json" <<'JSON'
-{"name":"F02_Freeze_Main","target":"branch","enforcement":"active",
- "bypass_actors":[],"conditions":{"ref_name":{"include":["refs/heads/main"],"exclude":[]}},
- "rules":[{"type":"update","parameters":{"update_allows_fetch_and_merge":false}},{"type":"deletion"}]}
-JSON
+jq -n --arg seed "$SEED_REF" '{name:"F02_Freeze_Branches",target:"branch",enforcement:"active",bypass_actors:[],conditions:{ref_name:{include:["refs/heads/main",$seed],exclude:[]}},rules:[{type:"update",parameters:{update_allows_fetch_and_merge:false}},{type:"deletion"}]}' > "$WORK/freeze-branches.json"
 cat > "$WORK/freeze-tags.json" <<'JSON'
-{"name":"F02_Freeze_Tags","target":"tag","enforcement":"active",
- "bypass_actors":[],"conditions":{"ref_name":{"include":["~ALL"],"exclude":[]}},
- "rules":[{"type":"creation"},{"type":"update","parameters":{"update_allows_fetch_and_merge":false}},{"type":"deletion"}]}
+{"name":"F02_Freeze_Tags","target":"tag","enforcement":"active","bypass_actors":[],"conditions":{"ref_name":{"include":["~ALL"],"exclude":[]}},"rules":[{"type":"creation"},{"type":"update","parameters":{"update_allows_fetch_and_merge":false}},{"type":"deletion"}]}
 JSON
-gh api --method POST "repos/$OLD/rulesets" --input "$WORK/freeze-main.json" > "$WORK/freeze-main-result.json"
-gh api --method POST "repos/$OLD/rulesets" --input "$WORK/freeze-tags.json" > "$WORK/freeze-tags-result.json"
-gh api "repos/$OLD/rulesets/$(jq -r .id "$WORK/freeze-main-result.json")"
-gh api "repos/$OLD/rulesets/$(jq -r .id "$WORK/freeze-tags-result.json")"
+gh api --method POST "repos/$OLD/rulesets" --input "$WORK/freeze-branches.json" > "$WORK/branch-rule-result.json"
+gh api --method POST "repos/$OLD/rulesets" --input "$WORK/freeze-tags.json" > "$WORK/tag-rule-result.json"
+gh api "repos/$OLD/rulesets/$(jq -r .id "$WORK/branch-rule-result.json")"
+gh api "repos/$OLD/rulesets/$(jq -r .id "$WORK/tag-rule-result.json")"
 gh api --paginate "repos/$OLD/rules/branches/main?per_page=100"
+```
+
+Read back both definitions, effective rules for both branches, scope,
+`bypass_actors=[]`, active enforcement and update restriction including
+`update_allows_fetch_and_merge=false`. Query effective branch rules for the
+not-yet-existing seed ref (URL-encode its short branch name); this API supports
+nonexistent branches. Verify `PR_Main` applies only to main, not seed: a
+pre-existing PR/check requirement on seed creates a CI circular dependency.
+Inspect classic protection and inherited rules too. The seed ref must be absent.
+GitHub tag rules do not prevent admin rules changes or release metadata edits/deletions. Immutable
+releases apply only to qualifying future releases, not an absolute metadata
+freeze. Recompare tags, all release metadata/assets and manifests to baseline;
+stop on unexplained differences.
+
+## 5. Publish the generated seed ref and prove exact-seed CI
+
+Old Actions remain enabled **only** for controlled CI (and optional SecretScan).
+Disable other workflows that can run or write, not merely their gates. Both
+repository gates remain false, MergeOnGreen truly disabled, all prior write-capable
+runs drained, and default-branch workflow source verified as the reviewed gated
+bootstrap. Inventory and stop other writers; do not assume inherited secrets
+are absent. Re-read freeze, variables, repo identity, exact `SEED_SHA`, private
+review and absence of `SEED_REF`. From the isolated, independently reviewed clean
+export, push exactly the approved commit to the single approved new ref; no tags,
+other refs or force. The server must reject update/deletion after creation:
+
+```bash
+git -C "$WORK/clean-export" push "https://github.com/$OLD.git" "$SEED_SHA:$SEED_REF"
+```
+
+If another actor creates the ref first, even at the same SHA, stop: absence
+before push is not a reservation. Never force, delete, unfreeze or adopt it.
+
+Re-read the ref through a credential-free fresh non-repository environment as
+in §2, substituting `SEED_REF` and `SEED_SHA`; require exactly one advertised
+line and exact ref and SHA. Verify the seed ref is covered by the active
+no-bypass update/deletion rule, old main still equals `FROZEN_MAIN_SHA`, tag and
+release baselines unchanged, and the only additional ref is `SEED_REF`.
+
+Dispatch the **existing** CI workflow on the exact seed ref, using its verified
+workflow filename `CI_WORKFLOW` and the short branch name obtained by removing
+`refs/heads/`. This is not a new PR or a force push:
+
+```bash
+SEED_BRANCH=${SEED_REF#refs/heads/}
+gh workflow run "$CI_WORKFLOW" --repo "$OLD" --ref "$SEED_BRANCH"
+```
+
+Identify the new `workflow_dispatch` run by repository, exact workflow, event,
+ref, actor, attempt and time; fetch all jobs/pages for that attempt and verify
+`head_sha == SEED_SHA`. The workflow executes from the selected seed tree, not
+magically from main: prove seed/bootstrap tip trees and CI workflow match.
+All five jobs `check`, `test`, `test-os / macos-bash32`, `test-bash32` and
+`test-py39` must be `completed/success`; skipped, neutral, missing, cancelled,
+pending or ambiguous is not green. Verify release `skipped` and no App-token
+writer ran. Re-read seed ref after CI, requiring unchanged `SEED_SHA`, rules
+and settings. Optional SecretScan uses depth-zero history and only verified
+secret detection, potentially across all old refs; green does not prove either
+identifier removed or clean ancestry. The private all-reachable-history audit
+is mandatory. Any failure stops before canonical repository creation.
+
+After exact-seed CI succeeds, drain all remaining write-capable and pending runs
+in every status listed in §4, then disable old Actions and verify. Disabling
+Actions does not cancel pre-existing runs; recheck and stop on ambiguity.
+
+```bash
 gh api --method PUT "repos/$OLD/actions/permissions" -F enabled=false
 gh api "repos/$OLD/actions/permissions"
 ```
 
-Verify `enabled=false`; repeat the complete run inventory after disabling Actions.
+Require `enabled=false`, both gates false, no unaccounted writer/run; rebaseline
+and compare old main, seed ref, rules, manifests, tag object/peeled commits, all
+release metadata and assets. Only approved bootstrap main/settings and one
+new seed ref may differ from the pre-G0 snapshot. No automatic cancellation,
+unfreeze, deletion, ref repair or release edits on failure.
 
-Take and compare the post-freeze baseline to the pre-merge baseline: old main
-is the recorded expected bootstrap result, manifest hashes match the intended
-reviewed tree, every existing tag's object and peeled commit are unchanged and
-no tag has appeared/disappeared; all release fields and asset inventories/hashes
-are unchanged. Store both snapshots and differences privately. No tag ruleset
-prevents an administrator changing rules or editing/deleting release metadata;
-GitHub immutable releases only protect qualifying future releases and do not
-provide an absolute metadata freeze. Maintain the admin window and detect drift
-at each boundary. Stop if unable to establish or maintain this baseline.
+## 6. Create and seed new public repository
 
-## 4. Create empty canonical repository, then isolate seed
-
-Only after G0 and old freeze verification: check name availability again with
-the authorized organization account. A 404 alone is inconclusive; stop on an
-ownership or permissions ambiguity. Create an **empty public non-fork** under the
-approved organization (no README, license template, source, clone, or push):
+Only after G0, the frozen old state, private review and actual exact-seed CI are
+all proven, recheck name/ownership with an authorized organization account.
+Create an **empty public ordinary non-fork**, no template, README, license,
+source or push. Immediately disable Actions and set both **repository-level**
+false overrides before the first push. Do not assume inherited organization
+variables, app credentials or secrets are absent.
 
 ```bash
 gh repo create "$NEW" --public
-```
-
-Immediately disable Actions in the new repository settings, before any push.
-Set **repository-level** `FORGE_RELEASES_ENABLED=false` and
-`FORGE_AUTOMERGE_ENABLED=false`; read both back and confirm Actions disabled.
-Inspect effective organization variables, secrets, app installations, settings
-and writers rather than assuming they are absent. If Actions cannot be disabled
-or the overrides cannot be proven before push, stop with the repo empty. Do not
-retire or change any inherited credential.
-
-```bash
 gh api --method PUT "repos/$NEW/actions/permissions" -F enabled=false
 gh variable set FORGE_RELEASES_ENABLED --repo "$NEW" --body false
 gh variable set FORGE_AUTOMERGE_ENABLED --repo "$NEW" --body false
@@ -246,125 +328,73 @@ gh api "repos/$NEW" --jq '{full_name,private,fork,default_branch,owner:.owner.lo
 git ls-remote "https://github.com/$NEW.git"
 ```
 
-Require `enabled=false`, both variables exactly `false`, correct owner/name,
-`private=false`, `fork=false` and no refs. Verify independently that the
-repository is empty and no releases exist; stop if any query is ambiguous.
+Require `enabled=false`, both variables exactly `false`, intended owner/name,
+`private=false`, `fork=false`, no refs or releases, no ambiguous read. If any
+setting or proof fails, stop with the repo empty. Check all inherited policies,
+secrets' names/access and writers; do not retire or change credentials.
 
-Construct a fresh isolated bare repository from the approved retained PR ref.
-Require the fetched ref to equal the approved commit exactly, both before and
-after the old merge. Use the public old repository, not a local clone or a
-private remote. Do not use `--mirror` or retarget an existing remote:
-
-```bash
-case "$APPROVED_SOURCE_SHA" in
-  *[!0-9a-f]*|'') echo 'invalid SHA' >&2; exit 1 ;;
-esac
-[ "${#APPROVED_SOURCE_SHA}" -eq 40 ] || exit 1
-[ "$SOURCE_REF" = "refs/pull/$APPROVED_PR/head" ] || exit 1
-git check-ref-format "$SOURCE_REF" || exit 1
-mkdir -m 700 "$WORK/anonymous-home"
-env -i PATH="$PATH" HOME="$WORK/anonymous-home" GIT_CONFIG_NOSYSTEM=1 \
-  GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
-  git init --bare "$WORK/seed.git"
-env -i PATH="$PATH" HOME="$WORK/anonymous-home" GIT_CONFIG_NOSYSTEM=1 \
-  GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
-  git -C "$WORK/seed.git" fetch --no-tags "https://github.com/$OLD.git" "$SOURCE_REF:refs/approved/source"
-[ "$(git -C "$WORK/seed.git" rev-parse 'refs/approved/source^{commit}')" = "$APPROVED_SOURCE_SHA" ] || exit 1
-```
-
-For source-dependent inspection or execution, create a detached worktree at
-`APPROVED_SOURCE_SHA` from this isolated repository, outside existing checkouts.
-Never execute from a dirty main checkout.
-
-The anonymous environment suppresses inherited credentials, system/global Git
-config and URL rewriting; the empty bare repository has no configured remote.
-Repeat the anonymous ref check before merge; if unavailable or changed, stop.
-Inspect ancestry and license, and compare its tree to frozen old
-`main`. Revalidate old refs, releases, freeze and the new empty repository and
-gates immediately before the first push. Only then push the exact approved
-commit to the one approved destination ref:
+Fetch only `SEED_REF` from public old into a **new** isolated bare repo in a
+fresh clean environment (`env -i`, `GIT_CONFIG_NOSYSTEM=1`,
+`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`,
+`GIT_TERMINAL_PROMPT=0`, fresh HOME/cwd and ceiling as in §2). Fetch with
+`--no-tags` into `refs/approved/source`; require its commit exactly `SEED_SHA`,
+not merely an ancestor:
 
 ```bash
-git -C "$WORK/seed.git" push "https://github.com/$NEW.git" "$APPROVED_SOURCE_SHA:refs/heads/main"
+mkdir -m 700 "$WORK/seed-home" "$WORK/seed-cwd"
+SEED_HOME=$(cd "$WORK/seed-home" && pwd -P)
+SEED_CWD=$(cd "$WORK/seed-cwd" && pwd -P)
+env -i PATH="$PATH" HOME="$SEED_HOME" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git init --bare "$WORK/public-seed.git"
+env -i PATH="$PATH" HOME="$SEED_HOME" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -C "$WORK/public-seed.git" fetch --no-tags "https://github.com/$OLD.git" "$SEED_REF:refs/approved/source"
+[ "$(git -C "$WORK/public-seed.git" rev-parse 'refs/approved/source^{commit}')" = "$SEED_SHA" ] || exit 1
 ```
 
-No other branches, refs, tags or releases are copied. Do not use
-`gh repo create --source --push`: a bare source can mirror all refs. If the
-push or post-push proof is uncertain, stop and inspect before attempting any
-recovery; never force push.
-
-## 5. Verify, clone and provenance PR
-
-Re-read new repository identity: owner/name, public, `fork=false`, default
-branch `main`, main exactly the approved SHA, and all advertised refs only the
-approved `main` (apart from symbolic `HEAD`); no tags, other branches or
-releases. Verify commit ancestry and tree, license, gates false, Actions disabled,
-app/secret/variable exposure, rules and old baseline again. If GitHub creates
-any unexpected ref or content, stop rather than deleting it. Create a distinct
-canonical clone in `CANON_CLONE`; confirm `origin` is the new URL and its clean
-`main` resolves to the approved SHA. Do not modify old clone remotes.
-
-For the verification above, use the following and inspect **all** returned
-refs and release pages (a network/authentication failure is not emptiness):
+Independently verify public anonymous reachability,
+license, reviewed clean ancestry, tip tree and complete old baseline. Run
+source-dependent inspections from a detached worktree at the reviewed SHA, not
+from a dirty checkout. After rechecking the empty destination and gates, push
+only the approved seed SHA to `main`:
 
 ```bash
-gh api "repos/$NEW" --jq '{full_name,private,fork,default_branch,owner:.owner.login}'
-git ls-remote "https://github.com/$NEW.git"
-gh api --paginate --slurp "repos/$NEW/releases?per_page=100"
-gh api "repos/$NEW/actions/permissions"
-gh variable get FORGE_RELEASES_ENABLED --repo "$NEW"
-gh variable get FORGE_AUTOMERGE_ENABLED --repo "$NEW"
+git -C "$WORK/public-seed.git" push "https://github.com/$NEW.git" "$SEED_SHA:refs/heads/main"
 ```
 
-Only after these proofs, configure the new repository's merge-only policy and
-active no-bypass `main` protection: PR required, strict required `check` and
-`test`, resolved review threads, no non-fast-forward or deletion, with the
-appropriate integration identities and merge method. Verify saved **effective**
-settings, including inherited rules, and disable other merge methods. Confirm
-both repository gate overrides remain false. Enable Actions for CI only after
-reviewing the gated workflow source and settings, and ensure release and
-MergeOnGreen jobs stay skipped; an inherited credential is not a safety gate.
-If required checks cannot run or rules cannot be enforced, stop; do not weaken
-protection. Never enable release or automerge here.
+Never `--mirror`, `--all`, `gh repo create --source --push`, or retarget an
+existing remote. No other refs, tags or releases are copied. Stop if a push's
+result is uncertain; inspect rather than retry or force.
 
-Use the following bootstrap only after the preceding verification. Resolve
-`CHECK_APP_ID` and `TEST_APP_ID` from the actual CI check-run `app.id` values
-and reviewed required-check policy; validate both as positive decimal integers.
-Confirm the reviewed old `PR_Main` approval and review settings are no stricter
-than this payload; otherwise carry those stricter settings into a newly reviewed
-payload, not a silent weakening. Independent human review remains mandatory even
-when GitHub's required approval count is zero.
+Verify the new public non-fork owner, `main == SEED_SHA`, no extra refs/tags or
+releases, unchanged old baseline, clean ancestry/license and both false gates.
+Create a distinct canonical clone at `CANON_CLONE`; verify origin, clean checkout
+and main SHA. Shared old remotes stay untouched.
+
+## 7. Protect new main and validate its provenance PR
+
+After seed verification, configure merge-commit-only repository settings and an
+active no-bypass `PR_Main` ruleset: PR required, strict `check`/`test`, resolved
+threads, no non-fast-forward or branch deletion. Resolve `CHECK_APP_ID` and
+`TEST_APP_ID` from reviewed actual CI check-run app identities and validate as
+positive decimal integers. Preserve any stricter reviewed old rules; if the
+payload below would weaken them, stop and review a revised payload. Human
+independent review is mandatory even if GitHub approval count is zero.
 
 ```bash
 case "$CHECK_APP_ID" in *[!0-9]*|''|0) exit 1 ;; esac
 case "$TEST_APP_ID" in *[!0-9]*|''|0) exit 1 ;; esac
-jq -n --argjson check "$CHECK_APP_ID" --argjson test "$TEST_APP_ID" '{
-  name:"PR_Main", target:"branch", enforcement:"active", bypass_actors:[],
-  conditions:{ref_name:{include:["refs/heads/main"],exclude:[]}},
-  rules:[
-    {type:"pull_request",parameters:{allowed_merge_methods:["merge"],
-      dismiss_stale_reviews_on_push:false,require_code_owner_review:false,
-      require_last_push_approval:false,required_approving_review_count:0,
-      required_review_thread_resolution:true}},
-    {type:"required_status_checks",parameters:{strict_required_status_checks_policy:true,
-      required_status_checks:[{context:"check",integration_id:$check},{context:"test",integration_id:$test}]}},
-    {type:"non_fast_forward"},{type:"deletion"}
-  ]}' > "$WORK/new-pr-main.json"
-gh api --method PATCH "repos/$NEW" -F allow_merge_commit=true \
-  -F allow_squash_merge=false -F allow_rebase_merge=false
-gh api --method POST "repos/$NEW/rulesets" --input "$WORK/new-pr-main.json" > "$WORK/new-pr-main-result.json"
-gh api "repos/$NEW/rulesets/$(jq -r .id "$WORK/new-pr-main-result.json")"
+jq -n --argjson check "$CHECK_APP_ID" --argjson test "$TEST_APP_ID" '{name:"PR_Main",target:"branch",enforcement:"active",bypass_actors:[],conditions:{ref_name:{include:["refs/heads/main"],exclude:[]}},rules:[{type:"pull_request",parameters:{allowed_merge_methods:["merge"],dismiss_stale_reviews_on_push:false,require_code_owner_review:false,require_last_push_approval:false,required_approving_review_count:0,required_review_thread_resolution:true}},{type:"required_status_checks",parameters:{strict_required_status_checks_policy:true,required_status_checks:[{context:"check",integration_id:$check},{context:"test",integration_id:$test}]}},{type:"non_fast_forward"},{type:"deletion"}]}' > "$WORK/new-pr-main.json"
+gh api --method PATCH "repos/$NEW" -F allow_merge_commit=true -F allow_squash_merge=false -F allow_rebase_merge=false
+gh api --method POST "repos/$NEW/rulesets" --input "$WORK/new-pr-main.json" > "$WORK/new-rule-result.json"
+gh api "repos/$NEW/rulesets/$(jq -r .id "$WORK/new-rule-result.json")"
 gh api --paginate "repos/$NEW/rules/branches/main?per_page=100"
 gh api "repos/$NEW" --jq '{allow_merge_commit,allow_squash_merge,allow_rebase_merge}'
 ```
 
-Verify the saved ruleset, effective rules, integration identities, and merge
-settings match the reviewed policy. If check App identities cannot be resolved
-before new CI, establish them from reviewed old CI evidence, then verify them
-against new CI; stop on mismatch. Select the reviewed organization-permitted
-`CI_ALLOWED_ACTIONS` (`all`, `local_only`, or `selected`); if `selected`,
-preconfigure and verify the selected Actions policy before enabling. Enable
-only CI after the preceding checks and confirm:
+Verify saved and effective rules, integration identities, merge settings,
+inherited rules and both false overrides. Enable Actions **for CI only**, after
+reviewing the source and all settings; use the reviewed organization-permitted
+`CI_ALLOWED_ACTIONS` (`all`, `local_only`, or `selected`). If `selected`, first
+configure and verify the selected-actions policy. Never enable release or
+automerge in F02.
 
 ```bash
 case "$CI_ALLOWED_ACTIONS" in all|local_only|selected) ;; *) exit 1 ;; esac
@@ -374,35 +404,33 @@ gh variable get FORGE_RELEASES_ENABLED --repo "$NEW"
 gh variable get FORGE_AUTOMERGE_ENABLED --repo "$NEW"
 ```
 
-Both gate values must still be `false`; inspect actual job results before merge.
-
-From the new clone, create a dedicated branch/worktree for an F02 provenance
-documentation PR recording the actual source SHA, source ref, old frozen main,
-tree equality and public-history/license proof without sensitive baseline data.
-Review independently against its exact head, require real new-repo CI checks
-and resolved threads, and merge only that reviewed head under the new rules and
-explicit operator authorization. Check Actions job results and confirm both
-writer gates stayed false. This later PR legitimately advances new `main`;
-record its merge SHA separately from the seed SHA. Recompare the old baseline
-and both settings at completion. No release, import, deployment or plugin
-redistribution is authorized by this PR.
+Create a dedicated new-canonical worktree/branch and provenance documentation
+PR. Record actual original bootstrap and clean seed SHAs/refs, old frozen main,
+tree equality, rewrite/signature caveat and public license/provenance evidence,
+not private rules, raw identifiers or sensitive inventories. Independent review
+must bind exact PR head; require real new-repo CI, resolved threads and skipped
+writer jobs, then separately authorize a SHA-matched merge commit under the new
+rules. Record that later merge SHA separately; it legitimately advances new main.
+Update the operator's repository inventory via its own separately reviewed
+workflow after creation. Recompare old baseline and both repos' settings. F02 is
+complete only after these operations and proofs, not when this document is
+prepared. No import, production action or plugin redistribution is authorized.
 
 ## Stop and recovery
 
-Stop at any failed proof, unexpected ref/run/writer, unknown permission, changed
-head/base/settings, baseline drift, unverified public ancestry, unavailable name,
-or incomplete rules/CI. Preserve evidence and tell the operator the exact partial
-state. Do not automatically delete the new repository, unfreeze old, rename a
-repository, cancel runs, disable protections or push a replacement. An empty or
-partially seeded new repo stays disabled with false gates; if already enabled,
-stop writers and coordinate separately authorized containment. Old remains
-frozen once frozen. Recovery or rollback requires a fresh, explicitly approved
-plan based on current evidence; restoring old writes or deleting anything needs
-separate authorization and must account for legacy clients and release drift.
+Stop on any missing/changed SHA, unapproved ref, public-boundary uncertainty,
+failed clean-history proof, CI failure/skipped required job, unexpected run,
+writer, ref, tag/release drift, inability to enforce rules, unreadable API page,
+name/owner ambiguity or failed setting. Preserve private evidence and report the
+exact partial state. Do not automatically delete the new repository or generated
+seed ref, rename anything, unfreeze old, cancel runs, disable rules or force
+push. A created empty/partial new repo stays Actions-disabled and gates false;
+if already enabled, coordinate separately authorized containment. Old remains
+frozen once frozen. Recovery, deletion or restoring writes needs a new explicit
+operator-approved plan that accounts for legacy clients and release drift.
 
 ## References
 
-- [GitHub repository rulesets and effective rules](https://docs.github.com/en/rest/repos/rules)
-- [GitHub Actions permissions](https://docs.github.com/en/rest/actions/permissions) and [workflow run status/pagination](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository)
-- [GitHub CLI repository creation](https://cli.github.com/manual/gh_repo_create), [SHA-matched PR merge](https://cli.github.com/manual/gh_pr_merge), [configuration variables](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-variables)
-- [GitHub immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
+- [GitHub repository rulesets](https://docs.github.com/en/rest/repos/rules), [Actions permissions](https://docs.github.com/en/rest/actions/permissions), [workflow runs and statuses](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository)
+- [GitHub CLI repository creation](https://cli.github.com/manual/gh_repo_create), [workflow dispatch](https://cli.github.com/manual/gh_workflow_run), [SHA-matched PR merge](https://cli.github.com/manual/gh_pr_merge), [variables](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-variables)
+- [Git configuration files](https://git-scm.com/docs/git-config#FILES), [immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
