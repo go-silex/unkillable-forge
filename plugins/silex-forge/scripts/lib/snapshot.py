@@ -11,7 +11,7 @@ those artifacts silently disappear from production.
 
 The Pages API's /deployments/{id}/files endpoint exposes an opaque file-hash
 map. This legacy guard does not read that map: it keeps its own hub fingerprint
-record in KV and compares the record's deployment id with the canonical one.
+record in KV and compares the record's deployment id with latest_deployment.
 A different id makes compare refuse (exit 4) until --allow-unverified;
 unexpected removals still outrank that (exit 3). A matching id is NOT proof
 that those local slugs were uploaded: the tree/slug selector can diverge.

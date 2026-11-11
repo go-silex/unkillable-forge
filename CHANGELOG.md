@@ -11,7 +11,7 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ### Added
 
-- `forge-inventory.py` writes a read-only inventory of one forge instance: local hub files, the canonical Pages deployment file map, optional production history, and KV visibility, share presence, and the snapshot anchor. It does not publish, reanchor, or mutate Cloudflare. Share values are not stored. Output is refused inside a git worktree. See `docs/forge-inventory.md`.
+- `forge-inventory.py` writes a read-only inventory of one forge instance: local hub files, the canonical Pages deployment file map, optional production history, and KV visibility, share presence, and the snapshot anchor. It does not publish, reanchor, or mutate Cloudflare. Share values are not stored. A listed KV 404 is absence, not presence. `layout` `tree` records HTML path page ids; the default layout keeps the first directory. The configured root is resolved once, then opened without following. Output is refused inside a git worktree, including when the output parent is swapped for a symlink. See `docs/forge-inventory.md`.
 
 ### Fixed
 

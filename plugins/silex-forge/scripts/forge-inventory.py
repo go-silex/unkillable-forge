@@ -27,7 +27,7 @@ import shlex
 import stat
 import subprocess
 import sys
-import tempfile
+
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -53,6 +53,27 @@ _LOC_RE = re.compile(r"location\.href")
 _CHUNK = 1024 * 1024
 _PAGE_CAP = 10000
 _SHELL_META = "$`;|" + "&<>"
+_LIVE_PAGE = re.compile(r"^/a/([^/]+)/.+")
+_PUBLIC_SHELL = frozenset((
+    "/",
+    "/index.html",
+    "/login",
+    "/login.html",
+    "/robots.txt",
+    "/favicon.ico",
+    "/favicon.svg",
+    "/favicon-32.png",
+    "/apple-touch-icon.png",
+))
+_ENGINE_PAGE = frozenset(("404.html", "index.html", "login.html"))
+_TREE_HTML = re.compile(r"^/[A-Za-z0-9._/-]+\.html$")
+_TREE_DIR = re.compile(r"^/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*/$")
+_TREE_BARE = re.compile(r"^/[A-Za-z0-9._/-]+$")
+_PAGE_RE = re.compile(
+    r"^(?!.*\.\.)[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\.html$"
+)
+
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
 class EnvSyntaxError(Exception):
@@ -174,127 +195,273 @@ def _quote(part):
     return urllib.parse.quote(part, safe="")
 
 
-def _scrub(obj, paths, secrets):
+def _scrub_text(text, paths, secrets):
+    for secret in secrets:
+        if secret and secret in text:
+            text = text.replace(secret, "[redacted]")
+    for path in paths:
+        if path and path in text:
+            text = text.replace(path, "[redacted]")
+    return text
+
+
+def _put_scrubbed(out, key, value, paths, secrets, collisions):
+    """Store one mapping without dropping a redacted key on collision."""
+    if not isinstance(key, str):
+        if key in out:
+            collisions.append(True)
+            return
+        out[key] = value
+        return
+    scrubbed = _scrub_text(key, paths, secrets)
+    if scrubbed == key:
+        chosen = key
+    else:
+        digest = hashlib.sha256(
+            key.encode("utf-8", "surrogateescape")
+        ).hexdigest()
+        chosen = scrubbed + "#" + digest
+    if chosen in out:
+        collisions.append(True)
+        suffix = 2
+        while chosen + "#" + str(suffix) in out:
+            suffix += 1
+            if suffix > 1000:
+                return
+        chosen = chosen + "#" + str(suffix)
+    out[chosen] = value
+
+
+def _scrub(obj, paths, secrets, collisions=None):
+    if collisions is None:
+        collisions = []
     if isinstance(obj, str):
-        for secret in secrets:
-            if secret and secret in obj:
-                obj = obj.replace(secret, "[redacted]")
-        for path in paths:
-            if path and path in obj:
-                obj = obj.replace(path, "[redacted]")
-        return obj
+        return _scrub_text(obj, paths, secrets)
     if isinstance(obj, list):
-        return [_scrub(item, paths, secrets) for item in obj]
+        return [_scrub(item, paths, secrets, collisions) for item in obj]
     if isinstance(obj, dict):
         out = {}
         for key, value in obj.items():
             if key == "sha256":
                 out[key] = value
             elif key == "files" and isinstance(value, dict):
-                out[key] = {
-                    _scrub(path_key, paths, secrets): hash_text
-                    for path_key, hash_text in value.items()
-                }
+                files_out = {}
+                for path_key, hash_text in value.items():
+                    _put_scrubbed(
+                        files_out, path_key, hash_text, paths, secrets, collisions
+                    )
+                out[key] = files_out
             else:
-                out[key] = _scrub(value, paths, secrets)
+                _put_scrubbed(
+                    out,
+                    key,
+                    _scrub(value, paths, secrets, collisions),
+                    paths,
+                    secrets,
+                    collisions,
+                )
         return out
     return obj
 
 
-def _classify_symlink(path, root):
+def _canonical_dir(path):
+    """Resolve a configured directory once, including a trusted root alias."""
+    raw = os.path.realpath(os.path.expanduser(str(path)))
+    if not raw or not os.path.isdir(raw):
+        raise OSError("not a directory")
+    return raw
+
+
+def _open_resolved(raw):
+    """Open an already-canonical directory without following any component."""
+    parts = [part for part in raw.split("/") if part]
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts:
+            if part in (".", "..") or "/" in part or "\0" in part:
+                raise OSError("path component is not a real directory")
+            nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("not a directory")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _open_dir_abs(path):
+    """Resolve the configured root once, then bind it without following."""
+    raw = _canonical_dir(path)
+    return _open_resolved(raw), raw
+
+
+def _lexical_inside(hub, root):
+    try:
+        return os.path.commonpath([hub, root]) == hub
+    except ValueError:
+        return False
+
+
+def _open_rel(root_fd, rel):
+    if not rel or rel == ".":
+        return os.dup(root_fd)
+    fd = os.dup(root_fd)
+    try:
+        for part in rel.split("/"):
+            if not part or part == ".":
+                continue
+            if part == ".." or "/" in part or "\0" in part:
+                raise OSError("path escapes the artifacts root")
+            nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _classify_link(root_fd, root_path, rel):
+    """Classify a symlink by readlink only. Targets are not opened."""
     seen = set()
-    current = path
-    for _ in range(_PAGE_CAP):
-        key = os.path.normpath(str(current))
+    current = rel.replace(os.sep, "/")
+    for _ in range(64):
+        key = os.path.normpath(current).replace(os.sep, "/")
+        if key.startswith("../") or key == "..":
+            return "external"
         if key in seen:
             return "cycle"
         seen.add(key)
+        parent_rel, name = os.path.split(key)
+        if not name or name in (".", ".."):
+            return "broken"
         try:
-            mode = os.lstat(current).st_mode
+            parent_fd = _open_rel(root_fd, parent_rel)
         except OSError:
             return "broken"
-        if not stat.S_ISLNK(mode):
+        try:
             try:
-                Path(key).relative_to(root)
-            except ValueError:
+                raw = os.readlink(name, dir_fd=parent_fd)
+            except OSError:
+                return "broken"
+        finally:
+            os.close(parent_fd)
+        if os.path.isabs(raw):
+            target = os.path.normpath(raw)
+            if not _lexical_inside(root_path, target):
                 return "external"
-            return "broken" if not os.path.lexists(current) else "internal"
+            current = os.path.relpath(target, root_path).replace(os.sep, "/")
+        else:
+            current = os.path.normpath(os.path.join(parent_rel, raw)).replace(
+                os.sep, "/"
+            )
+        if current.startswith("../") or current == ".." or os.path.isabs(current):
+            return "external"
+        parent_rel, name = os.path.split(current)
+        if not name:
+            return "broken"
+        parent_fd = None
         try:
-            raw = os.readlink(current)
+            parent_fd = _open_rel(root_fd, parent_rel)
+            info = os.lstat(name, dir_fd=parent_fd)
         except OSError:
             return "broken"
-        nxt = Path(raw) if os.path.isabs(raw) else Path(current).parent / raw
-        nxt_s = os.path.normpath(str(nxt))
-        try:
-            Path(nxt_s).relative_to(root)
-        except ValueError:
-            return "external"
-        current = Path(nxt_s)
+        finally:
+            if parent_fd is not None:
+                os.close(parent_fd)
+        if not stat.S_ISLNK(info.st_mode):
+            return "internal"
     return "cycle"
 
 
-def _hash_file(path):
+def _collapse_ws(text, pending):
+    out = []
+    for char in text:
+        if char.isspace():
+            if not pending:
+                out.append(" ")
+                pending = True
+            continue
+        pending = False
+        out.append(char)
+    return "".join(out), pending
+
+
+def _apply_flags(text, flags, host_re):
+    if not flags["existing_base"] and _BASE_RE.search(text):
+        flags["existing_base"] = True
+    if not flags["root_relative_fetch"] and _FETCH_RE.search(text):
+        flags["root_relative_fetch"] = True
+    if not flags["location_href"] and _LOC_RE.search(text):
+        flags["location_href"] = True
+    if host_re is not None and not flags["hardcoded_host"] and host_re.search(text):
+        flags["hardcoded_host"] = True
+
+
+def _consume_regular(fd, host, scan):
+    """Hash one regular file descriptor. HTML flags use the same read."""
     digest = hashlib.sha256()
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        fd = os.open(str(path), flags)
-    except OSError:
-        return None
-    try:
-        with os.fdopen(fd, "rb") as handle:
-            while True:
-                chunk = handle.read(_CHUNK)
-                if not chunk:
-                    break
-                digest.update(chunk)
-    except OSError:
-        return None
-    return digest.hexdigest()
-
-
-def _scan_flags(path, host):
-    flags = {key: False for key in FLAG_KEYS}
+    flags = None
     host_re = None
-    if host:
-        host_re = re.compile(
-            r"(?<![A-Za-z0-9.-])" + re.escape(host) + r"(?![A-Za-z0-9.-])",
-            re.IGNORECASE,
-        )
-    overlap = ""
-    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    decoder = None
+    carry = ""
+    pending = False
+    tail = 64
+    if scan:
+        flags = {key: False for key in FLAG_KEYS}
+        if host:
+            host_re = re.compile(
+                r"(?<![A-Za-z0-9.-])" + re.escape(host) + r"(?![A-Za-z0-9.-])",
+                re.IGNORECASE,
+            )
+            tail = max(tail, len(host) + 8)
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    while True:
+        chunk = os.read(fd, _CHUNK)
+        if chunk:
+            digest.update(chunk)
+        if scan:
+            text, pending = _collapse_ws(
+                decoder.decode(chunk, final=not chunk), pending
+            )
+            window = carry + text
+            _apply_flags(window, flags, host_re)
+            carry = window[-tail:] if len(window) > tail else window
+        if not chunk:
+            break
+    return digest.hexdigest(), flags
 
-    def apply(text):
-        if not flags["existing_base"] and _BASE_RE.search(text):
-            flags["existing_base"] = True
-        if not flags["root_relative_fetch"] and _FETCH_RE.search(text):
-            flags["root_relative_fetch"] = True
-        if not flags["location_href"] and _LOC_RE.search(text):
-            flags["location_href"] = True
-        if host_re is not None and not flags["hardcoded_host"] and host_re.search(text):
-            flags["hardcoded_host"] = True
 
-    try:
-        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    except OSError:
-        return flags
-    try:
-        with os.fdopen(fd, "rb") as handle:
-            while True:
-                chunk = handle.read(_CHUNK)
-                text = overlap + decoder.decode(chunk, final=not chunk)
-                if not chunk:
-                    apply(text)
-                    break
-                if len(text) > 400:
-                    apply(text[:-400])
-                    overlap = text[-400:]
-                else:
-                    overlap = text
-    except OSError:
-        return flags
-    return flags
+def _rel_name(dirpath, name):
+    base = dirpath.replace(os.sep, "/")
+    if base in (".", ""):
+        base = ""
+    elif base.startswith("./"):
+        base = base[2:]
+    if not base:
+        return name
+    return base + "/" + name
+
+
+def _bad_name(name):
+    return (
+        not name
+        or name in (".", "..")
+        or "/" in name
+        or "\0" in name
+    )
+
+
+def _symlink_row(rel, info, root_fd, root_path):
+    return {
+        "path": rel,
+        "size": int(info.st_size),
+        "sha256": None,
+        "symlink": True,
+        "diagnostic": _classify_link(root_fd, root_path, rel),
+    }
 
 
 def _empty_local():
@@ -319,26 +486,31 @@ def _local_selection(config, issues, host):
     if not hub_text or not art_text:
         _issue(issues, "config_missing", "hub_root or artifacts_dir missing")
         return selection, scrub_paths
+    if not hasattr(os, "fwalk"):
+        _issue(issues, "unreadable", "artifacts root is unreadable")
+        return selection, scrub_paths
     try:
-        hub = Path(hub_text).expanduser().resolve()
+        hub_fd, hub = _open_dir_abs(hub_text)
     except OSError:
         _issue(issues, "unreadable", "artifacts root is unreadable")
         return selection, scrub_paths
-    scrub_paths.append(str(hub))
-    art_path = Path(art_text).expanduser()
+    os.close(hub_fd)
+    scrub_paths.append(hub)
+    configured_hub = os.path.abspath(os.path.expanduser(hub_text))
+    if configured_hub != hub:
+        scrub_paths.append(configured_hub)
+    art_path = os.path.expanduser(art_text)
+    if not os.path.isabs(art_path):
+        art_path = os.path.join(hub, art_path)
     try:
-        root = art_path.resolve() if art_path.is_absolute() else (hub / art_path).resolve()
+        root_fd, root = _open_dir_abs(art_path)
     except OSError:
         _issue(issues, "unreadable", "artifacts root is unreadable")
         return selection, scrub_paths
-    scrub_paths.append(str(root))
-    try:
-        root.relative_to(hub)
-    except ValueError:
+    scrub_paths.append(root)
+    if not _lexical_inside(hub, root):
+        os.close(root_fd)
         _issue(issues, "unreadable", "artifacts root is outside the hub")
-        return selection, scrub_paths
-    if not root.is_dir():
-        _issue(issues, "unreadable", "artifacts root is unreadable")
         return selection, scrub_paths
 
     files = []
@@ -346,110 +518,161 @@ def _local_selection(config, issues, host):
     trees = []
     flag_rows = []
     entry_error = False
-    stack = [root]
-    seen_dirs = set()
-    while stack:
-        current = stack.pop()
-        try:
-            current_stat = os.lstat(current)
-        except OSError:
-            entry_error = True
-            continue
-        dir_key = (current_stat.st_dev, current_stat.st_ino)
-        if dir_key in seen_dirs:
-            continue
-        seen_dirs.add(dir_key)
-        try:
-            entries = list(os.scandir(current))
-        except OSError:
-            entry_error = True
-            continue
-        child_dirs = []
-        for entry in entries:
-            entry_path = Path(entry.path)
-            try:
-                rel = entry_path.relative_to(root).as_posix()
-            except ValueError:
-                entry_error = True
-                continue
-            try:
-                info = entry.stat(follow_symlinks=False)
-            except OSError:
-                files.append(
-                    {
-                        "path": rel,
-                        "size": 0,
-                        "sha256": None,
-                        "symlink": False,
-                        "diagnostic": "unreadable",
-                    }
-                )
-                entry_error = True
-                continue
-            if stat.S_ISLNK(info.st_mode):
-                kind = _classify_symlink(entry_path, root)
-                files.append(
-                    {
-                        "path": rel,
-                        "size": int(info.st_size),
-                        "sha256": None,
-                        "symlink": True,
-                        "diagnostic": kind,
-                    }
-                )
-                continue
-            if stat.S_ISDIR(info.st_mode):
-                child_dirs.append(entry.path)
-                continue
-            if not stat.S_ISREG(info.st_mode):
-                files.append(
-                    {
-                        "path": rel,
-                        "size": int(info.st_size),
-                        "sha256": None,
-                        "symlink": False,
-                        "diagnostic": "special",
-                    }
-                )
-                continue
-            digest = _hash_file(entry_path)
-            row = {
-                "path": rel,
-                "size": int(info.st_size),
-                "sha256": digest,
-                "symlink": False,
-                "diagnostic": None if digest is not None else "unreadable",
-            }
-            if digest is None:
-                entry_error = True
-            files.append(row)
-            lowered = entry.name.lower()
-            if digest is not None and (
-                lowered.endswith(".html") or lowered.endswith(".htm")
-            ):
-                trees.append(rel)
-                scanned = _scan_flags(entry_path, host or "")
-                flag_rows.append({"path": rel, **scanned})
-        if current == root:
-            for entry in entries:
-                name = entry.name
-                if name.startswith("."):
-                    continue
-                try:
-                    info = entry.stat(follow_symlinks=False)
-                except OSError:
-                    continue
-                if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                    continue
-                index = Path(entry.path) / "index.html"
-                try:
-                    index_stat = index.lstat()
-                except OSError:
-                    continue
-                if stat.S_ISREG(index_stat.st_mode) or stat.S_ISLNK(index_stat.st_mode):
-                    slugs.append(name)
-        stack.extend(child_dirs)
+    yielded = False
 
+    def onerror(_err):
+        nonlocal entry_error
+        entry_error = True
+
+    try:
+        for dirpath, dirnames, filenames, dirfd in os.fwalk(
+            ".",
+            topdown=True,
+            onerror=onerror,
+            follow_symlinks=False,
+            dir_fd=root_fd,
+        ):
+            yielded = True
+            if dirpath in (".", ""):
+                for name in dirnames:
+                    if _bad_name(name) or name.startswith("."):
+                        continue
+                    try:
+                        info = os.lstat(name, dir_fd=dirfd)
+                    except OSError:
+                        continue
+                    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                        continue
+                    try:
+                        child = os.open(name, _DIR_FLAGS, dir_fd=dirfd)
+                    except OSError:
+                        continue
+                    try:
+                        index = os.lstat("index.html", dir_fd=child)
+                    except OSError:
+                        continue
+                    finally:
+                        os.close(child)
+                    if stat.S_ISREG(index.st_mode) or stat.S_ISLNK(index.st_mode):
+                        slugs.append(name)
+            for name in dirnames:
+                if _bad_name(name):
+                    entry_error = True
+                    continue
+                rel = _rel_name(dirpath, name)
+                try:
+                    info = os.lstat(name, dir_fd=dirfd)
+                except OSError:
+                    entry_error = True
+                    files.append(
+                        {
+                            "path": rel,
+                            "size": 0,
+                            "sha256": None,
+                            "symlink": False,
+                            "diagnostic": "unreadable",
+                        }
+                    )
+                    continue
+                if stat.S_ISLNK(info.st_mode):
+                    files.append(_symlink_row(rel, info, root_fd, root))
+            for name in filenames:
+                if _bad_name(name):
+                    entry_error = True
+                    continue
+                rel = _rel_name(dirpath, name)
+                try:
+                    info = os.lstat(name, dir_fd=dirfd)
+                except OSError:
+                    entry_error = True
+                    files.append(
+                        {
+                            "path": rel,
+                            "size": 0,
+                            "sha256": None,
+                            "symlink": False,
+                            "diagnostic": "unreadable",
+                        }
+                    )
+                    continue
+                if stat.S_ISLNK(info.st_mode):
+                    files.append(_symlink_row(rel, info, root_fd, root))
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    files.append(
+                        {
+                            "path": rel,
+                            "size": int(info.st_size),
+                            "sha256": None,
+                            "symlink": False,
+                            "diagnostic": "special",
+                        }
+                    )
+                    continue
+                try:
+                    file_fd = os.open(
+                        name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd
+                    )
+                except OSError:
+                    entry_error = True
+                    files.append(
+                        {
+                            "path": rel,
+                            "size": int(info.st_size),
+                            "sha256": None,
+                            "symlink": False,
+                            "diagnostic": "unreadable",
+                        }
+                    )
+                    continue
+                try:
+                    held = os.fstat(file_fd)
+                    if not stat.S_ISREG(held.st_mode):
+                        entry_error = True
+                        files.append(
+                            {
+                                "path": rel,
+                                "size": int(info.st_size),
+                                "sha256": None,
+                                "symlink": False,
+                                "diagnostic": "unreadable",
+                            }
+                        )
+                        continue
+                    lowered = name.lower()
+                    scan = lowered.endswith(".html") or lowered.endswith(".htm")
+                    digest, scanned = _consume_regular(file_fd, host or "", scan)
+                except OSError:
+                    entry_error = True
+                    files.append(
+                        {
+                            "path": rel,
+                            "size": int(info.st_size),
+                            "sha256": None,
+                            "symlink": False,
+                            "diagnostic": "unreadable",
+                        }
+                    )
+                    continue
+                finally:
+                    os.close(file_fd)
+                files.append(
+                    {
+                        "path": rel,
+                        "size": int(held.st_size),
+                        "sha256": digest,
+                        "symlink": False,
+                        "diagnostic": None,
+                    }
+                )
+                if scan:
+                    trees.append(rel)
+                    flag_rows.append({"path": rel, **scanned})
+    finally:
+        os.close(root_fd)
+
+    if not yielded:
+        entry_error = True
     if entry_error:
         _issue(issues, "unreadable", "artifacts entry unreadable")
     files.sort(key=lambda item: item["path"])
@@ -461,6 +684,7 @@ def _local_selection(config, issues, host):
     selection["tree_candidates"] = sorted(trees)
     selection["html_flags"] = {"counts": counts, "files": flag_rows}
     return selection, scrub_paths
+
 
 
 def _empty_observed():
@@ -748,17 +972,19 @@ def _metadata_v(item):
 
 
 def _read_kv_values(get, account, namespace, observed, issues, secrets):
+    """A listed key is not present until its value GET returns 200."""
     vis_values = {}
-    share_ids = set()
+    vis_present = set()
+    share_present = set()
+    listed_ids = set()
     shares = []
     snapshot_body = None
     snapshot_seen = False
     for item in observed["kv"]["keys"]:
         name = item["name"]
-        if name.startswith("vis:"):
-            vis_values.setdefault(name.split(":", 1)[1], None)
-        elif name.startswith("share:"):
-            share_ids.add(name.split(":", 1)[1])
+        page_id = name.split(":", 1)[1] if ":" in name else ""
+        if (name.startswith("vis:") or name.startswith("share:")) and page_id:
+            listed_ids.add(page_id)
         if not (
             name.startswith("vis:")
             or name.startswith("share:")
@@ -773,13 +999,7 @@ def _read_kv_values(get, account, namespace, observed, issues, secrets):
             issues,
             tolerate=(404,),
         )
-        if status == 404:
-            if name.startswith("share:"):
-                shares.append(
-                    {"name": name, "present": False, "length": None, "sha256": None}
-                )
-            continue
-        if status != 200:
+        if status != 200 or not isinstance(body, bytes):
             if name.startswith("share:"):
                 shares.append(
                     {"name": name, "present": False, "length": None, "sha256": None}
@@ -798,18 +1018,24 @@ def _read_kv_values(get, account, namespace, observed, issues, secrets):
                     "sha256": hashlib.sha256(body).hexdigest(),
                 }
             )
+            if page_id:
+                share_present.add(page_id)
         elif name.startswith("vis:"):
             try:
-                vis_values[name.split(":", 1)[1]] = body.decode("utf-8").strip()
+                text = body.decode("utf-8")
             except UnicodeError:
-                vis_values[name.split(":", 1)[1]] = None
                 _issue(issues, "unreadable", "visibility value unreadable")
+                continue
+            vis_values[page_id] = text
+            vis_present.add(page_id)
         elif name == SNAPSHOT_KEY:
             snapshot_seen = True
             snapshot_body = body
     observed["shares"] = sorted(shares, key=lambda item: item["name"])
     observed["_vis_values"] = vis_values
-    observed["_share_ids"] = share_ids
+    observed["_vis_present"] = vis_present
+    observed["_share_present"] = share_present
+    observed["_listed_ids"] = listed_ids
     observed["_snapshot_body"] = snapshot_body
     observed["_snapshot_seen"] = snapshot_seen
 
@@ -838,12 +1064,18 @@ def _read_kv(get, account, namespace, observed, issues, secrets):
                 return False
             keys.append({"name": item["name"], "metadata_v": _metadata_v(item)})
         info = _result_info(payload)
-        nxt = info.get("cursor") if "cursor" in info else None
-        if not isinstance(nxt, str) or not nxt:
+        if "cursor" not in info:
+            nxt = None
+        else:
+            nxt = info.get("cursor")
+        if nxt is None or nxt == "":
             observed["kv"]["keys"] = sorted(keys, key=lambda item: item["name"])
             observed["kv"]["key_count"] = len(keys)
             _read_kv_values(get, account, namespace, observed, issues, secrets)
             return True
+        if not isinstance(nxt, str):
+            _issue(issues, "pagination_incomplete", "kv list did not terminate")
+            return False
         if nxt in seen_cursors:
             _issue(issues, "pagination_cycle", "pagination cursor repeated")
             return False
@@ -853,13 +1085,104 @@ def _read_kv(get, account, namespace, observed, issues, secrets):
     return False
 
 
-def _classify(observed, slugs, issues):
+def _page_id_ok(slug):
+    return (
+        isinstance(slug, str)
+        and bool(slug)
+        and slug not in (".", "..")
+        and not slug.startswith(".")
+        and "/" not in slug
+        and "\0" not in slug
+    )
+
+
+def _layout_tree(config):
+    return isinstance(config, dict) and config.get("layout") == "tree"
+
+
+def _tree_page_id(path):
+    """Roxabi treePageId, then the stored PAGE_RE. Engine HTML is not an id."""
+    if not isinstance(path, str) or ".." in path or path in _PUBLIC_SHELL:
+        return None
+    if path.startswith("/api/") or path.startswith("/s/") or path.startswith("/a/"):
+        return None
+    if path.endswith(".html"):
+        ident = path[1:] if _TREE_HTML.match(path) else None
+    elif path.endswith("/"):
+        ident = (path[1:] + "index.html") if _TREE_DIR.match(path) else None
+    else:
+        last = path[path.rfind("/") + 1 :]
+        if not last or "." in last or _TREE_BARE.match(path) is None:
+            return None
+        ident = path[1:] + ".html"
+    if (
+        not ident
+        or ident in _ENGINE_PAGE
+        or _PAGE_RE.match(ident) is None
+    ):
+        return None
+    return ident
+
+
+def _known_page_ids(config, local, files):
+    ids = set()
+    tree = _layout_tree(config)
+    if tree:
+        for path in local.get("tree_candidates") or []:
+            if (
+                not isinstance(path, str)
+                or not path
+                or path.startswith("/")
+                or "\\" in path
+            ):
+                continue
+            ident = _tree_page_id("/" + path)
+            if ident:
+                ids.add(ident)
+    else:
+        for name in local.get("slug_index_html") or []:
+            if _page_id_ok(name):
+                ids.add(name)
+        for path in local.get("tree_candidates") or []:
+            if not isinstance(path, str) or "/" not in path:
+                continue
+            slug = path.split("/", 1)[0]
+            if _page_id_ok(slug):
+                ids.add(slug)
+    if isinstance(files, dict):
+        for path in files:
+            if not isinstance(path, str):
+                continue
+            match = _LIVE_PAGE.match(path)
+            if match is not None and _page_id_ok(match.group(1)):
+                ids.add(match.group(1))
+                continue
+            if not tree:
+                continue
+            request = path if path.startswith("/") else "/" + path
+            ident = _tree_page_id(request)
+            if ident:
+                ids.add(ident)
+    return ids
+
+
+def _visibility_id_ok(page_id):
+    if page_id in _ENGINE_PAGE:
+        return False
+    if _page_id_ok(page_id):
+        return True
+    return isinstance(page_id, str) and _PAGE_RE.match(page_id) is not None
+
+
+def _classify(observed, known_ids, issues):
     vis_values = observed.pop("_vis_values", {})
-    share_ids = observed.pop("_share_ids", set())
-    ids = set(slugs) | set(vis_values) | set(share_ids)
+    vis_present = observed.pop("_vis_present", set())
+    share_present = observed.pop("_share_present", set())
+    listed_ids = observed.pop("_listed_ids", set())
+    ids = set(known_ids) | set(listed_ids) | set(vis_present) | set(share_present)
     rows = []
     for page_id in sorted(ids):
-        if not page_id:
+        if not _visibility_id_ok(page_id):
             continue
         raw = vis_values.get(page_id)
         if raw in VIS_VALUES:
@@ -870,11 +1193,12 @@ def _classify(observed, slugs, issues):
             {
                 "id": page_id,
                 "classification": classification,
-                "vis_present": page_id in vis_values,
-                "share_present": page_id in share_ids,
+                "vis_present": page_id in vis_present,
+                "share_present": page_id in share_present,
             }
         )
     observed["visibility"] = rows
+
 
 
 def _snapshot_from(body, seen, canonical_id, issues):
@@ -1046,12 +1370,20 @@ def collect_inventory(config, env, get, include_history=True, local_only=False):
                     snapshot_seen = observed.pop("_snapshot_seen", False)
                     _classify(
                         observed,
-                        local["slug_index_html"],
+                        _known_page_ids(config, local, observed.get("files")),
                         issues,
                     )
     if not include_history or local_only:
         observed["history"]["skipped"] = True
-    for private_key in ("_vis_values", "_share_ids", "_snapshot_body", "_snapshot_seen"):
+    for private_key in (
+        "_vis_values",
+        "_vis_present",
+        "_share_present",
+        "_share_ids",
+        "_listed_ids",
+        "_snapshot_body",
+        "_snapshot_seen",
+    ):
         observed.pop(private_key, None)
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -1067,7 +1399,14 @@ def collect_inventory(config, env, get, include_history=True, local_only=False):
         "issues": issues,
         "complete": not issues,
     }
-    return _scrub(report, [path for path in scrub_paths if path], secrets)
+    collisions = []
+    report = _scrub(
+        report, [path for path in scrub_paths if path], secrets, collisions
+    )
+    if collisions:
+        _issue(report["issues"], "unreadable", "redacted key collision")
+        report["complete"] = False
+    return report
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -1148,48 +1487,143 @@ def _inside_git(path):
         return False
 
 
-def _mk_dir_private(parent):
-    missing = []
-    cur = parent
-    while cur.parent != cur and not cur.exists():
-        missing.append(cur)
-        cur = cur.parent
-    for directory in reversed(missing):
+class OutputRefused(Exception):
+    """Output path is not a safe private file. The message is fixed."""
+
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _fd_has_git(dir_fd):
+    cur = os.dup(dir_fd)
+    try:
+        while True:
+            try:
+                os.lstat(".git", dir_fd=cur)
+                return True
+            except OSError:
+                pass
+            try:
+                parent = os.open("..", _DIR_FLAGS, dir_fd=cur)
+            except OSError:
+                return True
+            try:
+                if os.path.samestat(os.fstat(cur), os.fstat(parent)):
+                    return False
+            except OSError:
+                os.close(parent)
+                return True
+            os.close(cur)
+            cur = parent
+    finally:
         try:
-            directory.mkdir(mode=0o700)
-        except FileExistsError:
-            continue
-        os.chmod(directory, 0o700)
+            os.close(cur)
+        except OSError:
+            pass
+
+
+def _open_parent_nofollow(parent):
+    """Resolve the output parent once, refuse a worktree, then bind no-follow."""
+    expanded = os.path.expanduser(str(parent))
+    raw = os.path.realpath(expanded)
+    if os.path.isdir(raw):
+        if _inside_git(Path(raw)):
+            raise OutputRefused("output is inside a git worktree")
+        return _open_resolved(raw)
+    existing = raw
+    missing = []
+    while existing and existing != os.path.dirname(existing):
+        if os.path.isdir(existing):
+            break
+        existing, name = os.path.split(existing)
+        if not name:
+            break
+        missing.append(name)
+    if not existing or not os.path.isdir(existing):
+        raise OSError("not a directory")
+    if _inside_git(Path(existing)):
+        raise OutputRefused("output is inside a git worktree")
+    fd = _open_resolved(existing)
+    try:
+        for name in reversed(missing):
+            if name in (".", "..") or "/" in name or "\0" in name:
+                raise OSError("path component is not a real directory")
+            os.mkdir(name, 0o700, dir_fd=fd)
+            os.chmod(name, 0o700, dir_fd=fd, follow_symlinks=False)
+            nxt = os.open(name, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
 
 
 def _write_private(path, payload):
-    parent = path.parent
-    _mk_dir_private(parent)
-    fd, tmp_name = tempfile.mkstemp(prefix=".forge-inventory.", dir=str(parent))
-    tmp = Path(tmp_name)
+    name = path.name
+    if not name or name in (".", "..") or "/" in name or "\0" in name:
+        raise OutputRefused("output is unreadable")
     try:
-        os.chmod(tmp, 0o600)
-        with os.fdopen(fd, "wb") as handle:
+        parent_fd = _open_parent_nofollow(path.parent)
+    except OutputRefused:
+        raise
+    except OSError as exc:
+        raise OutputRefused("output is unreadable") from exc
+    tmp_name = None
+    try:
+        if _fd_has_git(parent_fd):
+            raise OutputRefused("output is inside a git worktree")
+        try:
+            os.lstat(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        else:
+            raise FileExistsError(name)
+        fd = None
+        for _ in range(8):
+            candidate = ".forge-inventory." + os.urandom(8).hex()
+            try:
+                fd = os.open(
+                    candidate,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+            except FileExistsError:
+                continue
+            tmp_name = candidate
+            break
+        if fd is None:
+            raise OutputRefused("output is unreadable")
+        try:
             offset = 0
             while offset < len(payload):
-                offset += handle.write(payload[offset:])
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.link(tmp_name, str(path))
-        except FileExistsError as exc:
-            raise FileExistsError(str(path)) from exc
+                wrote = os.write(fd, payload[offset:])
+                if wrote <= 0:
+                    raise OSError("short write")
+                offset += wrote
+            os.fsync(fd)
         finally:
-            os.unlink(tmp_name)
-    except Exception:
-        if tmp.exists():
-            os.unlink(tmp_name)
-        raise
-    dir_fd = os.open(str(parent), os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
+            os.close(fd)
+        try:
+            os.link(
+                tmp_name,
+                name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError as exc:
+            raise FileExistsError(name) from exc
+        os.fsync(parent_fd)
     finally:
-        os.close(dir_fd)
+        if tmp_name is not None:
+            try:
+                os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        os.close(parent_fd)
 
 
 def _refuse(reason):
@@ -1269,6 +1703,8 @@ def main(argv=None):
     payload = json.dumps(report, indent=2, sort_keys=True).encode("utf-8") + b"\n"
     try:
         _write_private(output, payload)
+    except OutputRefused as exc:
+        return _refuse(exc.reason)
     except FileExistsError:
         return _refuse("output already exists")
     except OSError:

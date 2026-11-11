@@ -384,13 +384,14 @@ Chaque gate exige ses preuves et, quand elle l'indique, l'autorisation opérateu
 - [Roxabi correctif et déploiement #13](https://github.com/Roxabi/roxabi-forge/pull/13) : fix 1.1.5, CI et preuve de navigation authentifiée.
 - Règles opérateur : `ssot/operator.ssot.md` § Dev workflow ; `ssot/cloudflare.ssot.md` § Comptes ; `ssot/plugins.ssot.md` § installation multi-host. Le plan conserve leurs garde-fous.
 - Traces de cette session : dépôts publics non-forks, origin Roxabi seul ; publish 1.1.5 construisant deux slugs. C'est une observation, pas une preuve que tous les autres fichiers sont obsolètes.
-- Cause du déploiement slug : [dispatch `publish.sh`](https://github.com/Roxabi/roxabi-forge/blob/1f3fb1ca43f8fe64e625fa447b3a72351437e9fd/plugins/roxabi-forge/scripts/publish.sh#L1812-L1827), [sélection du builder](https://github.com/Roxabi/roxabi-forge/blob/1f3fb1ca43f8fe64e625fa447b3a72351437e9fd/plugins/roxabi-forge/scripts/build-site-from-hub.py#L118-L142) et [périmètre d'empreinte](https://github.com/Roxabi/roxabi-forge/blob/1f3fb1ca43f8fe64e625fa447b3a72351437e9fd/plugins/roxabi-forge/scripts/lib/snapshot.py#L166-L175), relus dans le worktree du correctif mergé : confiance élevée sur le mécanisme, inventaire API live encore à faire.
+- Cause du déploiement slug : [dispatch `publish.sh`](https://github.com/Roxabi/roxabi-forge/blob/1f3fb1ca43f8fe64e625fa447b3a72351437e9fd/plugins/roxabi-forge/scripts/publish.sh#L1812-L1827), [sélection du builder](https://github.com/Roxabi/roxabi-forge/blob/1f3fb1ca43f8fe64e625fa447b3a72351437e9fd/plugins/roxabi-forge/scripts/build-site-from-hub.py#L118-L142) et [périmètre d'empreinte](https://github.com/Roxabi/roxabi-forge/blob/1f3fb1ca43f8fe64e625fa447b3a72351437e9fd/plugins/roxabi-forge/scripts/lib/snapshot.py#L166-L175), relus dans le worktree du correctif mergé. L'inventaire API live et historique effectué en F01 confirme la divergence ; les rapprochements et leurs limites figurent dans [le suivi](forge-convergence-status.md).
 
 ### Références primaires — stockage
 
 - [R2 — cohérence](https://developers.cloudflare.com/r2/reference/consistency/) : forte par objet ; écritures conditionnelles ; le cache n'hérite pas automatiquement de cette garantie.
 - [R2 — URLs présignées](https://developers.cloudflare.com/r2/api/s3/presigned-urls/) : réutilisables jusqu'à expiration ; pas d'usage unique natif.
 - [D1 — batch](https://developers.cloudflare.com/d1/worker-api/d1-database/#batch) : transactions SQL, pas de transaction avec R2.
+- [KV — fonctionnement et cohérence](https://developers.cloudflare.com/kv/concepts/how-kv-works/) : cache Worker par défaut 60 secondes, propagation « 60 secondes ou davantage », absences également cachées et aucune garantie locale de lecture après écriture. Ce n'est pas une borne de fraîcheur de l'API REST d'export.
 
 ### Références primaires — protocoles et exploitation
 

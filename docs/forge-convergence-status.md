@@ -89,13 +89,40 @@ Les preuves machine détaillées restent privées, hors Git. Vérification cibl�
 
 Référence scellée des preuves privées : index `F01-evidence-sha256.txt`, SHA-256 `aa89f76ec569e126129112a048be5d5c86424a2460c6417b21869c898ecfd74d`. Les fichiers de preuve et l'index sont en mode 0600, dans un répertoire privé hors worktree ; aucun contenu de corpus ni secret de partage dans cette PR.
 
+### Cookies et cohérence à préserver
+
+| Source courante | Observation relue dans le code | Conséquence pour la bascule |
+|---|---|---|
+| Access des deux moteurs | `CF_Authorization` lu, non émis par le moteur ; JWT vérifié sur signature, issuer, audience, `exp`/`nbf` avec 30 s de tolérance | Ne pas présenter les cookies comme un export de droits ; les paramètres d'émission restent gérés par Access |
+| Roxabi `forge_share` | Session, host-only, `HttpOnly; Secure; SameSite=Lax; Path=/` ; valeur vérifiée à nouveau contre `vis:shared` et la clé KV | Préserver le domaine et les clés ne dispense pas de refaire l'autorisation à chaque requête ; un ancien cookie ne doit pas réactiver un grant révoqué |
+| Lectures KV | Aucune option `cacheTtl` dans les deux moteurs ; valeur exacte pour l'accès, metadata seulement pour le catalogue Roxabi | Le cache Worker par défaut est éventuellement cohérent ; ni 60 s ni le commentaire de list-lag ~10 s ne prouvent la fraîcheur REST |
+
+Sources : Silex `functions/_lib/access.ts` (contrôles JWT, `visibility`), Roxabi `functions/s/[[path]].ts:41-42`, `functions/_middleware.ts:148-167`, `functions/_lib/access.ts:298-331`. Le cache JWKS d'isolate dure une heure et n'est pas une autorité de visibilité. La méthode de capture finale exige fermeture serveur des writers, drainage et preuve de la dernière mutation ; faute de cette preuve, F10/cutover restent bloqués et aucun délai fixe ne les valide.
+
+Les chemins distants ont aussi été classés par provenance dans des manifestes privés dérivés : 17 287 chemins historiques Unkillable, 30 581 Roxabi. Candidats de préservation : 684 chemins courants Unkillable et l'union précédente + courante Roxabi, **16 271 chemins dont 833 HTML**. Les chemins d'histoires plus anciennes ne sont pas automatiquement restaurés ; les fichiers locaux seuls ne sont pas automatiquement publiés. Cette classification d'ensembles ne remplace ni la résolution page/asset/ACL du CLI corrigé ni le manifeste final sous gel.
+
+### Revue et livraison F01
+
+[PR #69](https://github.com/go-silex/silex-forge/pull/69), SHA initial `d7ba68a7fd9623167ac6697dd9cb7a37d87c9af2` : hooks complets réussis (36 Vitest, 189 Python, suites shell), CI Linux/macOS/Bash 3.2/Python 3.9 et scan secrets réussis. Les huit défauts P2 de cette revue ont été corrigés, avec traitement des ids `layout=tree` et des alias système macOS. **18 tests ciblés réussis**, puis CLI corrigé réellement exécuté sur le hub Unkillable : code 0, mêmes 1 052 fichiers / 159 slugs / 198 HTML ; `--local-only` ne prétend toujours pas avoir vérifié le live. La nouvelle revue indépendante et la nouvelle CI restent bloquantes.
+
+### Rapprochement des droits — preuve encore ouverte
+
+| Instance | Identifiants de grant sélectionnés | Publics | Partagés | Privés explicites | Valeur absente |
+|---|---:|---:|---:|---:|---:|
+| Unkillable | 159 slugs | 10 | 76 | 9 | 64 |
+| Roxabi | 830 pages/slugs | 59 | 1 | 1 | 769 |
+
+Une absence dérive vers privé dans la branche page ; elle ne suffit **pas** à classer un fragment Roxabi : `fragmentOwners` peut l'autoriser via ses propriétaires. Les 828 HTML de l'arbre sont rapprochés sans chemin orphelin, mais restent ambigus tant que `asset-owners.json` n'est pas retrouvé ou reconstruit avec preuve. Cette métadonnée générée est donc une **entrée de sécurité**, pas un manque à reporter silencieusement après F01. Sa reconstruction ciblée en lecture seule est en cours ; pas de défaut public inventé. Les trois HTML du shell sont séparés des pages. Cinq ids `vis:` Unkillable ne rejoignent aucun HTML sélectionné et ne sont pas restaurés automatiquement.
+
+Preuve privée : `F01-selected-page-rights.json`, SHA-256 initial `552569a6642d0a6938f48142527efd25d25e2e67b8c2cb9faf993870beda319f`, explicitement incomplet. La fermeture F01 requiert le résultat de cette investigation en plus du SHA revu et de la CI verte.
+
 ## Lots et traçabilité
 
 ### Vague A
 
 | Lot | État | Worktree / branche | PR / SHA / preuves ou blocage |
 |---|---|---|---|
-| F01 | Vérification locale réussie ; livraison en cours | `~/.omp/wt/silex-forge/docs-F01-inventory` ; `docs/F01-inventory` | Base `3c3c442` ; 9 tests verts + smoke CLI réel ; inventaires/reconstruction et périmètre établis ; PR/revue/CI à obtenir |
+| F01 | Nouvelle revue/CI et propriété des fragments à fermer | `~/.omp/wt/silex-forge/docs-F01-inventory` ; `docs/F01-inventory` | [PR #69](https://github.com/go-silex/silex-forge/pull/69) ; correctifs : 18 tests + smoke réel verts ; 828 chemins Roxabi encore ambigus sur leurs propriétaires |
 | F02 | Non démarré | Convention du plan | Attend livraison F01 ; amendement nouveau canon approuvé, création non encore autorisée au SHA exact |
 | F03 | Non démarré | Convention du plan | Attend F01/F02 et preuve d'isolement du nouveau canon par rapport au dépôt legacy figé |
 | F06 | Non démarré | Convention du plan | Attend F02 |

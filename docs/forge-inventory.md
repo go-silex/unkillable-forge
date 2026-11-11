@@ -67,11 +67,13 @@ Account ids, KV namespace ids, audience ids, tokens, and absolute hub paths are 
 
 ## Limits
 
-- Symlinks are recorded and not followed. A target outside the artifacts root is `external`. A missing target is `broken`. A loop is `cycle`. An internal target is `internal`.
-- External roots and symlink cycles are not walked. Large files are hashed in 1 MiB chunks, not loaded whole.
+- The configured hub and artifacts roots are resolved once, then opened without following any component of that canonical path. A trusted root alias, such as a system directory that is itself a symlink, is that initial resolution. It is not a descendant escape. A symlink encountered after the root is bound is not followed. A symlink in a descendant is `external`, `broken`, `cycle`, or `internal` from the bound descriptor. A target outside the artifacts root is `external`.
+- External roots and symlink cycles are not walked. Large files are hashed in 1 MiB chunks from the same no-follow file descriptor used for HTML flags. Flags collapse whitespace so a match split across a chunk is still counted. No HTML content is stored.
 - Unreadable entries set `readable` false, `complete` false, and the walk continues.
 - A missing `hub_root` or `artifacts_dir` is an error. There is no silent default path.
-- History and project-list pagination stop on a repeated page, a repeated cursor, or a missing `total_pages`. A repeated page is the same ordered row identity: deployment `id`, or project `name` when the list has no `id`. `complete` is then false.
-- A 404 on a listed KV value is absence, not a network failure. Any other non-200 is an issue.
-- The report is private machine evidence. It is not a git artifact and not a statement that a previous tree plus the current tree may be migrated.
+- History and project-list pagination stop on a repeated page, a repeated cursor, or a missing `total_pages`. A repeated page is the same ordered row identity: deployment `id`, or project `name` when the list has no `id`. A KV cursor that is present but not a string stops the list and sets `complete` false. `complete` is then false.
+- A listed KV key is not present until its value GET returns 200. A 404 is absence for `vis:`, `share:`, and `snapshot:live` alike. `vis_present` and `share_present` stay false. Snapshot `present` stays false. Any other non-200 is an issue. Visibility text is not stripped: only the exact values `private`, `shared`, and `public` are those classes. Anything else, including trailing whitespace, is `private`.
+- Page ids in the default layout are top-level slug directories, the first segment of a local tree candidate, and the slug in a live `/a/<slug>/...` file. `layout` `tree` uses the Roxabi page id instead: the HTML path without a leading slash, such as `side/kept.html`, not the first directory. Public shell paths and `404.html` are not ids. A live `/a/<slug>/...` file still contributes the slug. A dotted first segment is not an id in the default layout. A known page with no successful visibility read is `private`.
+- Redaction covers dictionary keys. If two redacted keys would collide, each keeps a hash suffix that is not the secret. A collision that still cannot be stored sets `complete` false.
+- The report is private machine evidence. It is not a git artifact and not a statement that a previous tree plus the current tree may be migrated. The output parent is resolved once before any temporary file is created. If that canonical parent is inside a git worktree, including a parent swapped for a symlink into one, the write is refused and no file is created there.
 - The legacy publisher is not imported and not called.

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -17,7 +18,9 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qs, unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -696,6 +699,463 @@ class CliTests(unittest.TestCase):
         self.assertNotIn(str(linked), proc.stderr)
         after = {path.relative_to(linked) for path in linked.rglob("*")}
         self.assertEqual(before, after)
+
+def _envelope(result, info=None):
+    payload = {"success": True, "result": result}
+    if info is not None:
+        payload["result_info"] = info
+    return 200, _json_bytes(payload)
+
+
+def _live_get(values, keys_body):
+    def get(path):
+        decoded = unquote(path)
+        if "/values/" in decoded:
+            key = unquote(decoded.split("/values/", 1)[1])
+            if key not in values:
+                return 404, b""
+            return 200, values[key]
+        if decoded.rstrip("/").endswith("/keys"):
+            return keys_body
+        if decoded.endswith("/files"):
+            return _envelope({"id": CANON_ID, "files": dict(CANON_FILES)})
+        if "/pages/projects/" in decoded and "/deployments" not in decoded:
+            return _envelope(_project(PROJECT, HOST))
+        return 404, b""
+
+    return get
+
+
+def _vis(result, page_id):
+    rows = [
+        row
+        for row in result["observed_live"]["visibility"]
+        if row.get("id") in (page_id, "vis:" + page_id)
+    ]
+    return rows[0] if len(rows) == 1 else None
+
+
+class BoundaryRegressionTests(InventoryCase):
+    def _live(self, values, keys_body):
+        return _collect_history_off(self.hub, _live_get(values, keys_body))
+
+    def test_snapshot_keys_do_not_keep_share_secret_or_hub_path(self) -> None:
+        hub_path = str(self.hub.resolve())
+        record = _record()
+        record["slugs"] = {
+            "deck": "snap-slug-digest",
+            SHARE: "snap-slug-digest",
+            hub_path: "snap-slug-digest",
+        }
+        result = self._live(
+            {
+                "share:deck": SHARE.encode("ascii"),
+                "snapshot:live": _json_bytes(record),
+            },
+            _envelope(
+                [
+                    {"name": "share:deck", "metadata": None},
+                    {"name": "snapshot:live", "metadata": None},
+                ],
+                {"count": 2},
+            ),
+        )
+        blob = _blob(result)
+        self.assertNotIn(SHARE, blob)
+        self.assertNotIn(hub_path, blob)
+        self.assertNotIn(HUB_MARK, blob)
+        paths = [row["path"] for row in result["local_selection"]["files"]]
+        self.assertEqual(len(paths), len(set(paths)))
+
+    def test_queued_directory_replaced_by_outside_symlink_is_not_hashed(self) -> None:
+        art = self.hub / "artifacts"
+        queued = art / "queued"
+        queued.mkdir()
+        (queued / "keep.txt").write_bytes(b"inside")
+        outside = self.tmp / "outside-root"
+        outside.mkdir()
+        external = outside / "secret.bin"
+        external.write_bytes(EXT_SENTINEL.encode("ascii"))
+        before = (external.read_bytes(), external.stat().st_mtime_ns)
+        swapped = {"done": False}
+        real_open = os.open
+        real_listdir = os.listdir
+        real_scandir = os.scandir
+
+        def maybe_swap(path, dir_fd=None):
+            if swapped["done"] or isinstance(path, int) or path is None:
+                return
+            try:
+                name = os.fspath(path)
+            except TypeError:
+                return
+            hit = name == "queued" and dir_fd is not None
+            if not hit:
+                try:
+                    hit = Path(name) == queued
+                except (TypeError, ValueError):
+                    hit = False
+            if not hit:
+                return
+            swapped["done"] = True
+            queued.rename(art / "queued-real")
+            queued.symlink_to(outside, target_is_directory=True)
+
+        def opening(path, flags, mode=0o777, *, dir_fd=None):
+            maybe_swap(path, dir_fd)
+            if dir_fd is None:
+                return real_open(path, flags, mode)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        def listing(path=None):
+            if path is not None and not isinstance(path, int):
+                maybe_swap(path)
+            if path is None:
+                return real_listdir()
+            return real_listdir(path)
+
+        def scanning(path):
+            maybe_swap(path)
+            return real_scandir(path)
+
+        real_fwalk = os.fwalk
+
+        def walking(top=".", *args, **kwargs):
+            maybe_swap(top, kwargs.get("dir_fd"))
+            return real_fwalk(top, *args, **kwargs)
+
+        with patch.object(inv.os, "open", side_effect=opening), patch.object(
+            inv.os, "listdir", side_effect=listing
+        ), patch.object(inv.os, "scandir", side_effect=scanning), patch.object(
+            inv.os, "fwalk", side_effect=walking
+        ):
+            result = inv.collect_inventory(
+                _config(self.hub, discover=False),
+                _env(),
+                lambda _path: (_ for _ in ()).throw(AssertionError("get")),
+                local_only=True,
+            )
+        self.assertTrue(swapped["done"])
+        blob = _blob(result)
+        self.assertNotIn(EXT_SENTINEL, blob)
+        self.assertNotIn(_sha256(EXT_SENTINEL.encode("ascii")), blob)
+        self.assertEqual(before, (external.read_bytes(), external.stat().st_mtime_ns))
+        paths = [row["path"] for row in result["local_selection"]["files"]]
+        self.assertEqual(len(paths), len(set(paths)))
+
+    def test_visibility_whitespace_stays_private(self) -> None:
+        result = self._live(
+            {"vis:deck": b"public\n", "vis:other": b"shared "},
+            _envelope(
+                [
+                    {"name": "vis:deck", "metadata": {"v": "public"}},
+                    {"name": "vis:other", "metadata": {"v": "shared"}},
+                ],
+                {"count": 2},
+            ),
+        )
+        deck = _vis(result, "deck")
+        other = _vis(result, "other")
+        self.assertIsNotNone(deck)
+        self.assertIsNotNone(other)
+        self.assertEqual("private", deck["classification"])
+        self.assertEqual("private", other["classification"])
+        self.assertTrue(deck["vis_present"])
+        self.assertTrue(other["vis_present"])
+
+    def test_numeric_cursor_is_not_a_complete_list(self) -> None:
+        result = self._live(
+            {"vis:alpha": b"private"},
+            _envelope(
+                [{"name": "vis:alpha", "metadata": None}],
+                {"count": 1, "cursor": 123},
+            ),
+        )
+        self.assertFalse(result["complete"])
+
+    def test_listed_value_404_clears_presence(self) -> None:
+        result = self._live(
+            {},
+            _envelope(
+                [
+                    {"name": "vis:deck", "metadata": {"v": "public"}},
+                    {"name": "share:deck", "metadata": None},
+                ],
+                {"count": 2},
+            ),
+        )
+        row = _vis(result, "deck")
+        self.assertIsNotNone(row)
+        self.assertFalse(row["vis_present"])
+        self.assertFalse(row["share_present"])
+        self.assertEqual("private", row["classification"])
+        shares = [
+            item
+            for item in result["observed_live"]["shares"]
+            if item.get("name") in ("share:deck", "deck")
+        ]
+        self.assertTrue(shares)
+        self.assertFalse(any(item.get("present") for item in shares))
+
+    def test_known_pages_default_private_and_engine_html_is_not_a_page(self) -> None:
+        side = self.hub / "artifacts" / "side"
+        side.mkdir(parents=True)
+        (side / "page.html").write_bytes(b"<html>tree</html>")
+        (self.hub / "artifacts" / "notes.html").write_bytes(b"<html>root</html>")
+        hidden = self.hub / "artifacts" / ".hidden"
+        hidden.mkdir()
+        (hidden / "page.html").write_bytes(b"<html>dot</html>")
+        files = {
+            "/a/remote-only/index.html": "opaque-remote",
+            "/a/index.html": "opaque-a-index",
+            "/index.html": "opaque-engine",
+            "/404.html": "opaque-404",
+            "/login.html": "opaque-login-html",
+            "/login": "opaque-login",
+        }
+
+        def get(path):
+            decoded = unquote(path)
+            if decoded.endswith("/files"):
+                return _envelope({"id": CANON_ID, "files": files})
+            if decoded.rstrip("/").endswith("/keys"):
+                return _envelope([], {"count": 0})
+            if "/pages/projects/" in decoded and "/deployments" not in decoded:
+                return _envelope(_project(PROJECT, HOST))
+            if "/values/" in decoded:
+                return 404, b""
+            return 404, b""
+
+        cfg = _config(self.hub, discover=False)
+        cfg["internal_prefix"] = "a"
+        result = inv.collect_inventory(cfg, _env(), get, include_history=False)
+        rows = result["observed_live"]["visibility"]
+        ids = [row.get("id") for row in rows]
+        self.assertEqual(len(ids), len(set(ids)))
+        remote = _vis(result, "remote-only")
+        self.assertIsNotNone(remote)
+        self.assertEqual("private", remote["classification"])
+        self.assertFalse(remote["vis_present"])
+        self.assertFalse(remote["share_present"])
+        side_row = _vis(result, "side")
+        self.assertIsNotNone(side_row)
+        self.assertEqual("private", side_row["classification"])
+        self.assertNotIn("side/page.html", ids)
+        self.assertNotIn("page.html", ids)
+        for engine in (
+            "index",
+            "index.html",
+            "404",
+            "404.html",
+            "login",
+            "login.html",
+            "a",
+            "notes",
+            "notes.html",
+            ".hidden",
+        ):
+            self.assertNotIn(engine, ids)
+
+
+    def test_tree_layout_ids_are_html_paths_not_first_dir(self) -> None:
+        side = self.hub / "artifacts" / "side"
+        side.mkdir(parents=True)
+        (side / "kept.html").write_bytes(b"<html>kept</html>")
+        (side / "other.html").write_bytes(b"<html>other</html>")
+        (side / "index.html").write_bytes(b"<html>index</html>")
+        files = {
+            "/side/kept.html": "opaque-kept",
+            "/side/other.html": "opaque-other",
+            "/side/index.html": "opaque-dir-index",
+            "/guides/live-only.html": "opaque-live",
+            "/a/kept-slug/index.html": "opaque-slug",
+            "/index.html": "opaque-engine",
+            "/404.html": "opaque-404",
+            "/login.html": "opaque-login-html",
+            "/login": "opaque-login",
+        }
+        kept_key = "vis:side/kept.html"
+
+        def get(path):
+            decoded = unquote(path)
+            if decoded.endswith("/files"):
+                return _envelope({"id": CANON_ID, "files": files})
+            if decoded.rstrip("/").endswith("/keys"):
+                return _envelope(
+                    [{"name": kept_key, "metadata": {"v": "public"}}],
+                    {"count": 1},
+                )
+            if "/pages/projects/" in decoded and "/deployments" not in decoded:
+                return _envelope(_project(PROJECT, HOST))
+            if "/values/" in decoded:
+                key = unquote(decoded.split("/values/", 1)[1])
+                if key == kept_key:
+                    return 200, b"public"
+                return 404, b""
+            return 404, b""
+
+        cfg = _config(self.hub, discover=False)
+        cfg["layout"] = "tree"
+        result = inv.collect_inventory(cfg, _env(), get, include_history=False)
+        rows = result["observed_live"]["visibility"]
+        ids = [row.get("id") for row in rows]
+        self.assertEqual(ids, sorted(set(ids)))
+        self.assertEqual(
+            set(ids),
+            {
+                "side/kept.html",
+                "side/other.html",
+                "side/index.html",
+                "guides/live-only.html",
+                "kept-slug",
+            },
+        )
+        kept = _vis(result, "side/kept.html")
+        other = _vis(result, "side/other.html")
+        live_only = _vis(result, "guides/live-only.html")
+        self.assertEqual("public", kept["classification"])
+        self.assertTrue(kept["vis_present"])
+        self.assertFalse(kept["share_present"])
+        self.assertEqual("private", other["classification"])
+        self.assertFalse(other["vis_present"])
+        self.assertFalse(other["share_present"])
+        self.assertEqual("private", live_only["classification"])
+        self.assertFalse(live_only["vis_present"])
+        self.assertFalse(live_only["share_present"])
+        directory_index = _vis(result, "side/index.html")
+        slug = _vis(result, "kept-slug")
+        self.assertEqual("private", directory_index["classification"])
+        self.assertFalse(directory_index["vis_present"])
+        self.assertEqual("private", slug["classification"])
+        self.assertFalse(slug["vis_present"])
+        self.assertNotIn("side", ids)
+        self.assertNotIn("kept-slug/index.html", ids)
+        self.assertNotIn(SHARE, _blob(result))
+
+
+    def test_html_flags_survive_chunk_boundary(self) -> None:
+        chunk = int(getattr(inv, "_CHUNK", 1024 * 1024))
+        deck = self.hub / "artifacts" / "deck"
+        deck.mkdir()
+        base_at = chunk - 402
+        base = bytearray(b"x" * base_at)
+        base.extend(b"<base href='/'>\n")
+        fetch = bytearray(b"x" * base_at)
+        fetch.extend(b"fetch(\"/asset.js\")\n")
+        split = bytearray(b"x" * (chunk - 1))
+        split.extend(b"\xc3\xa9<base href='/'>\n")
+        (deck / "base.html").write_bytes(base)
+        (deck / "fetch.html").write_bytes(fetch)
+        (deck / "utf8.html").write_bytes(split)
+        result = inv.collect_inventory(
+            _config(self.hub, discover=False),
+            _env(),
+            lambda _path: (_ for _ in ()).throw(AssertionError("get")),
+            local_only=True,
+        )
+        rows = {row["path"]: row for row in result["local_selection"]["html_flags"]["files"]}
+        self.assertTrue(rows["deck/base.html"]["existing_base"])
+        self.assertTrue(rows["deck/fetch.html"]["root_relative_fetch"])
+        self.assertTrue(rows["deck/utf8.html"]["existing_base"])
+        paths = [row["path"] for row in result["local_selection"]["files"]]
+        self.assertEqual(len(paths), len(set(paths)))
+
+
+def _collect_history_off(hub, getter):
+    return inv.collect_inventory(
+        _config(hub, discover=False),
+        _env(),
+        getter,
+        include_history=False,
+    )
+
+
+class OutputParentSwapTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._td = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._td.name)
+        self.hub = self.tmp / HUB_MARK
+        deck = self.hub / "artifacts" / "deck"
+        deck.mkdir(parents=True)
+        (deck / "index.html").write_bytes(b"<html>inside</html>")
+        self.cfg = self.tmp / "forge.config.json"
+        self.env_path = self.tmp / "forge.env"
+        self.cfg.write_text(
+            json.dumps(
+                {
+                    "hub_root": str(self.hub),
+                    "artifacts_dir": "artifacts",
+                    "public_host": HOST,
+                    "pages_project": PROJECT,
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.env_path.write_text(
+            "CLOUDFLARE_API_TOKEN=" + BEARER + "\n",
+            encoding="utf-8",
+        )
+        self.env_path.chmod(0o600)
+
+    def tearDown(self) -> None:
+        self._td.cleanup()
+
+    @unittest.skipIf(shutil.which("git") is None, "git is required to build a linked worktree")
+    def test_output_parent_swapped_into_worktree_writes_nothing(self) -> None:
+        repo = self.tmp / "repo"
+        linked = self.tmp / "linked"
+        repo.mkdir()
+        git = ["git", "-C", str(repo)]
+        subprocess.run([*git, "init"], check=True, capture_output=True, text=True)
+        subprocess.run([*git, "config", "user.email", "t@example.com"], check=True, capture_output=True)
+        subprocess.run([*git, "config", "user.name", "t"], check=True, capture_output=True)
+        subprocess.run(
+            [*git, "commit", "--allow-empty", "-m", "init"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [*git, "worktree", "add", "--detach", str(linked)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        parent = self.tmp / "private-out"
+        parent.mkdir()
+        output = parent / "report.json"
+        before = {path.relative_to(linked) for path in linked.rglob("*")}
+        real_collect = inv.collect_inventory
+
+        def collect_then_swap(*args, **kwargs):
+            report = real_collect(*args, **kwargs)
+            parent.rename(self.tmp / "private-out-real")
+            parent.symlink_to(linked, target_is_directory=True)
+            return report
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.object(inv, "collect_inventory", side_effect=collect_then_swap):
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                rc = inv.main(
+                    [
+                        "--config",
+                        str(self.cfg),
+                        "--env",
+                        str(self.env_path),
+                        "--output",
+                        str(output),
+                        "--local-only",
+                    ]
+                )
+        self.assertNotEqual(0, rc)
+        self.assertFalse(output.exists())
+        after = {path.relative_to(linked) for path in linked.rglob("*")}
+        self.assertEqual(before, after)
+        leaked = stdout.getvalue() + stderr.getvalue()
+        self.assertNotIn(BEARER, leaked)
+        self.assertNotIn(str(self.hub), leaked)
+
 
 
 if __name__ == "__main__":
