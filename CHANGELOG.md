@@ -12,7 +12,7 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 ### Added
 
 - `forge-inventory.py` writes a read-only inventory of one forge instance: local hub files, the canonical Pages deployment file map, optional production history, and KV visibility, share presence, and the snapshot anchor. It does not publish, reanchor, or mutate Cloudflare. Share values are not stored. A listed KV 404 is absence, not presence. `layout` `tree` records HTML path page ids; the default layout keeps the first directory. The configured root is resolved once, then opened without following. Output is refused inside a git worktree, including when the output parent is swapped for a symlink. See `docs/forge-inventory.md`.
-- F02 canonical transition runbook distinguishes the reviewed bootstrap and identifier-clean seed histories, preserves the original repositories, and requires explicit approval of signature losses and seed publication. Exact-seed CI must succeed before canonical creation. Private preparation does not authorize GitHub operations, production changes or historical imports.
+- F02 direct-seed transition runbook preserves the old engine unchanged, creates the new public canonical repository with Actions disabled, and publishes only the privately audited identifier-clean seed. Source CI precedes publication; exact-seed CI on the destination, provenance and registry delivery gate F02 acceptance. Signature loss and all operations require explicit approval; production and historical imports remain separate.
 
 ### Changed
 
