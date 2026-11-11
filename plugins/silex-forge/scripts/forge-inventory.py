@@ -233,6 +233,7 @@ def _put_scrubbed(out, key, value, paths, secrets, collisions):
 
 
 def _scrub(obj, paths, secrets, collisions=None):
+    """Scrub every string. A key name such as sha256 is not an exemption."""
     if collisions is None:
         collisions = []
     if isinstance(obj, str):
@@ -242,24 +243,14 @@ def _scrub(obj, paths, secrets, collisions=None):
     if isinstance(obj, dict):
         out = {}
         for key, value in obj.items():
-            if key == "sha256":
-                out[key] = value
-            elif key == "files" and isinstance(value, dict):
-                files_out = {}
-                for path_key, hash_text in value.items():
-                    _put_scrubbed(
-                        files_out, path_key, hash_text, paths, secrets, collisions
-                    )
-                out[key] = files_out
-            else:
-                _put_scrubbed(
-                    out,
-                    key,
-                    _scrub(value, paths, secrets, collisions),
-                    paths,
-                    secrets,
-                    collisions,
-                )
+            _put_scrubbed(
+                out,
+                key,
+                _scrub(value, paths, secrets, collisions),
+                paths,
+                secrets,
+                collisions,
+            )
         return out
     return obj
 
@@ -323,56 +314,106 @@ def _open_rel(root_fd, rel):
         raise
 
 
+def _compose_link(root_path, parent_rel, raw):
+    """Lexically join a readlink result. None means the target leaves the root."""
+    if os.path.isabs(raw):
+        target = os.path.normpath(raw)
+        if not _lexical_inside(root_path, target):
+            return None
+        rel = os.path.relpath(target, root_path).replace(os.sep, "/")
+    else:
+        base = "" if parent_rel in ("", ".") else parent_rel
+        rel = os.path.normpath(os.path.join(base, raw) if base else raw).replace(
+            os.sep, "/"
+        )
+    if rel.startswith("../") or rel == ".." or os.path.isabs(rel):
+        return None
+    return rel
+
+
+def _link_parts(key):
+    if key in ("", "."):
+        return []
+    return [part for part in key.split("/") if part not in ("", ".")]
+
+
+def _link_target(root_fd, root_path, key, seen):
+    """Readlink key. Intermediate directory aliases are resolved, not opened."""
+    remaining = _link_parts(key)
+    if not remaining:
+        return "broken", None
+    for _ in range(64):
+        fd = os.dup(root_fd)
+        try:
+            restarted = False
+            for index, name in enumerate(remaining):
+                if name in (".", "..") or "/" in name or "\0" in name:
+                    return "external", None
+                try:
+                    info = os.lstat(name, dir_fd=fd)
+                except OSError:
+                    return "broken", None
+                last = index == len(remaining) - 1
+                if stat.S_ISLNK(info.st_mode):
+                    try:
+                        raw = os.readlink(name, dir_fd=fd)
+                    except OSError:
+                        return "broken", None
+                    parent = "/".join(remaining[:index])
+                    nxt = _compose_link(root_path, parent, raw)
+                    if nxt is None:
+                        return "external", None
+                    if last:
+                        return "link", nxt
+                    tail = remaining[index + 1 :]
+                    joined = nxt if not tail else nxt + "/" + "/".join(tail)
+                    joined = os.path.normpath(joined).replace(os.sep, "/")
+                    if (
+                        joined.startswith("../")
+                        or joined == ".."
+                        or os.path.isabs(joined)
+                    ):
+                        return "external", None
+                    if joined in seen:
+                        return "cycle", None
+                    seen.add(joined)
+                    remaining = _link_parts(joined)
+                    if not remaining:
+                        return "broken", None
+                    restarted = True
+                    break
+                if last:
+                    return "internal", None
+                if not stat.S_ISDIR(info.st_mode):
+                    return "broken", None
+                try:
+                    nxt_fd = os.open(name, _DIR_FLAGS, dir_fd=fd)
+                except OSError:
+                    return "broken", None
+                os.close(fd)
+                fd = nxt_fd
+            if not restarted:
+                return "broken", None
+        finally:
+            os.close(fd)
+    return "cycle", None
+
+
 def _classify_link(root_fd, root_path, rel):
-    """Classify a symlink by readlink only. Targets are not opened."""
+    """Classify a symlink by readlink only. Targets are not opened or hashed."""
     seen = set()
     current = rel.replace(os.sep, "/")
     for _ in range(64):
         key = os.path.normpath(current).replace(os.sep, "/")
-        if key.startswith("../") or key == "..":
+        if key.startswith("../") or key == ".." or os.path.isabs(key):
             return "external"
         if key in seen:
             return "cycle"
         seen.add(key)
-        parent_rel, name = os.path.split(key)
-        if not name or name in (".", ".."):
-            return "broken"
-        try:
-            parent_fd = _open_rel(root_fd, parent_rel)
-        except OSError:
-            return "broken"
-        try:
-            try:
-                raw = os.readlink(name, dir_fd=parent_fd)
-            except OSError:
-                return "broken"
-        finally:
-            os.close(parent_fd)
-        if os.path.isabs(raw):
-            target = os.path.normpath(raw)
-            if not _lexical_inside(root_path, target):
-                return "external"
-            current = os.path.relpath(target, root_path).replace(os.sep, "/")
-        else:
-            current = os.path.normpath(os.path.join(parent_rel, raw)).replace(
-                os.sep, "/"
-            )
-        if current.startswith("../") or current == ".." or os.path.isabs(current):
-            return "external"
-        parent_rel, name = os.path.split(current)
-        if not name:
-            return "broken"
-        parent_fd = None
-        try:
-            parent_fd = _open_rel(root_fd, parent_rel)
-            info = os.lstat(name, dir_fd=parent_fd)
-        except OSError:
-            return "broken"
-        finally:
-            if parent_fd is not None:
-                os.close(parent_fd)
-        if not stat.S_ISLNK(info.st_mode):
-            return "internal"
+        kind, nxt = _link_target(root_fd, root_path, key, seen)
+        if kind != "link":
+            return kind
+        current = nxt
     return "cycle"
 
 
@@ -389,16 +430,31 @@ def _collapse_ws(text, pending):
     return "".join(out), pending
 
 
-def _apply_flags(text, flags, host_re):
-    if not flags["existing_base"] and _BASE_RE.search(text):
-        flags["existing_base"] = True
-    if not flags["root_relative_fetch"] and _FETCH_RE.search(text):
-        flags["root_relative_fetch"] = True
-    if not flags["location_href"] and _LOC_RE.search(text):
-        flags["location_href"] = True
-    if host_re is not None and not flags["hardcoded_host"] and host_re.search(text):
-        flags["hardcoded_host"] = True
+def _apply_flags(text, flags, host_re, final):
+    """Commit a match only when its right context is real or this is EOF.
 
+    A match that ends on the last character of a non-final window is deferred.
+    End-of-string is not right context for a word boundary or a lookahead.
+    """
+    checks = (
+        ("existing_base", _BASE_RE),
+        ("root_relative_fetch", _FETCH_RE),
+        ("location_href", _LOC_RE),
+        ("hardcoded_host", host_re),
+    )
+    deferred = None
+    for key, pattern in checks:
+        if pattern is None or flags[key]:
+            continue
+        match = pattern.search(text)
+        if match is None:
+            continue
+        if not final and match.end() == len(text):
+            start = match.start()
+            deferred = start if deferred is None else min(deferred, start)
+            continue
+        flags[key] = True
+    return deferred
 
 def _consume_regular(fd, host, scan):
     """Hash one regular file descriptor. HTML flags use the same read."""
@@ -420,16 +476,22 @@ def _consume_regular(fd, host, scan):
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
     while True:
         chunk = os.read(fd, _CHUNK)
+        final = not chunk
         if chunk:
             digest.update(chunk)
         if scan:
-            text, pending = _collapse_ws(
-                decoder.decode(chunk, final=not chunk), pending
-            )
+            text, pending = _collapse_ws(decoder.decode(chunk, final=final), pending)
             window = carry + text
-            _apply_flags(window, flags, host_re)
-            carry = window[-tail:] if len(window) > tail else window
-        if not chunk:
+            deferred = _apply_flags(window, flags, host_re, final)
+            start = len(window)
+            if deferred is not None:
+                start = min(start, max(0, deferred - 1))
+            if len(window) > tail:
+                start = min(start, len(window) - tail)
+            else:
+                start = 0
+            carry = window[start:]
+        if final:
             break
     return digest.hexdigest(), flags
 
@@ -1040,6 +1102,30 @@ def _read_kv_values(get, account, namespace, observed, issues, secrets):
     observed["_snapshot_seen"] = snapshot_seen
 
 
+def _kv_list_cursor(payload, issues):
+    """Return ('end', None), ('next', cursor), or ('bad', None).
+
+    Primary list-keys contract: result_info is an optional object
+    {count?, cursor?}. cursor is an optional string and is not nullable.
+    Absence of result_info, or of cursor inside that object, is a verified
+    end. A present null, a non-object result_info, or a non-string cursor
+    is not an end. A string cursor is returned unchanged.
+    """
+    if "result_info" not in payload:
+        return "end", None
+    info = payload["result_info"]
+    if not isinstance(info, dict):
+        _issue(issues, "pagination_incomplete", "kv list did not terminate")
+        return "bad", None
+    if "cursor" not in info:
+        return "end", None
+    nxt = info["cursor"]
+    if not isinstance(nxt, str):
+        _issue(issues, "pagination_incomplete", "kv list did not terminate")
+        return "bad", None
+    return "next", nxt
+
+
 def _read_kv(get, account, namespace, observed, issues, secrets):
     keys = []
     seen_cursors = set()
@@ -1049,7 +1135,7 @@ def _read_kv(get, account, namespace, observed, issues, secrets):
             _quote(account),
             _quote(namespace),
         )
-        if cursor:
+        if cursor is not None:
             path += "?cursor=%s" % _quote(cursor)
         payload = _envelope(get, path, "kv_keys", issues)
         if payload is None:
@@ -1063,19 +1149,14 @@ def _read_kv(get, account, namespace, observed, issues, secrets):
                 _issue(issues, "malformed_json", "GET kv_keys malformed json")
                 return False
             keys.append({"name": item["name"], "metadata_v": _metadata_v(item)})
-        info = _result_info(payload)
-        if "cursor" not in info:
-            nxt = None
-        else:
-            nxt = info.get("cursor")
-        if nxt is None or nxt == "":
+        kind, nxt = _kv_list_cursor(payload, issues)
+        if kind == "bad":
+            return False
+        if kind == "end":
             observed["kv"]["keys"] = sorted(keys, key=lambda item: item["name"])
             observed["kv"]["key_count"] = len(keys)
             _read_kv_values(get, account, namespace, observed, issues, secrets)
             return True
-        if not isinstance(nxt, str):
-            _issue(issues, "pagination_incomplete", "kv list did not terminate")
-            return False
         if nxt in seen_cursors:
             _issue(issues, "pagination_cycle", "pagination cursor repeated")
             return False

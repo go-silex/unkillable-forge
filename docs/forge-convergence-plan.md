@@ -20,6 +20,10 @@ L'open redirect est déjà corrigé : [Roxabi PR #13](https://github.com/Roxabi/
 
 **Amendement adopté pendant F01 :** le canon est créé dans un **nouveau dépôt public** à partir de l'histoire publique Silex approuvée. L'ancien dépôt garde son URL et son moteur figé jusqu'au retrait des anciens writers ; il n'est pas renommé. Motif : des versions installées 1.7.3/1.3.0 ignorent le pin local, et certains postes restent inaccessibles. Le corpus Roxabi approuvé inclut l'arbre du précédent déploiement et les publications actuelles, pas seulement les 16 fichiers actuellement déployés. Voir [le suivi d'exécution](forge-convergence-status.md).
 
+**Amendement de gate F01 accepté par l'opérateur :** après fermeture du code, revue indépendante et CI verte du SHA final incluant cet amendement, F01 peut être accepté comme **énumération complète avec incertitude de sécurité identifiée**, sans attester la préservation des droits historiques. `UNRESOLVED_HISTORICAL_OWNERSHIP` reste bloquant avant toute importation du corpus historique, validation de fidélité F10 ou mutation de migration en production ; F11/F12 restent donc bloqués transitivement. F02, sous G0, puis le développement strictement hors production peuvent avancer suivant les autres dépendances inchangées. Aucun critère final de corpus, URL, grant ou accès aux assets n'est réduit.
+
+La fermeture de ce gate exige un graphe historique vérifié ou un rapprochement probant page/parcours/ressource des droits attendus, validé par l'opérateur. L'assistant porte l'investigation et conserve les preuves privées. Une politique de droits nouvellement approuvée serait une décision distincte, pas une reconstruction présumée équivalente.
+
 ### 1.1 Vocabulaire
 
 | Terme | Sens dans ce plan |
@@ -228,7 +232,7 @@ Le plan initial a été préparé dans `~/.omp/wt/silex-forge/docs-forge-converg
 
 | Lot / worktree | Dépendances | Changement / livrable | Validation bloquante |
 |---|---|---|---|
-| F01 `U/docs-F01-inventory` | Plan accepté | Inventaire strictement en lecture seule + manifeste privé par instance : déploiements actuels/antérieurs accessibles, hubs, KV, shortlinks, cookies, routes, fichiers absents/extras, symlinks et tailles ; sélection explicite du corpus | Aucune page connue non classée ; divergence live/local expliquée ; aucune donnée privée dans le dépôt public ; aucun publish/reanchor/déploiement lancé |
+| F01 `U/docs-F01-inventory` | Plan accepté | Inventaire strictement en lecture seule + manifestes privés par instance : déploiements, hubs, KV, shortlinks, cookies, routes, symlinks, tailles et corpus explicite ; incertitudes de droits identifiées | Tous les chemins connus sont classés par provenance ; divergence expliquée ; code revu et CI verte ; aucune mutation de production ; le gate historique G1b reste ouvert sans valoir conformité |
 | F02 `U/chore-F02-canonical-name` | F01 | Runbook puis création approuvée du nouveau canon avec ascendance Silex ; ancien dépôt figé à son URL ; références de développement et distribution distinctes | SHA source/ref copiées approuvés, ancien main/manifests/releases inchangés après gel, nouveaux travaux isolés ; aucune obligation fictive d'avoir mis à jour les postes inaccessibles |
 | F03 `U/feat-F03-core-contract` | F01, F02 | Contrat artefact/page/révision, schéma D1, configuration d'instance, ACL et résolution de routes réutilisées ; premières tranches de lecture métier exécutables | Parité des règles privé/public/partagé et des chemins ; identité/compte/cible explicitement isolés ; pas de moteur par marque |
 | F06 `U/spike-F06-mcp-auth` | F02 | Preuve hors prod du client OAuth/MCP et du transport d'un vrai fichier vers un récepteur temporaire authentifié ; choix de versions et origines | Les trois clients authentifient, transfèrent la fixture dont on compare les octets, refreshent et échouent après révocation ; aucun token CF local ; ne dépend pas de l'API de publication F04 |
@@ -371,6 +375,7 @@ Chaque gate exige ses preuves et, quand elle l'indique, l'autorisation opérateu
 |---|---|---|
 | G0 — nouveau canon | Runbook F02 revu, nom public, SHA source exact et références à copier confirmés ; gel de l'ancien dépôt sans renommage | Création du canon et démarrage F03/F06 |
 | G1 — corpus | Manifeste approuvé par instance : ce qui est déjà publié et ce qu'on ajoute volontairement | Import final, absence de perte démontrable |
+| G1b — propriété historique | `UNRESOLVED_HISTORICAL_OWNERSHIP` : graphe historique vérifié ou rapprochement probant page/parcours/ressource, validation opérateur | Toute importation du corpus historique, acceptation F10 et toute migration de production ; F11/F12 bloqués transitivement |
 | G2 — OAuth et MCP | Managed OAuth + adapter local ; preuve sur les trois clients, sinon alternative OAuth arbitrée | Distribution client et politique d'accès |
 | G3 — héritage privé | Conservation de l'histoire Roxabi par jonction contrôlée ; sinon décision de reclone/archivage | F12 |
 | G4 — exploitation | Origines de gestion, rôles publishers, limites, rétention et capacité de restore confirmés | Staging final et cutover |

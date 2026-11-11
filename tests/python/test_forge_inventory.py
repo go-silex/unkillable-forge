@@ -767,6 +767,29 @@ class BoundaryRegressionTests(InventoryCase):
         paths = [row["path"] for row in result["local_selection"]["files"]]
         self.assertEqual(len(paths), len(set(paths)))
 
+    def test_snapshot_sha256_key_does_not_keep_share_secret(self) -> None:
+        record = _record()
+        record["slugs"] = {"sha256": SHARE, "deck": "snap-slug-digest"}
+        result = self._live(
+            {
+                "share:deck": SHARE.encode("ascii"),
+                "snapshot:live": _json_bytes(record),
+            },
+            _envelope(
+                [
+                    {"name": "share:deck", "metadata": None},
+                    {"name": "snapshot:live", "metadata": None},
+                ],
+                {"count": 2},
+            ),
+        )
+        blob = _blob(result)
+        self.assertNotIn(SHARE, blob)
+        self.assertIn("snap-slug-digest", blob)
+        slugs = result["snapshot_record"]["slugs"] or {}
+        self.assertNotEqual(SHARE, slugs.get("sha256"))
+
+
     def test_queued_directory_replaced_by_outside_symlink_is_not_hashed(self) -> None:
         art = self.hub / "artifacts"
         queued = art / "queued"
@@ -872,6 +895,17 @@ class BoundaryRegressionTests(InventoryCase):
             ),
         )
         self.assertFalse(result["complete"])
+
+    def test_present_malformed_kv_metadata_is_incomplete(self) -> None:
+        listed = [{"name": "vis:alpha", "metadata": None}]
+        for info in ([], {"count": 1, "cursor": None}):
+            result = self._live(
+                {"vis:alpha": b"private"},
+                _envelope(listed, info),
+            )
+            self.assertFalse(result["complete"])
+            self.assertTrue(result["issues"])
+
 
     def test_listed_value_404_clears_presence(self) -> None:
         result = self._live(
@@ -1059,6 +1093,75 @@ class BoundaryRegressionTests(InventoryCase):
         self.assertTrue(rows["deck/utf8.html"]["existing_base"])
         paths = [row["path"] for row in result["local_selection"]["files"]]
         self.assertEqual(len(paths), len(set(paths)))
+
+    def test_directory_alias_is_classified_without_reading_target(self) -> None:
+        art = self.hub / "artifacts"
+        real = art / "real"
+        real.mkdir()
+        index = real / "index.html"
+        index.write_bytes(b"<html>real</html>")
+        (art / "alias").symlink_to("real", target_is_directory=True)
+        (art / "page.html").symlink_to("alias/index.html")
+        outside = self.tmp / "outside-root"
+        outside.mkdir()
+        external = outside / "ext.bin"
+        external.write_bytes(EXT_SENTINEL.encode("ascii"))
+        (art / "ext-alias").symlink_to(outside, target_is_directory=True)
+        (art / "out.html").symlink_to("ext-alias/ext.bin")
+        before = {
+            path: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in (index, external)
+        }
+        result = inv.collect_inventory(
+            _config(self.hub, discover=False),
+            _env(),
+            lambda _path: (_ for _ in ()).throw(AssertionError("get")),
+            local_only=True,
+        )
+        by_path = {
+            str(row["path"]).replace("\\", "/"): row
+            for row in result["local_selection"]["files"]
+        }
+        page = by_path["page.html"]
+        self.assertTrue(page["symlink"])
+        self.assertEqual("internal", page["diagnostic"])
+        self.assertIsNone(page["sha256"])
+        leaked = by_path["out.html"]
+        self.assertTrue(leaked["symlink"])
+        self.assertEqual("external", leaked["diagnostic"])
+        self.assertIsNone(leaked["sha256"])
+        blob = _blob(result)
+        self.assertNotIn(EXT_SENTINEL, blob)
+        self.assertNotIn(_sha256(EXT_SENTINEL.encode("ascii")), blob)
+        for path, (data, mtime) in before.items():
+            self.assertEqual(data, path.read_bytes())
+            self.assertEqual(mtime, path.stat().st_mtime_ns)
+
+    def test_html_flag_right_context_is_not_committed_early(self) -> None:
+        chunk = int(getattr(inv, "_CHUNK", 1024 * 1024))
+        deck = self.hub / "artifacts" / "deck"
+        deck.mkdir()
+        base_token = b"<base"
+        fetch_token = b"fetch(\"/"
+        (deck / "base64.html").write_bytes(
+            b"x" * (chunk - len(base_token)) + base_token + b"64>"
+        )
+        (deck / "proto.html").write_bytes(
+            b"x" * (chunk - len(fetch_token)) + fetch_token + b"/asset\")"
+        )
+        result = inv.collect_inventory(
+            _config(self.hub, discover=False),
+            _env(),
+            lambda _path: (_ for _ in ()).throw(AssertionError("get")),
+            local_only=True,
+        )
+        rows = {
+            row["path"]: row
+            for row in result["local_selection"]["html_flags"]["files"]
+        }
+        self.assertFalse(rows["deck/base64.html"]["existing_base"])
+        self.assertFalse(rows["deck/proto.html"]["root_relative_fetch"])
+
 
 
 def _collect_history_off(hub, getter):

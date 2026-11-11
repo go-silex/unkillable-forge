@@ -103,7 +103,9 @@ Les chemins distants ont aussi été classés par provenance dans des manifestes
 
 ### Revue et livraison F01
 
-[PR #69](https://github.com/go-silex/silex-forge/pull/69), SHA initial `d7ba68a7fd9623167ac6697dd9cb7a37d87c9af2` : hooks complets réussis (36 Vitest, 189 Python, suites shell), CI Linux/macOS/Bash 3.2/Python 3.9 et scan secrets réussis. Les huit défauts P2 de cette revue ont été corrigés, avec traitement des ids `layout=tree` et des alias système macOS. **18 tests ciblés réussis**, puis CLI corrigé réellement exécuté sur le hub Unkillable : code 0, mêmes 1 052 fichiers / 159 slugs / 198 HTML ; `--local-only` ne prétend toujours pas avoir vérifié le live. La nouvelle revue indépendante et la nouvelle CI restent bloquantes.
+[PR #69](https://github.com/go-silex/silex-forge/pull/69). Le SHA `70649f742e8aec34415ab6bbb838017ed64f3771` a passé les hooks et toute la CI, dont macOS/Bash 3.2/Python 3.9 et le scan secrets, mais sa revue a encore bloqué sur trois défauts P2 : exemption de redaction par nom de clé, métadonnées de pagination mal typées, diagnostic des alias de répertoire. Ils ont été corrigés avec la frontière droite des flags ; une régression de retour de fonction introduite pendant cette correction a également été corrigée. **22 tests ciblés réussis**. La nouvelle revue indépendante et la nouvelle CI du SHA final, amendement inclus, restent requises.
+
+Exécution réelle finale du CLI local : code 0, 1 058 fichiers / 160 slugs / 199 HTML. Par rapport au smoke précédent : six chemins locaux supplémentaires, aucun retiré, aucun digest commun modifié. Ce delta n'est pas déclaré publié : le hub a évolué pendant les observations et le manifeste de bascule sera repris sous gel. Les rapports précédents restent conservés ; aucune donnée locale n'a été supprimée ou normalisée par F01.
 
 ### Rapprochement des droits — preuve encore ouverte
 
@@ -112,9 +114,15 @@ Les chemins distants ont aussi été classés par provenance dans des manifestes
 | Unkillable | 159 slugs | 10 | 76 | 9 | 64 |
 | Roxabi | 830 pages/slugs | 59 | 1 | 1 | 769 |
 
-Une absence dérive vers privé dans la branche page ; elle ne suffit **pas** à classer un fragment Roxabi : `fragmentOwners` peut l'autoriser via ses propriétaires. Les 828 HTML de l'arbre sont rapprochés sans chemin orphelin, mais restent ambigus tant que `asset-owners.json` n'est pas retrouvé ou reconstruit avec preuve. Cette métadonnée générée est donc une **entrée de sécurité**, pas un manque à reporter silencieusement après F01. Sa reconstruction ciblée en lecture seule est en cours ; pas de défaut public inventé. Les trois HTML du shell sont séparés des pages. Cinq ids `vis:` Unkillable ne rejoignent aucun HTML sélectionné et ne sont pas restaurés automatiquement.
+Une absence dérive vers privé dans la branche page ; elle ne suffit **pas** à classer un fragment Roxabi : `fragmentOwners` peut l'autoriser via ses propriétaires. Les 828 HTML de l'arbre sont rapprochés sans chemin orphelin, mais restent ambigus. Aucun `asset-owners.json` historique retrouvé dans les checkouts/caches locaux accessibles, le hub, les versions Syncthing, la corbeille, `/tmp` ou les caches M1 lisibles. Le laptop est inaccessible et un cache utilisateur M1 reste refusé. La reconstruction de 1 475 clés ne correspond pas à l'empreinte historique : elle n'est **pas** une autorité ACL. La cause précise de cet écart n'est pas prouvée. Les trois HTML du shell sont séparés des pages ; cinq ids `vis:` Unkillable ne rejoignent aucun HTML sélectionné.
 
-Preuve privée : `F01-selected-page-rights.json`, SHA-256 initial `552569a6642d0a6938f48142527efd25d25e2e67b8c2cb9faf993870beda319f`, explicitement incomplet. La fermeture F01 requiert le résultat de cette investigation en plus du SHA revu et de la CI verte.
+Preuves privées immuables : `F01-selected-page-rights.json`, SHA-256 `552569a6642d0a6938f48142527efd25d25e2e67b8c2cb9faf993870beda319f` ; `F01-selected-page-rights-reconciled.json`, SHA-256 `4fa1b5097f5d4513d0a3b38040a8e14fbb7fd1a6097daf5acf2d796d21ac115c`. Tous deux sont explicitement incomplets sur cette preuve de droits.
+
+La voie d'oracle HTTP historique est également fermée : l'URL exacte de l'ancien déploiement, issue de l'API déjà collectée, répond 403 avec `x-forge-origin-policy: pages-dev-blocked` sur la racine, une page connue publique et une page connue privée. Les HEAD n'ont suivi aucune redirection ni fourni de credential ; le refus précède les ACL. Aucun autre host ni contournement essayé. Le `site/manifest.json` encore présent localement est vide et son empreinte ne correspond à aucun des deux déploiements comparés ; il n'est pas une sauvegarde de droits.
+
+### Amendement validé — poursuite hors production
+
+L'opérateur a choisi `allow_nonproduction_with_hard_import_gate` : après fermeture du code F01, revue indépendante et CI verte du SHA final incluant cet amendement, F01 peut être accepté comme énumération complète avec incertitude de sécurité identifiée. F02 puis le développement hors production restent soumis à leurs autres dépendances. **Aucune importation du corpus historique**, validation de fidélité F10 ou migration de production tant que `UNRESOLVED_HISTORICAL_OWNERSHIP` reste ouvert ; F11/F12 sont bloqués transitivement. G0 et les autorisations distinctes de production sont inchangés. L'assistant poursuit la preuve, l'opérateur la valide ; une nouvelle politique de droits ne sera pas présentée comme équivalence historique.
 
 ## Lots et traçabilité
 
@@ -122,7 +130,7 @@ Preuve privée : `F01-selected-page-rights.json`, SHA-256 initial `552569a6642d0
 
 | Lot | État | Worktree / branche | PR / SHA / preuves ou blocage |
 |---|---|---|---|
-| F01 | Nouvelle revue/CI et propriété des fragments à fermer | `~/.omp/wt/silex-forge/docs-F01-inventory` ; `docs/F01-inventory` | [PR #69](https://github.com/go-silex/silex-forge/pull/69) ; correctifs : 18 tests + smoke réel verts ; 828 chemins Roxabi encore ambigus sur leurs propriétaires |
+| F01 | Code corrigé ; revue/CI finales attendues selon gate amendé | `~/.omp/wt/silex-forge/docs-F01-inventory` ; `docs/F01-inventory` | [PR #69](https://github.com/go-silex/silex-forge/pull/69) ; 22 tests + smoke réel verts ; G1b historique ouvert, sans attestation de droits préservés |
 | F02 | Non démarré | Convention du plan | Attend livraison F01 ; amendement nouveau canon approuvé, création non encore autorisée au SHA exact |
 | F03 | Non démarré | Convention du plan | Attend F01/F02 et preuve d'isolement du nouveau canon par rapport au dépôt legacy figé |
 | F06 | Non démarré | Convention du plan | Attend F02 |
