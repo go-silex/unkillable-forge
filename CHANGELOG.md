@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+### Added
+
+- `forge-inventory.py` writes a read-only inventory of one forge instance: local hub files, the canonical Pages deployment file map, optional production history, and KV visibility, share presence, and the snapshot anchor. It does not publish, reanchor, or mutate Cloudflare. Share values are not stored. Output is refused inside a git worktree. See `docs/forge-inventory.md`.
+
 ### Fixed
 
 - Forge now has a favicon on every page. `/favicon.ico` returned 404, so artifacts under `/a/` and `/s/`, `/login` and `404.html` showed no tab icon; only the catalogue linked `/images/favicon.png`. The site skeleton now ships `favicon.ico` (16/32/48), `apple-touch-icon.png` (180) and a new `images/favicon.png`, all drawn from the Unkillable Companies UC logo (it replaces the Silex stone). `/apple-touch-icon.png` joins the public shell in the middleware, and the catalogue, `/login` and `404.html` link the three icons. Artifacts need no change: browsers fall back to `/favicon.ico`.

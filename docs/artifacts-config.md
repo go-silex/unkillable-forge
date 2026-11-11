@@ -36,8 +36,12 @@ Publish = doctor exit `0` (hub config sound **and** deploy credentials present).
 `$artifacts_dir` (under `hub_root`, from `forge.config.json`) **must be shared
 between everyone who publishes to the same forge**. Every publish deploys a
 **full** Pages snapshot rebuilt from that local copy, so publishing from a copy
-that is behind **deletes** the artifacts the copy lacks — the live site has no
-other source of truth (the Pages API exposes no per-file manifest).
+that is behind **removes** the artifacts the copy lacks from the active
+deployment. Pages exposes a per-deployment file-hash map, but the legacy
+publisher does not reconcile its selected output against that map. The
+`snapshot:live` record is a hub fingerprint, not proof of uploaded files.
+Use [the read-only inventory](forge-inventory.md) to distinguish those sets;
+it neither downloads the deployed bytes nor repairs a missing local hub.
 
 How it is shared is the operator's choice: Google Drive, OneDrive, Dropbox,
 Syncthing, rclone against any remote, a network share, … The repo assumes no
