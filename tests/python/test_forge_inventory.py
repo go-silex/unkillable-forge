@@ -1211,6 +1211,32 @@ class BoundaryRegressionTests(InventoryCase):
             self.assertEqual(data, path.read_bytes())
             self.assertEqual(mtime, path.stat().st_mtime_ns)
 
+    def test_file_used_as_directory_is_broken_not_internal(self) -> None:
+        art = self.hub / "artifacts"
+        page = art / "page.html"
+        page.write_bytes(b"<html>page</html>")
+        sibling = art / "y.html"
+        sibling.write_bytes(b"<html>sibling</html>")
+        (art / "link.html").symlink_to("page.html/../y.html")
+        before = (sibling.read_bytes(), sibling.stat().st_mtime_ns)
+        result = inv.collect_inventory(
+            _config(self.hub, discover=False),
+            _env(),
+            lambda _path: (_ for _ in ()).throw(AssertionError("get")),
+            local_only=True,
+        )
+        by_path = {
+            str(row["path"]).replace("\\", "/"): row
+            for row in result["local_selection"]["files"]
+        }
+        row = by_path["link.html"]
+        self.assertTrue(row["symlink"])
+        self.assertEqual("broken", row["diagnostic"])
+        self.assertIsNone(row["sha256"])
+        self.assertNotEqual(_sha256(sibling.read_bytes()), row.get("sha256"))
+        self.assertEqual(before, (sibling.read_bytes(), sibling.stat().st_mtime_ns))
+
+
 
     def test_html_flag_right_context_is_not_committed_early(self) -> None:
         chunk = int(getattr(inv, "_CHUNK", 1024 * 1024))

@@ -119,6 +119,8 @@ La revue de `7b8a7cc` a trouvé une fin de pagination vide traitée comme un cur
 
 Rapports privés en mode 0600 : `unkillable-inventory-cli-api-proof.json`, SHA-256 `51808e94ea2d6208620e524f26668fa5f0dc2031658e3637f95595af8e1698e5` ; `roxabi-inventory-api-bound-namespace-proof.json`, SHA-256 `21c2f3fff9b055c8b7dc343e890b9a8976bd4fdc6a40180de9b6716967431182`. Nouvelle revue du SHA final et nouvelle CI encore requises.
 
+La revue de `da5675e` a ensuite identifié la différence de `Path.resolve(strict=False)` sur Python 3.13+. Le diagnostic valide désormais le chemin du lien avec `os.stat(..., dir_fd=root_fd, follow_symlinks=True)` — métadonnées seulement — puis le place avec une résolution stricte. Les cycles et chemins utilisant un fichier comme répertoire ne sont plus déclarés internes. Les **25 tests ciblés réussissent sous Python 3.12, 3.13 et 3.14**. Un nouveau parcours local réel des 228 liens Roxabi donne 225 internes, deux externes et un cassé ; rapport privé mode 0600, aucune lecture réseau dans ce dernier essai. Les preuves API précédentes restent distinctes ; la nouvelle revue et la CI du SHA final sont toujours exigées.
+
 ### Rapprochement des droits — preuve encore ouverte
 
 | Instance | Identifiants de grant sélectionnés | Publics | Partagés | Privés explicites | Valeur absente |
@@ -142,7 +144,7 @@ L'opérateur a choisi `allow_nonproduction_with_hard_import_gate` : après ferme
 
 | Lot | État | Worktree / branche | PR / SHA / preuves ou blocage |
 |---|---|---|---|
-| F01 | Correctifs finaux ; revue/CI attendues selon gate amendé | `~/.omp/wt/silex-forge/docs-F01-inventory` ; `docs/F01-inventory` | [PR #69](https://github.com/go-silex/silex-forge/pull/69) ; 24 tests et vrais parcours API verts ; divergence config/env Roxabi identifiée ; G1b ouvert |
+| F01 | Correction portable vérifiée ; revue/CI finales attendues | `~/.omp/wt/silex-forge/docs-F01-inventory` ; `docs/F01-inventory` | [PR #69](https://github.com/go-silex/silex-forge/pull/69) ; 25 tests sur trois Python, parcours API réels et 228 liens vérifiés ; G1b ouvert |
 | F02 | Non démarré | Convention du plan | Attend livraison F01 ; amendement nouveau canon approuvé, création non encore autorisée au SHA exact |
 | F03 | Non démarré | Convention du plan | Attend F01/F02 et preuve d'isolement du nouveau canon par rapport au dépôt legacy figé |
 | F06 | Non démarré | Convention du plan | Attend F02 |

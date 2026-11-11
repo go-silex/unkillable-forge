@@ -326,16 +326,27 @@ def _root_bound(root_fd, root_path):
 
 
 def _classify_link(root_fd, root_path, rel):
-    """Classify a symlink from the OS canonical path.
+    """Classify a symlink from the kernel stat of the original link.
 
-    Path.resolve expands each symlink component before applying '..'. This is
-    diagnostic metadata only: the target is not scanned or hashed. Enumeration
-    stays on the no-follow file-descriptor walk.
+    os.stat on that link, from the bound root descriptor, is the validity
+    source: the kernel reports ELOOP, ENOENT, and ENOTDIR on every version.
+    Path.resolve(strict=True) then places a path the kernel accepted. Neither
+    call scans or hashes the target. Enumeration stays on the no-follow walk.
     """
     if not _root_bound(root_fd, root_path):
         return "external"
     try:
-        resolved = (Path(root_path) / rel).resolve(strict=False)
+        os.stat(rel, dir_fd=root_fd, follow_symlinks=True)
+    except RuntimeError:
+        return "cycle"
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return "cycle"
+        return "broken"
+    if not _root_bound(root_fd, root_path):
+        return "external"
+    try:
+        resolved = (Path(root_path) / rel).resolve(strict=True)
     except RuntimeError:
         return "cycle"
     except OSError as exc:
@@ -348,14 +359,6 @@ def _classify_link(root_fd, root_path, rel):
         resolved.relative_to(Path(root_path))
     except ValueError:
         return "external"
-    try:
-        resolved.lstat()
-    except FileNotFoundError:
-        return "broken"
-    except OSError as exc:
-        if exc.errno == errno.ELOOP:
-            return "cycle"
-        return "broken"
     return "internal"
 
 
