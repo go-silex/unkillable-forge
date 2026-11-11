@@ -1,0 +1,177 @@
+# Convergence Forge — état d'exécution
+
+Plan : [forge-convergence-plan.md](forge-convergence-plan.md). Dernière mise à jour : 2026-11-11. Ce suivi ne constitue pas une autorisation de mutation de production.
+
+## Autorisations et invariants
+
+- Autorisation opérateur obtenue pour commits, pushes, PR et merges des lots du plan, uniquement après revue indépendante du SHA final et CI verte.
+- Renommage, passage privé, migration/bascule de production, suppression de ressources et retrait de credentials : confirmations distinctes encore requises.
+- Périmètre Roxabi confirmé : préserver les pages de l'ancien déploiement arbre, leurs ressources nécessaires et les publications actuelles, avec URLs et droits conservés.
+- Amendement F02 confirmé : nouveau canon public avec ascendance Silex ; ancien dépôt gardé à son URL et figé jusqu'à archivage final. Création du dépôt encore soumise au SHA exact et au runbook revu.
+- Checkouts principaux et changements utilisateur préservés. Le document initial reste dans son worktree ; une copie est incluse dans F01 pour son versionnement.
+- Toute écriture de code/documentation se fait en worktree dédié. Les inventaires de corpus et preuves privées restent hors Git ; aucune valeur de partage n'est publiée.
+
+## F01 — observations réalisées en lecture seule
+
+### Relevés initial puis réseau du collecteur
+
+| Instance | Relevé | Fichiers du déploiement | HTML | Pages du snapshot KV | Catalogue authentifié |
+|---|---|---:|---:|---:|---|
+| Unkillable | Initial F01 | 684 | 201 | 159 | 159 entrées |
+| Unkillable | CLI réel après corrections | 687 | 202 | 160 | Non relu |
+| Roxabi | Initial F01 | 16 | 5 | 828 | 0 entrée |
+| Roxabi | API après vérification du binding | 16 | 5 | 828 | Non relu |
+
+Les colonnes mesurent des ensembles différents. Le snapshot est un registre d'empreintes du hub, pas une preuve de présence en production. Un catalogue vide n'est pas assimilé à un site vide.
+
+Source : GET Cloudflare du projet correspondant exactement au domaine configuré, `canonical_deployment`, puis GET `/accounts/{account}/pages/projects/{project}/deployments/{canonical_id}/files`. Ce dernier retourne effectivement `result.files` (chemin → empreinte opaque). L'affirmation historique « pas de manifeste par fichier via l'API Pages » est invalidée par cette réponse observée ; le format de l'empreinte n'est pas présumé.
+
+### Historique et métadonnées
+
+| Observation | Unkillable | Roxabi |
+|---|---:|---:|
+| Déploiements de production listés et manifestes lus | 548 / 548 | 183 / 183 |
+| Clés KV listées et valeurs lues | 177 / 177 | 63 / 63 |
+| Clés `vis:` | 100 | 61 |
+| Clés `share:` | 76 | 1 |
+| Clés `vis:` portant `metadata.v` | 0 | 61 |
+
+Les valeurs `vis:` restent l'autorité de visibilité de l'ancien système ; l'absence de `metadata.v` n'est ni une absence de page ni une autorisation. Les secrets `share:` ne sont pas persistés dans les rapports : présence, longueur et digest seulement. Ces lectures ne sont pas un snapshot transactionnel et seront reconsolidées sous gel avant migration.
+
+### Écart de déploiement Roxabi — gate supplémentaire
+
+| Ensemble | Fichiers |
+|---|---:|
+| Déploiement du 2026-09-23 à 18:59 UTC | 16 264 |
+| Déploiement du 2026-11-11 à 16:22 UTC (1.1.5) | 16 |
+| Chemins retirés entre les deux | 16 255 |
+| Parmi les chemins retirés : HTML | 828 |
+
+Le mécanisme est identifié dans les sources : `--rebuild-index` appelle le builder slug-first, tandis que `layout:tree` fait empreinter le hub entier au garde-fou. Le déploiement de sécurité a corrigé la redirection mais sa vérification n'a pas couvert la préservation de cet arbre. Cela établit une réduction du contenu déployé, pas une destruction démontrée des copies locales ou historiques.
+
+**Ajustement adopté :** le corpus à préserver inclut l'arbre précédent et les publications actuelles. Les 828 chemins HTML retirés ont été rapprochés de leurs sources et sont reconstructibles à l'identique de l'upload historique. Aucune restauration ni re-publication automatique ; un éventuel correctif de récupération conserve la correction 1.1.5 et requiert sa propre PR et l'autorisation de production.
+
+### Vérifications HTTP réalisées
+
+- GET authentifiés des deux catalogues : 200, identité équipe reconnue.
+- GET et SHA-256 des réponses 200 accessibles des chemins courants ; redirections `.html` suivies vers leur URL canonique, sans page de login.
+- Les réponses 404 sur fichiers internes et les redirections sont enregistrées distinctement, pas converties en fichiers manquants ou en succès vide.
+- Aucun publish, reanchor, rendu OG, setup, mutation KV/Access/DNS/Shlink ou déploiement exécuté par F01.
+
+### Inventaire local et reconstruction vérifiés
+
+| Instance | Fichiers réguliers | Octets réguliers | HTML | Liens symboliques |
+|---|---:|---:|---:|---:|
+| Unkillable | 1 052 | 250 918 807 | 198 | 0 |
+| Roxabi | 26 633 | 10 857 231 074 | 843 | 228 |
+
+L'énumération et le SHA-256 des fichiers réguliers sont complets, sans entrée illisible. Les symlinks ne sont pas suivis dans cet inventaire : Roxabi comprend deux liens hors racine et un lien pendant. Les candidats historiques font l'objet d'un rapprochement distinct, avec lecture bornée du seul HTML externe explicitement conservé ; aucune exploration de son répertoire cible.
+
+Le hash d'upload a été lu dans les bundles Wrangler installés, puis calibré contre huit fichiers live identiques : BLAKE3 de `base64(octets) + extension`, tronqué aux 32 premiers caractères hexadécimaux. Ce calcul ne devient pas une dépendance ni une hypothèse implicite du CLI générique.
+
+| Reconstruction du déploiement Roxabi précédent | Fichiers identiques à son manifeste |
+|---|---:|
+| Octets locaux directs | 15 592 |
+| HTML après injection historique pure de la barre de partage | 334 |
+| Miniatures régénérées avec les paramètres historiques + HTML externe transformé | 336 |
+| Total reproductible | 16 262 / 16 264 |
+
+Les **828 HTML retirés sont tous couverts**. Les deux éléments restants sont `manifest.json` et `asset-owners.json`, métadonnées générées à reconstruire selon le nouveau modèle ; ils ne sont pas déclarés identiques. Aucune exécution de JavaScript d'artefact ni écriture des sources n'a été nécessaire.
+
+Les loaders incluent des `fetch` root-relative et des références d'hôte absolues : le pinning reste à prouver sur le corpus réel en F05. Le plus gros fichier régulier local Roxabi dépasse 400 Mo ; il ne fait pas partie automatiquement du corpus historique approuvé. Les candidats historiques effectivement comparés ne dépassent pas 7 997 944 octets.
+
+### Shortlinks et parc de publishers
+
+- Shlink : 189 liens listés ; 80 pointent vers les deux domaines Forge Unkillable actuels/historiques. Listing complet obtenu via GET backend authentifié par SSH, avec le credential déjà configuré dans l'UI ; aucun secret de destination persisté. Le chemin HTTP public via urllib a répondu 403 : ce listing ne prouve pas le fonctionnement de l'API publique.
+- Poste courant : Claude Code 2.1.322, Codex 0.163.0, OMP 18.18.8. Les versions installées de plugins diffèrent entre harnesses ; la présence dans un registre n'est pas une preuve de chargement.
+- D'anciens publishers Silex 1.7.3/1.3.0 clonent toujours `main` et ignorent le pin local prévu initialement. Des postes/utilisateurs restent non observables ; les comptes VPS inspectés en root n'ont pas de config/credentials Forge, ce qui ne permet pas de conclure pour leurs autres machines.
+- **Correction de F02 validée :** créer le nouveau canon avec l'ascendance publique approuvée, laisser l'ancien moteur à son URL figée. L'indisponibilité de postes ne bloque plus F03, mais le confinement serveur de leurs anciens droits reste une gate obligatoire de bascule.
+
+Les preuves machine détaillées restent privées, hors Git. Vérification ciblée du CLI : **9 tests Python réussis** ; exécution réelle `--local-only` sur le hub Unkillable : code 0, 1 052 fichiers, 159 slugs, 198 candidats HTML, rapport mode 0600. Ce mode reste explicitement incomplet pour le live. Une erreur de détection de pagination des projets sans `id` a été corrigée ; aucune page distante n'est sautée pour rendre le test vert. F01 attend encore sa PR, la revue indépendante du SHA final et la CI requise.
+
+Référence scellée des preuves privées : index `F01-evidence-sha256.txt`, SHA-256 `aa89f76ec569e126129112a048be5d5c86424a2460c6417b21869c898ecfd74d`. Les fichiers de preuve et l'index sont en mode 0600, dans un répertoire privé hors worktree ; aucun contenu de corpus ni secret de partage dans cette PR.
+
+### Cookies et cohérence à préserver
+
+| Source courante | Observation relue dans le code | Conséquence pour la bascule |
+|---|---|---|
+| Access des deux moteurs | `CF_Authorization` lu, non émis par le moteur ; JWT vérifié sur signature, issuer, audience, `exp`/`nbf` avec 30 s de tolérance | Ne pas présenter les cookies comme un export de droits ; les paramètres d'émission restent gérés par Access |
+| Roxabi `forge_share` | Session, host-only, `HttpOnly; Secure; SameSite=Lax; Path=/` ; valeur vérifiée à nouveau contre `vis:shared` et la clé KV | Préserver le domaine et les clés ne dispense pas de refaire l'autorisation à chaque requête ; un ancien cookie ne doit pas réactiver un grant révoqué |
+| Lectures KV | Aucune option `cacheTtl` dans les deux moteurs ; valeur exacte pour l'accès, metadata seulement pour le catalogue Roxabi | Le cache Worker par défaut est éventuellement cohérent ; ni 60 s ni le commentaire de list-lag ~10 s ne prouvent la fraîcheur REST |
+
+Sources : Silex `functions/_lib/access.ts` (contrôles JWT, `visibility`), Roxabi `functions/s/[[path]].ts:41-42`, `functions/_middleware.ts:148-167`, `functions/_lib/access.ts:298-331`. Le cache JWKS d'isolate dure une heure et n'est pas une autorité de visibilité. La méthode de capture finale exige fermeture serveur des writers, drainage et preuve de la dernière mutation ; faute de cette preuve, F10/cutover restent bloqués et aucun délai fixe ne les valide.
+
+Les chemins distants ont aussi été classés par provenance dans des manifestes privés dérivés : 17 287 chemins historiques Unkillable, 30 581 Roxabi. Candidats de préservation : 684 chemins courants Unkillable et l'union précédente + courante Roxabi, **16 271 chemins dont 833 HTML**. Les chemins d'histoires plus anciennes ne sont pas automatiquement restaurés ; les fichiers locaux seuls ne sont pas automatiquement publiés. Cette classification d'ensembles ne remplace ni la résolution page/asset/ACL du CLI corrigé ni le manifeste final sous gel.
+
+### Revue et livraison F01
+
+[PR #69](https://github.com/go-silex/silex-forge/pull/69). Le SHA `70649f742e8aec34415ab6bbb838017ed64f3771` a passé les hooks et toute la CI, dont macOS/Bash 3.2/Python 3.9 et le scan secrets, mais sa revue a encore bloqué sur trois défauts P2 : exemption de redaction par nom de clé, métadonnées de pagination mal typées, diagnostic des alias de répertoire. Ils ont été corrigés avec la frontière droite des flags ; une régression de retour de fonction introduite pendant cette correction a également été corrigée. **22 tests ciblés réussis**. La nouvelle revue indépendante et la nouvelle CI du SHA final, amendement inclus, restent requises.
+
+Exécution réelle finale du CLI local : code 0, 1 058 fichiers / 160 slugs / 199 HTML. Par rapport au smoke précédent : six chemins locaux supplémentaires, aucun retiré, aucun digest commun modifié. Ce delta n'est pas déclaré publié : le hub a évolué pendant les observations et le manifeste de bascule sera repris sous gel. Les rapports précédents restent conservés ; aucune donnée locale n'a été supprimée ou normalisée par F01.
+
+### Vérification réseau après les dernières corrections
+
+La revue de `7b8a7cc` a trouvé une fin de pagination vide traitée comme un curseur suivant et une résolution lexicale incorrecte de `..` après alias. La fin `cursor: ""` est maintenant traitée comme une fin ; la résolution de diagnostic utilise les règles de `Path.resolve`, sans scanner ni hasher les répertoires externes. **24 tests ciblés ont réussi**, incluant ces deux régressions.
+
+- Unkillable : CLI réellement exécuté avec `--without-history`, `complete: true`, aucune issue ; toutes les valeurs KV demandées lues. Le mode local seul n'est plus l'unique preuve d'intégration.
+- Roxabi : la commande normale refuse correctement une divergence de namespace entre config et env. Un GET du projet de production prouve que `SHARES` correspond à l'env et non à la config. Une sélection **explicite en mémoire** de ce binding vérifié a ensuite exercé le collecteur complet : `complete: true`, aucune issue, valeurs KV lues. Aucun fichier utilisateur modifié.
+- Ce dernier point est un **contournement diagnostique**, pas une correction de configuration : la commande non modifiée reste bloquée. Il disparaîtra avec une configuration corrigée de façon approuvée ou le remplacement du publisher legacy. Les deux essais ont explicitement sauté l'historique, déjà collecté séparément ; ils ne prétendent pas refaire un snapshot transactionnel.
+
+Rapports privés en mode 0600 : `unkillable-inventory-cli-api-proof.json`, SHA-256 `51808e94ea2d6208620e524f26668fa5f0dc2031658e3637f95595af8e1698e5` ; `roxabi-inventory-api-bound-namespace-proof.json`, SHA-256 `21c2f3fff9b055c8b7dc343e890b9a8976bd4fdc6a40180de9b6716967431182`. Nouvelle revue du SHA final et nouvelle CI encore requises.
+
+La revue de `da5675e` a ensuite identifié la différence de `Path.resolve(strict=False)` sur Python 3.13+. Le diagnostic valide désormais le chemin du lien avec `os.stat(..., dir_fd=root_fd, follow_symlinks=True)` — métadonnées seulement — puis le place avec une résolution stricte. Les cycles et chemins utilisant un fichier comme répertoire ne sont plus déclarés internes. Les **25 tests ciblés réussissent sous Python 3.12, 3.13 et 3.14**. Un nouveau parcours local réel des 228 liens Roxabi donne 225 internes, deux externes et un cassé ; rapport privé mode 0600, aucune lecture réseau dans ce dernier essai. Les preuves API précédentes restent distinctes ; la nouvelle revue et la CI du SHA final sont toujours exigées.
+
+### Rapprochement des droits — preuve encore ouverte
+
+| Instance | Identifiants de grant sélectionnés | Publics | Partagés | Privés explicites | Valeur absente |
+|---|---:|---:|---:|---:|---:|
+| Unkillable | 159 slugs | 10 | 76 | 9 | 64 |
+| Roxabi | 830 pages/slugs | 59 | 1 | 1 | 769 |
+
+Une absence dérive vers privé dans la branche page ; elle ne suffit **pas** à classer un fragment Roxabi : `fragmentOwners` peut l'autoriser via ses propriétaires. Les 828 HTML de l'arbre sont rapprochés sans chemin orphelin, mais restent ambigus. Aucun `asset-owners.json` historique retrouvé dans les checkouts/caches locaux accessibles, le hub, les versions Syncthing, la corbeille, `/tmp` ou les caches M1 lisibles. Le laptop est inaccessible et un cache utilisateur M1 reste refusé. La reconstruction de 1 475 clés ne correspond pas à l'empreinte historique : elle n'est **pas** une autorité ACL. La cause précise de cet écart n'est pas prouvée. Les trois HTML du shell sont séparés des pages ; cinq ids `vis:` Unkillable ne rejoignent aucun HTML sélectionné.
+
+Preuves privées immuables : `F01-selected-page-rights.json`, SHA-256 `552569a6642d0a6938f48142527efd25d25e2e67b8c2cb9faf993870beda319f` ; `F01-selected-page-rights-reconciled.json`, SHA-256 `4fa1b5097f5d4513d0a3b38040a8e14fbb7fd1a6097daf5acf2d796d21ac115c`. Tous deux sont explicitement incomplets sur cette preuve de droits.
+
+La voie d'oracle HTTP historique est également fermée : l'URL exacte de l'ancien déploiement, issue de l'API déjà collectée, répond 403 avec `x-forge-origin-policy: pages-dev-blocked` sur la racine, une page connue publique et une page connue privée. Les HEAD n'ont suivi aucune redirection ni fourni de credential ; le refus précède les ACL. Aucun autre host ni contournement essayé. Le `site/manifest.json` encore présent localement est vide et son empreinte ne correspond à aucun des deux déploiements comparés ; il n'est pas une sauvegarde de droits.
+
+### Amendement validé — poursuite hors production
+
+L'opérateur a choisi `allow_nonproduction_with_hard_import_gate` : après fermeture du code F01, revue indépendante et CI verte du SHA final incluant cet amendement, F01 peut être accepté comme énumération complète avec incertitude de sécurité identifiée. F02 puis le développement hors production restent soumis à leurs autres dépendances. **Aucune importation du corpus historique**, validation de fidélité F10 ou migration de production tant que `UNRESOLVED_HISTORICAL_OWNERSHIP` reste ouvert ; F11/F12 sont bloqués transitivement. G0 et les autorisations distinctes de production sont inchangés. L'assistant poursuit la preuve, l'opérateur la valide ; une nouvelle politique de droits ne sera pas présentée comme équivalence historique.
+
+## Lots et traçabilité
+
+### Vague A
+
+| Lot | État | Worktree / branche | PR / SHA / preuves ou blocage |
+|---|---|---|---|
+| F01 | Correction portable vérifiée ; revue/CI finales attendues | `~/.omp/wt/silex-forge/docs-F01-inventory` ; `docs/F01-inventory` | [PR #69](https://github.com/go-silex/silex-forge/pull/69) ; 25 tests sur trois Python, parcours API réels et 228 liens vérifiés ; G1b ouvert |
+| F02 | Non démarré | Convention du plan | Attend livraison F01 ; amendement nouveau canon approuvé, création non encore autorisée au SHA exact |
+| F03 | Non démarré | Convention du plan | Attend F01/F02 et preuve d'isolement du nouveau canon par rapport au dépôt legacy figé |
+| F06 | Non démarré | Convention du plan | Attend F02 |
+
+### Vague B
+
+| Lot | État | Dépendances bloquantes |
+|---|---|---|
+| F04 | Non démarré | F03, F06 |
+| F05 | Non démarré | F03, F04 |
+| F07 | Non démarré | F04, F06 |
+| F08 | Non démarré | F04, F05, F06, F07 ; worktrees consommateurs distincts |
+
+### Vague C
+
+| Lot | État | Dépendances bloquantes |
+|---|---|---|
+| F09 | Non démarré | F04, F05 |
+| F10 | Non démarré | F04, F05 |
+| F11 | Non démarré | F05, F07, F08, F09, F10 |
+| F12 | Non démarré | F11 ; installation neuve via catalogues ; confirmation passage privé |
+
+### Vague D
+
+| Lot | État | Dépendances bloquantes |
+|---|---|---|
+| F13 | Non démarré | F12 ; PR d'opération et autorisation Roxabi |
+| F14 | Non démarré | F13 accepté ; PR d'opération et autorisation Unkillable |
+| F15 | Non démarré | F13/F14 ; clôture du rollback ; confirmations de retrait |
+| F16 | Non démarré | F15 ; exercice de synchronisation upstream |

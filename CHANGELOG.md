@@ -9,8 +9,14 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ## [Unreleased]
 
+### Added
+
+- `forge-inventory.py` writes a read-only inventory of one forge instance: local hub files, the canonical Pages deployment file map, optional production history, and KV visibility, share presence, and the snapshot anchor. It does not publish, reanchor, or mutate Cloudflare. Share values are not stored. A listed KV 404 is absence, not presence. `layout` `tree` records HTML path page ids; the default layout keeps the first directory. The configured root is resolved once, then opened without following. Output is refused inside a git worktree, including when the output parent is swapped for a symlink. See `docs/forge-inventory.md`.
+
 ### Fixed
 
+- `forge-inventory.py` treats an empty KV list cursor as the end of the list and does not request `?cursor=`. Symlink classification stats the original link from the bound root before `Path.resolve(strict=True)`, so a loop is `cycle` and a path through a non-directory is `broken` on every Python version. A missing target is `broken` even when that target is outside the root. File bytes are still read without following symlinks.
+- `forge-inventory.py` no longer treats a field name as a redaction exemption, a present invalid KV cursor as the end of the list, an internal directory alias as a broken link, or a chunk-end regex match as confirmed right context.
 - Forge now has a favicon on every page. `/favicon.ico` returned 404, so artifacts under `/a/` and `/s/`, `/login` and `404.html` showed no tab icon; only the catalogue linked `/images/favicon.png`. The site skeleton now ships `favicon.ico` (16/32/48), `apple-touch-icon.png` (180) and a new `images/favicon.png`, all drawn from the Unkillable Companies UC logo (it replaces the Silex stone). `/apple-touch-icon.png` joins the public shell in the middleware, and the catalogue, `/login` and `404.html` link the three icons. Artifacts need no change: browsers fall back to `/favicon.ico`.
 - The `forge-publish` skill runs `publish.sh` through `bash "$S"` in every example, like it already runs `forge-doctor.sh`. A read-only skill snapshot (Hermes protected skill sources, files in mode 0444) drops the exec bit, so a direct `"$S"` call failed with `Permission denied` (exit 126). Plugin installs that keep the bit behave as before.
 

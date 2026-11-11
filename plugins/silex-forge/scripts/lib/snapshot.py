@@ -9,14 +9,13 @@ A hub copy that is behind therefore deploys a site missing the artifacts a
 teammate published in the meantime, and Pages replaces the whole site, so
 those artifacts silently disappear from production.
 
-The Cloudflare Pages API exposes no per-file manifest for a deployment (the
-project payload carries `canonical_deployment` / `latest_deployment` and nothing
-that lists files), so we cannot ask Cloudflare what is live. Instead we keep our
-own fingerprint record in the existing KV namespace and anchor its
-trustworthiness on the live deployment id: a record written for a different
-deployment id no longer describes what is live (rollback, or a deploy made
-out of band from the dashboard), so compare refuses (exit 4) until
-`--allow-unverified`. Unexpected removals still outrank that (exit 3).
+The Pages API's /deployments/{id}/files endpoint exposes an opaque file-hash
+map. This legacy guard does not read that map: it keeps its own hub fingerprint
+record in KV and compares the record's deployment id with latest_deployment.
+A different id makes compare refuse (exit 4) until --allow-unverified;
+unexpected removals still outrank that (exit 3). A matching id is NOT proof
+that those local slugs were uploaded: the tree/slug selector can diverge.
+Use forge-inventory.py to inspect the actual deployment manifest separately.
 
 Subcommands -- JSON on stdout, human-readable lines on stderr:
 
