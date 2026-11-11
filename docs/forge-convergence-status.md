@@ -128,11 +128,21 @@ La revue de `da5675e` a ensuite identifié la différence de `Path.resolve(stric
 | Unkillable | 159 slugs | 10 | 76 | 9 | 64 |
 | Roxabi | 830 pages/slugs | 59 | 1 | 1 | 769 |
 
-Une absence dérive vers privé dans la branche page ; elle ne suffit **pas** à classer un fragment Roxabi : `fragmentOwners` peut l'autoriser via ses propriétaires. Les 828 HTML de l'arbre sont rapprochés sans chemin orphelin, mais restent ambigus. Aucun `asset-owners.json` historique retrouvé dans les checkouts/caches locaux accessibles, le hub, les versions Syncthing, la corbeille, `/tmp` ou les caches M1 lisibles. Le laptop est inaccessible et un cache utilisateur M1 reste refusé. La reconstruction de 1 475 clés ne correspond pas à l'empreinte historique : elle n'est **pas** une autorité ACL. La cause précise de cet écart n'est pas prouvée. Les trois HTML du shell sont séparés des pages ; cinq ids `vis:` Unkillable ne rejoignent aucun HTML sélectionné.
+Une absence dérive vers privé dans la branche page ; elle ne suffit **pas** à classer un fragment Roxabi : `fragmentOwners` peut l'autoriser via ses propriétaires. Les 828 HTML de l'arbre sont rapprochés sans chemin orphelin, mais ces observations ne certifient pas les parcours fragment/asset. Aucun `asset-owners.json` historique retrouvé dans les checkouts/caches locaux accessibles, le hub, les versions Syncthing, la corbeille, `/tmp` ou les caches M1 lisibles. Le laptop est inaccessible et un cache utilisateur M1 reste refusé. La reconstruction de 1 475 clés ne correspond pas à l'empreinte historique : elle n'est **pas** une autorité ACL. La cause précise de cet écart n'est pas prouvée. Les trois HTML du shell sont séparés des pages ; cinq ids `vis:` Unkillable ne rejoignent aucun HTML sélectionné.
 
 Preuves privées immuables : `F01-selected-page-rights.json`, SHA-256 `552569a6642d0a6938f48142527efd25d25e2e67b8c2cb9faf993870beda319f` ; `F01-selected-page-rights-reconciled.json`, SHA-256 `4fa1b5097f5d4513d0a3b38040a8e14fbb7fd1a6097daf5acf2d796d21ac115c`. Tous deux sont explicitement incomplets sur cette preuve de droits.
 
 La voie d'oracle HTTP historique est également fermée : l'URL exacte de l'ancien déploiement, issue de l'API déjà collectée, répond 403 avec `x-forge-origin-policy: pages-dev-blocked` sur la racine, une page connue publique et une page connue privée. Les HEAD n'ont suivi aucune redirection ni fourni de credential ; le refus précède les ACL. Aucun autre host ni contournement essayé. Le `site/manifest.json` encore présent localement est vide et son empreinte ne correspond à aucun des deux déploiements comparés ; il n'est pas une sauvegarde de droits.
+
+Une analyse hors ligne supplémentaire retire uniquement la borne de quatre propriétaires du générateur historique en mémoire, sans changer ses sources ni la production :
+
+| Objet | Borne conditionnelle aux inputs actuels |
+|---|---|
+| HTML arbre sélectionnés | 335 documents et 493 fragments |
+| Ensembles de propriétaires | 1 480 ; quatre dépassent la borne historique ; aucun ensemble de fragment ne la dépasse |
+| Accès anonyme des ressources non HTML | Un seul cas indéterminé lié à l'ordre ; chemin conservé uniquement dans la preuve privée |
+
+Ces bornes **ne ferment pas G1b** : les références brutes historiques ne sont pas prouvées identiques par la seule égalité du HTML final après injection ; le générateur peut aussi lire hors du payload déployé. Cinq ressources candidates ne figurent pas dans le manifeste historique et ne sont donc pas ajoutées au corpus. Pour les assets partagés, l'union des propriétaires n'est pas l'ACL effective : `pageReferences` intervient également ; présence/empreinte d'une clé ne valide pas un cookie. Une différence d'empreinte JSON ne démontre pas à elle seule une différence de permissions. Preuve privée `F01-owner-ambiguity-bounds.json`, mode 0600, SHA-256 `495aebc8860dfdc6293ccdba0b91278fac26f5b1398ef5b6a566bfc1b8875197`.
 
 ### Amendement validé — poursuite hors production
 
@@ -144,8 +154,8 @@ L'opérateur a choisi `allow_nonproduction_with_hard_import_gate` : après ferme
 
 | Lot | État | Worktree / branche | PR / SHA / preuves ou blocage |
 |---|---|---|---|
-| F01 | Correction portable vérifiée ; revue/CI finales attendues | `~/.omp/wt/silex-forge/docs-F01-inventory` ; `docs/F01-inventory` | [PR #69](https://github.com/go-silex/silex-forge/pull/69) ; 25 tests sur trois Python, parcours API réels et 228 liens vérifiés ; G1b ouvert |
-| F02 | Non démarré | Convention du plan | Attend livraison F01 ; amendement nouveau canon approuvé, création non encore autorisée au SHA exact |
+| F01 | **Livré**, sous l'amendement de gate accepté | `~/.omp/wt/silex-forge/docs-F01-inventory` ; `docs/F01-inventory` | [PR #69](https://github.com/go-silex/silex-forge/pull/69), head revu `7ecc82b80d4ac7796aa2f128fd71405be44a585d`, merge `8440d7009ed771fcab2c64642048e96afa9b3a8c` ; [CI verte](https://github.com/go-silex/silex-forge/actions/runs/43094058384) et [secret scan vert](https://github.com/go-silex/silex-forge/actions/runs/43094058552) ; G1b ouvert |
+| F02 | Préparation du runbook et désarmement explicite des writers CI | `~/.omp/wt/silex-forge/chore-F02-canonical-name` ; `chore/F02-canonical-name`, base `8440d70` | PR à préparer ; revue, CI et G0 au SHA exact requis ; ni gel GitHub ni création exécutés |
 | F03 | Non démarré | Convention du plan | Attend F01/F02 et preuve d'isolement du nouveau canon par rapport au dépôt legacy figé |
 | F06 | Non démarré | Convention du plan | Attend F02 |
 

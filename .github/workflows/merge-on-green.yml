@@ -18,6 +18,7 @@
 #   4. PR mergeable, not draft
 #
 # Merge method: merge commit.
+# The entire job is disabled unless vars.FORGE_AUTOMERGE_ENABLED is 'true'.
 # Without vars.CI_APP_CLIENT_ID + secrets.CI_APP_PRIVATE_KEY → evaluate-only (manual merge).
 name: Merge on Green
 
@@ -48,6 +49,7 @@ concurrency:
 jobs:
   merge-on-green:
     name: merge-on-green
+    if: vars.FORGE_AUTOMERGE_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

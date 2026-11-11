@@ -15,6 +15,11 @@ Publish decks, talks, and guides behind Cloudflare Access. Share unlisted links 
 | **Deploy** | Cloudflare Pages Direct Upload (`wrangler`) from your laptop |
 | **Plugin** | `silex-forge` — `forge-publish` · `forge-setup` |
 
+Repository transition: `go-silex/silex-forge` is the legacy source for existing
+clients; `go-silex/unkillable-forge` is the planned canonical repository, not
+yet asserted to exist. Plugin identity and distribution stay unchanged until
+F08. See the [transition runbook](docs/forge-canonical-transition.md).
+
 ---
 
 ## Why this exists

@@ -213,10 +213,10 @@ jobs:
       - name: Python unit tests on the oldest supported interpreter
         run: python3 -m unittest discover -s tests/python -p 'test_*.py' -v
 
-  # Suite runs on every push; release is gated on its conclusion.
+  # Suite runs on every push; release additionally requires explicit opt-in.
   release:
     needs: [check, test, test-os, test-bash32, test-py39]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.FORGE_RELEASES_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write

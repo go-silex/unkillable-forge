@@ -63,8 +63,9 @@ deploy:
   secrets_cmd: ""
 
 # Descriptive only — no dev-core skill releases this repo. Tagging is
-# scripts/release-plugin.sh, run by the ci.yml `release` job on merge to main
-# (Convention A, silex-forge/vX.Y.Z), with versions stamped across 9 manifests +
+# scripts/release-plugin.sh, run by the ci.yml `release` job on push to main
+# only when vars.FORGE_RELEASES_ENABLED == 'true' (Convention A,
+# silex-forge/vX.Y.Z), with versions stamped across 9 manifests +
 # CHANGELOG by scripts/check_plugin_versions.py ⇒ version_files stays empty.
 #
 # `model` is omitted on purpose. `trunk` would make /R-dev-checkup emit a
