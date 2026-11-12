@@ -12,12 +12,12 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 ### Added
 
 - `forge-inventory.py` writes a read-only inventory of one forge instance: local hub files, the canonical Pages deployment file map, optional production history, and KV visibility, share presence, and the snapshot anchor. It does not publish, reanchor, or mutate Cloudflare. Share values are not stored. A listed KV 404 is absence, not presence. `layout` `tree` records HTML path page ids; the default layout keeps the first directory. The configured root is resolved once, then opened without following. Output is refused inside a git worktree, including when the output parent is swapped for a symlink. See `docs/forge-inventory.md`.
-- F02 direct-seed transition runbook preserves the old engine unchanged, creates the new public canonical repository with Actions disabled, and publishes only the privately audited identifier-clean seed. Source CI precedes publication; exact-seed CI on the destination, provenance and registry delivery gate F02 acceptance. Signature loss and all operations require explicit approval; production and historical imports remain separate.
+- F02 transition records the public canonical repository created from the privately audited direct seed on `main`, without modifying legacy refs. The new engine is not yet implemented; plugin distribution stays legacy until F08. Provenance and registry PR delivery still gate F02; production migration and historical imports require separate approval.
 
 ### Changed
 
 - Automatic release publication and Merge on Green now require explicit repository opt-in. The defaults leave both writers disabled while preserving PR CI; F02 verifies repository-level false overrides before bootstrap to prevent inherited organization variables enabling them.
-- The existing CI workflow accepts manual dispatch so an approved generated seed ref can run the same required jobs at its exact SHA, without a second development PR.
+- The existing CI workflow accepts manual dispatch; the canonical seed on `main` was dispatched at exact SHA `8d0b2e5330153edf2925160132b9bead908444a0`. The transition runbook records its actual CI, repository guards and engine-first migration boundaries.
 
 ### Fixed
 
