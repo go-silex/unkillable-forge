@@ -27,7 +27,7 @@ not purge the existing public legacy history or its copies.
 | Input | Required evidence |
 |---|---|
 | `OLD=go-silex/silex-forge`, `NEW=go-silex/unkillable-forge` | Authenticated actor, organization ownership and public visibility freshly verified. A prior lookup did not resolve `NEW` and clone paths were absent; neither proves current availability. A 404 may be insufficient access. |
-| `SOURCE_SHA`, `SOURCE_REF`, `SOURCE_PR` | Exact full original PR head SHA, public `refs/pull/$SOURCE_PR/head` and PR number. Independently review the final source SHA and obtain actual green source-tree CI **before publication**. Re-read exact head and source ref before G0. PR70 is the current source, not an instruction to merge it. |
+| `SOURCE_SHA`, `SOURCE_REF`, `SOURCE_PR` | Exact full original PR head SHA, public `refs/pull/$SOURCE_PR/head` and PR number. Independently review final source and obtain real green source-tree CI before publication. While awaiting G0 the source PR must be draft, without the `reviewed` label, and not mergeable. Re-read exact head/ref before G0. PR70 is the source, never an instruction to merge it. |
 | `SEED_SHA` | Derived from an independently reviewed private clean rewrite of exactly `SOURCE_SHA`; not a prototype SHA. Preserve the commit map, tree-equality and source/security/provenance review privately. |
 | `WORK`, `CANON_CLONE`, `RULES` | Distinct absolute paths outside shared worktrees; new private `WORK` mode 700 and private replacement rules mode 600. No secrets, raw identifiers or real artifact HTML in Git or public evidence. |
 | G0 | Explicit operator approval of this procedure, actor, target, quiet window, exact source/ref, exact seed and `refs/heads/main` destination, public exposure, signature loss, old freeze, empty new repository and settings. Exact-seed CI on the actual new repo is required before F02 acceptance. G0 is not granted by review or this document. |
@@ -100,15 +100,28 @@ Record privately: actor, old/new identity, source PR head/ref and green source
 checks; old main SHA; all heads and tags (tag objects and peeled commits),
 manifest hashes, all release metadata and paginated assets/hashes; current
 `PR_Main`, effective inherited rules, Actions permissions and known nonterminal
-workflows. Inventory GitHub-managed `refs/pull/*` separately as diagnostic:
-virtual refs can change as PRs open/close and are never exported. Strictly
-compare heads, tags, manifests and releases at each boundary; no old main or
-other head/tag change is authorized. The only planned old differences are
-explicit settings and additive freeze rules. Re-read old
-`delete_branch_on_merge`; require `false` or stop for renewed approval, never
-change it implicitly. Preserve existing `PR_Main` (PR, strict `check`/`test`,
+workflows. Require old `main` to equal
+`8440d7009ed771fcab2c64642048e96afa9b3a8c` **before baselining and again before
+mutation**; any other SHA is a stop, never a new baseline. Strictly compare old
+main, tags, manifests and releases at each boundary. Inventory other heads and
+GitHub-managed pull refs diagnostically: Dependabot's weekly updates may create
+non-main branches and PRs independently of Actions. Do not treat them as
+published engine changes or copy them; do not adopt unexpected non-bot or
+operator head changes as authorized pushes. Keep source branch and `SOURCE_REF`
+bound to the exact reviewed SHA. The only planned old differences are explicit
+settings and additive freeze rules. Re-read old `delete_branch_on_merge`; require
+`false` or stop for renewed approval; never change it implicitly. Preserve
+existing `PR_Main` (PR, strict `check`/`test`,
 resolved threads, no non-fast-forward/deletion, no bypass); classic branch
 protection 404 does not mean `main` is unprotected.
+
+Also require OLD native auto-merge disabled. The draft source PR must remain
+without `reviewed`, not mergeable, while awaiting G0. For subsequent source CI,
+the operator may emit `ready_for_review` and immediately return it to draft
+while checks are pending; prove all five jobs on that exact event/head. Never
+leave it ready between stages. Do not disable Dependabot, delete its branches,
+or change old main/config. Existing old no-update freeze, disabled Actions
+writers and native auto-merge off prevent silent bot merge.
 
 G0 must name the exact source and seed SHAs, destination, scope and actor, and
 approve publication plus the recorded rewrite/signature loss. Source CI and
@@ -163,8 +176,9 @@ gh api --paginate "repos/$OLD/rules/branches/main?per_page=100"
 ```
 
 Read definitions and effective rules; require active scope, no bypass,
-`update_allows_fetch_and_merge=false`, original `PR_Main` unchanged, and old
-main/heads/tags/manifests/releases identical to baseline. Do not merge source PR
+`update_allows_fetch_and_merge=false`, original `PR_Main` unchanged, native
+auto-merge disabled, and old main/tags/manifests/releases identical to baseline.
+Do not merge source PR
 or change old engine. Admins can alter rules; tag rules do not stop release
 metadata edits/deletion, and immutable releases are not an absolute historical
 metadata freeze. Coordinate the window and compare evidence, not a claim of
@@ -187,7 +201,14 @@ gh api "repos/$NEW" --jq '{full_name,owner:.owner.login,private,fork,default_bra
 gh api "repos/$NEW/actions/permissions"
 gh variable get FORGE_RELEASES_ENABLED --repo "$NEW"
 gh variable get FORGE_AUTOMERGE_ENABLED --repo "$NEW"
-git ls-remote "https://github.com/$NEW.git"
+gh api --paginate --slurp "repos/$NEW/branches?per_page=100"
+gh api --paginate --slurp "repos/$NEW/tags?per_page=100"
+(
+  cd "$CLEAN_CWD" || exit 1
+  env -i PATH="$PATH" HOME="$CLEAN_HOME" GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 \
+    GIT_CEILING_DIRECTORIES="$CLEAN_CWD" git ls-remote "https://github.com/$NEW.git"
+)
 gh api --paginate --slurp "repos/$NEW/releases?per_page=100"
 ```
 
@@ -201,10 +222,12 @@ confirm `SEED_SHA` and push **only** that commit to destination `main`:
 git -C "$WORK/clean-export" push "https://github.com/$NEW.git" "$SEED_SHA:refs/heads/main"
 ```
 
-No mirror, force, tags, other refs or shared remote changes. Verify actor/owner,
-`main == SEED_SHA`, its tree equals `SOURCE_SHA` tree, license and reviewed
-public boundary, no other heads/tags/releases, false overrides and unchanged
-legacy baseline. If push outcome is uncertain, stop and inspect; do not retry
+No mirror, force, tags, other refs or shared remote changes by the seed push.
+Verify actor/owner, `main == SEED_SHA`, its tree equals `SOURCE_SHA` tree,
+license, reviewed public boundary, false overrides and unchanged legacy
+main/tags/manifests/releases. Other heads and PRs are diagnostic as above; do
+not adopt unexpected non-bot or operator changes. If push outcome is uncertain,
+stop and inspect; do not retry
 blindly or delete anything.
 
 ## 5. Protect new main and prove actual seed CI
@@ -218,17 +241,29 @@ approval count is zero:
 
 ```bash
 jq -n --argjson check "$CHECK_APP_ID" --argjson test "$TEST_APP_ID" '{name:"PR_Main",target:"branch",enforcement:"active",bypass_actors:[],conditions:{ref_name:{include:["refs/heads/main"],exclude:[]}},rules:[{type:"pull_request",parameters:{allowed_merge_methods:["merge"],dismiss_stale_reviews_on_push:false,require_code_owner_review:false,require_last_push_approval:false,required_approving_review_count:0,required_review_thread_resolution:true}},{type:"required_status_checks",parameters:{strict_required_status_checks_policy:true,required_status_checks:[{context:"check",integration_id:$check},{context:"test",integration_id:$test}]}},{type:"non_fast_forward"},{type:"deletion"}]}' > "$WORK/new-pr-main.json"
-gh api --method PATCH "repos/$NEW" -F allow_merge_commit=true -F allow_squash_merge=false -F allow_rebase_merge=false
+gh api --method PATCH "repos/$NEW" -F allow_merge_commit=true -F allow_squash_merge=false -F allow_rebase_merge=false -F allow_auto_merge=false
 gh api --method POST "repos/$NEW/rulesets" --input "$WORK/new-pr-main.json" > "$WORK/new-rule-result.json"
 gh api "repos/$NEW/rulesets/$(jq -r .id "$WORK/new-rule-result.json")"
 gh api --paginate "repos/$NEW/rules/branches/main?per_page=100"
-gh api "repos/$NEW" --jq '{allow_merge_commit,allow_squash_merge,allow_rebase_merge}'
+gh api "repos/$NEW" --jq '{allow_merge_commit,allow_squash_merge,allow_rebase_merge,allow_auto_merge}'
 ```
 
+
+If the reviewed `CI_ALLOWED_ACTIONS` is `selected`, first run the following
+while Actions remains off, then configure and read back the approved selection
+using GitHub's selected-actions policy endpoint. Stop if the selection cannot
+be verified; only then proceed to enable Actions below:
+
+```bash
+gh api --method PUT "repos/$NEW/actions/permissions" -F enabled=false -f allowed_actions=selected
+gh api "repos/$NEW/actions/permissions"
+gh api "repos/$NEW/actions/permissions/selected-actions"
+```
 Verify effective inherited and repository rules, checks and merge settings.
 Enable Actions for CI only using reviewed organization-permitted
-`CI_ALLOWED_ACTIONS` (`all`, `local_only`, or `selected`); configure and verify
-selected-actions policy first if needed. Both overrides remain false. Verify
+`CI_ALLOWED_ACTIONS` (`all`, `local_only`, or `selected`). For `selected`, first
+set the mode to `selected` while Actions remains disabled, configure and read
+back its selected-actions policy, then enable. Both overrides remain false. Verify
 that the actual seeded CI workflow supports `workflow_dispatch`, and dispatch
 it on NEW `main`:
 
@@ -245,8 +280,10 @@ Identify the run by exact repository, workflow, `workflow_dispatch`, `main`,
 actor, attempt and `head_sha == SEED_SHA`; inspect every paginated job for that
 attempt. All five jobs `check`, `test`, `test-os / macos-bash32`, `test-bash32`
 and `test-py39` must actually execute and be `completed/success`; skipped,
-neutral, missing or pending is not success. Release must be skipped; no
-MergeOnGreen writer or administrative App-token mint may execute. Re-read main,
+neutral, missing or pending is not success. Release must be skipped. A
+MergeOnGreen `workflow_run` entry may exist, but its writer job must be skipped
+before the App-token mint step; no administrative App-token mint may execute.
+Re-read main,
 settings, gates and legacy baseline after CI. Failure stops before F02
 acceptance or feature work; do not enable writers, delete or manufacture success.
 
@@ -257,7 +294,7 @@ actual source/seed SHAs, frozen legacy main, clean-history/license evidence and
 signature caveat without private rules or identifiers. Obtain independent
 final-head review, actual NEW CI and explicit SHA-matched merge-commit approval.
 Deliver the operator's repository registry update through its own dedicated
-worktree/PR/review/CI. Recompare legacy heads/tags/manifests/releases and both
+worktree/PR/review/CI. Recompare legacy main/tags/manifests/releases and both
 repositories' settings. Only after provenance and registry deliveries may old
 PR70 be closed **without merge**, and only with separate explicit approval; do
 not delete its branch/history. F02 is complete only when these proofs and
@@ -273,7 +310,7 @@ transaction is implied. G1b/import and production authorizations remain separate
 ## Stop and recovery
 
 Stop on changed SHA/ref, unknown provenance, failed audit or CI, unaccounted
-writer/run, unexpected heads/tags/release drift, name/owner ambiguity, unreadable
+writer/run, unexpected main/tag/release drift, name/owner ambiguity, unreadable
 settings or ineffective rules. Preserve private evidence and report exact partial
 state. Never automatically cancel runs, delete repositories/refs, unfreeze old,
 rename, force push or bypass rules. Empty/partially seeded NEW remains disabled
