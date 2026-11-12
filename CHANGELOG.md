@@ -11,6 +11,7 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ### Added
 
+- Add an isolated F06 OAuth and streamed-byte transport spike with a temporary authenticated receiver and local MCP adapter; this is not a publication API or a completed three-client authentication proof. See `docs/forge-mcp-auth-spike.md` for local evidence, pending approvals and unexercised acceptance criteria.
 - `forge-inventory.py` writes a read-only inventory of one forge instance: local hub files, the canonical Pages deployment file map, optional production history, and KV visibility, share presence, and the snapshot anchor. It does not publish, reanchor, or mutate Cloudflare. Share values are not stored. A listed KV 404 is absence, not presence. `layout` `tree` records HTML path page ids; the default layout keeps the first directory. The configured root is resolved once, then opened without following. Output is refused inside a git worktree, including when the output parent is swapped for a symlink. See `docs/forge-inventory.md`.
 - F02 transition records the public canonical repository created from the privately audited direct seed on `main`, without modifying legacy refs. The new engine is not yet implemented; plugin distribution stays legacy until F08. Provenance and registry PR delivery still gate F02; production migration and historical imports require separate approval.
 
