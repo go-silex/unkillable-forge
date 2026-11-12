@@ -1,6 +1,6 @@
 # Convergence Forge — plan d'exécution
 
-Date : 2026-11-11. Statut : plan d'exécution accepté ; amendement F02 validé par l'opérateur après inventaire. Ce document ne déclenche aucune mutation de production sans sa confirmation spécifique.
+Date : 2026-11-11 ; décision moteur d'abord actualisée le 2026-11-12. Plan accepté ; aucune mutation de production sans confirmation spécifique.
 
 ## 1. Décisions acquises et périmètre
 
@@ -18,9 +18,9 @@ Date : 2026-11-11. Statut : plan d'exécution accepté ; amendement F02 validé 
 
 L'open redirect est déjà corrigé : [Roxabi PR #13](https://github.com/Roxabi/roxabi-forge/pull/13), release `roxabi-forge/v1.1.5`, vérifiée en production. Ce n'est pas un lot restant.
 
-**Amendement adopté pendant F01 :** le canon est créé dans un **nouveau dépôt public** à partir de l'histoire publique Silex approuvée. L'ancien dépôt garde son URL et son moteur figé jusqu'au retrait des anciens writers ; il n'est pas renommé. Motif : des versions installées 1.7.3/1.3.0 ignorent le pin local, et certains postes restent inaccessibles. Le corpus Roxabi approuvé inclut l'arbre du précédent déploiement et les publications actuelles, pas seulement les 16 fichiers actuellement déployés. Voir [le suivi d'exécution](forge-convergence-status.md).
+**Décision opérateur actuelle :** le canon est un nouveau dépôt public issu de l'histoire publique Silex approuvée. On développe d'abord le nouveau moteur isolé, puis on migre dans un second temps : aucun gel ni drainage des anciens runs GitHub n'est préalable au nouveau dépôt. L'ancien dépôt conserve son URL et ses consommateurs ; il n'est ni renommé ni modifié par ce bootstrap. Les réglages legacy partiellement désactivés restent en l'état, sans nouveau gel ni réactivation implicite. Le corpus Roxabi approuvé inclut l'arbre du précédent déploiement et les publications actuelles. Voir [le suivi d'exécution](forge-convergence-status.md).
 
-**Amendement de gate F01 accepté par l'opérateur :** après fermeture du code, revue indépendante et CI verte du SHA final incluant cet amendement, F01 peut être accepté comme **énumération complète avec incertitude de sécurité identifiée**, sans attester la préservation des droits historiques. `UNRESOLVED_HISTORICAL_OWNERSHIP` reste bloquant avant toute importation du corpus historique, validation de fidélité F10 ou mutation de migration en production ; F11/F12 restent donc bloqués transitivement. F02, sous G0, puis le développement strictement hors production peuvent avancer suivant les autres dépendances inchangées. Aucun critère final de corpus, URL, grant ou accès aux assets n'est réduit.
+**Amendement de gate F01 accepté par l'opérateur :** F01 est livré comme **énumération complète avec incertitude de sécurité identifiée**, sans attester la préservation des droits historiques. `UNRESOLVED_HISTORICAL_OWNERSHIP` reste bloquant avant toute importation du corpus historique, validation de fidélité F10 ou mutation de migration en production ; F11/F12 restent donc bloqués transitivement. F02 puis le développement strictement hors production peuvent avancer suivant les autres dépendances inchangées. Aucun critère final de corpus, URL, grant ou accès aux assets n'est réduit.
 
 La fermeture de ce gate exige un graphe historique vérifié ou un rapprochement probant page/parcours/ressource des droits attendus, validé par l'opérateur. L'assistant porte l'investigation et conserve les preuves privées. Une politique de droits nouvellement approuvée serait une décision distincte, pas une reconstruction présumée équivalente.
 
@@ -46,7 +46,7 @@ La fermeture de ce gate exige un graphe historique vérifié ou un rapprochement
 
 ### 2.1 Modules et responsabilités
 
-Les chemins exacts sont arrêtés au lot F03 dans le dépôt existant ; les noms ci-dessous désignent des modules, pas de nouveaux services à multiplier.
+Les chemins exacts sont arrêtés au lot F03 dans le nouveau dépôt canonique ; les noms ci-dessous désignent des modules, pas de nouveaux services à multiplier.
 
 | Module | Interface utile | Implémentation / responsabilité |
 |---|---|---|
@@ -164,13 +164,13 @@ Le renderer OG reçoit un accès borné à une révision, jamais un cookie d'adm
 
 **Décision opérateur amendée après inventaire : créer un nouveau canon public**, sans renommer le dépôt Silex consommé par les clients legacy.
 
-- Initialiser `go-silex/unkillable-forge`, dépôt ordinaire public, avec une ascendance publique Silex auditée. Deux identifiants d'infrastructure historiques doivent être retirés dans une **copie privée isolée**, dont seule la préparation est autorisée. Le protocole distingue `SOURCE_SHA` (PR préparatoire originale) et `SEED_SHA` (copie nettoyée, arbre final identique) ; leurs valeurs exactes, les pertes de signatures historiques et la publication restent à approuver sous G0. Aucun historique existant Silex ou Roxabi n'est réécrit. Copier uniquement le seed approuvé vers le nouveau `main`, jamais un miroir ni de l'histoire privée Roxabi.
+- `go-silex/unkillable-forge` a été créé public et non-fork avec l'ascendance Silex auditée. La copie privée isolée retire deux identifiants historiques ; les SHA source et seed exacts et les pertes de signatures approuvées sont consignés dans le [runbook](forge-canonical-transition.md). Aucun historique original Silex ou Roxabi n'est réécrit ; seul le seed approuvé a été poussé vers le nouveau `main`, jamais un miroir ni l'histoire privée Roxabi.
 - Chaque import est relu pour les secrets, données d'instance, fixtures et licences. Aucun corpus HTML réel ni sauvegarde de KV dans le dépôt public.
-- Le [runbook F02](forge-canonical-transition.md) fait approuver le nom, les SHA et la référence cible. Sous G0 : figer l'ancien dépôt sans modifier son `main` ni y fusionner la PR préparatoire ; créer le nouveau dépôt vide avec Actions et writers désactivés ; y pousser directement le seed audité. La CI exacte du seed s'exécute **sur ce nouveau dépôt avant l'acceptation F02 et tout F03/F06**, pas avant sa création vide. Supprimer le détour par une référence de seed et une CI temporaire dans l'ancien dépôt. L'ancien moteur, ses manifests, tags et releases restent figés à leur URL ; aucune redirection, auto-update ou publication de production.
-- Changer l'identité et la distribution du plugin seulement lorsque le nouveau parcours est prêt, avec migration des trois harnesses ; pas d'auto-update supposée entre deux noms de plugin. Les anciennes releases restent immuables jusqu'à clôture du rollback.
+- Le [runbook F02](forge-canonical-transition.md) distingue création et preuve détaillée de la CI seed exacte déjà réalisées des livraisons encore attendues : PR de provenance et PR de registre, revues indépendantes et merges au SHA revu. L'isolation des dépôts remplace le gel legacy comme préalable de développement ; la PR source reste draft et n'est pas fusionnée dans l'ancien dépôt. Aucun changement des anciennes refs ou de la production n'est autorisé par ce bootstrap.
+- Changer l'identité et la distribution du plugin seulement lorsque le nouveau parcours est prêt, avec migration des trois harnesses ; pas d'auto-update supposée entre deux noms de plugin. Préserver les anciennes releases jusqu'à clôture du rollback est une obligation opératoire, pas un gel serveur actuellement imposé.
 - Les nouveaux développements du moteur sont réalisés uniquement dans le canon. Une correction découverte chez Roxabi retourne en upstream par un patch générique relu, jamais par merge de l'historique privé vers le public.
 
-**Confinement transitoire par dépôt avant F03 :** les anciens publishers Silex continuent à cloner l'ancien `main` figé ; le nouveau runtime est développé exclusivement dans le nouveau canon. Il n'est plus nécessaire de prétendre avoir épinglé tous les anciens postes pour commencer F03. Coût borné : deux dépôts publics temporairement, mais un seul moteur activement développé ; toute correction de sécurité legacy est arbitrée séparément. Cette séparation n'annule aucun credential existant : le confinement serveur vérifiable des anciens writers reste obligatoire avant F12–F14, et leur retrait final avant F15. Roxabi reste épinglé à ses tags legacy jusqu'à sa propre bascule.
+**Isolation transitoire par dépôt avant F03 :** les anciens publishers Silex continuent à cloner l'ancien `main` ; le nouveau runtime est développé exclusivement dans le nouveau canon. Aucun gel du dépôt legacy n'est prétendu ni nécessaire pour commencer F03 après livraison F02. Coût borné : deux dépôts publics temporairement ; toute correction de sécurité legacy est arbitrée séparément. Cette séparation n'annule aucun credential existant : le confinement serveur vérifiable des anciens writers reste obligatoire avant F12–F14, et leur retrait final avant F15. Roxabi reste épinglé à ses tags legacy jusqu'à sa propre bascule.
 
 ### 3.2 Roxabi privé avec upstream
 
@@ -180,7 +180,7 @@ La cible est un **dépôt indépendant privé**, pas un fork GitHub d'un dépôt
 
 Cette méthode produit un dérivé synchronisable, sans supprimer/recréer le dépôt ni force-push. Ce n'est pas un reclone littéral à histoire effacée. Si un clone neuf strict est exigé, il faudra une décision séparée sur l'archivage/renommage de l'ancien dépôt et ses consommateurs ; ce n'est pas exécuté silencieusement.
 
-| Zone | Règle après convergence |
+| Zone | Cible après convergence F12, non encore effectuée |
 |---|---|
 | Moteur, tests, plugin commun | Identiques à une release upstream épinglée |
 | Configuration Roxabi | Surcharges limitées, documentées, sans secrets committés |
@@ -233,7 +233,7 @@ Le plan initial a été préparé dans `~/.omp/wt/silex-forge/docs-forge-converg
 | Lot / worktree | Dépendances | Changement / livrable | Validation bloquante |
 |---|---|---|---|
 | F01 `U/docs-F01-inventory` | Plan accepté | Inventaire strictement en lecture seule + manifestes privés par instance : déploiements, hubs, KV, shortlinks, cookies, routes, symlinks, tailles et corpus explicite ; incertitudes de droits identifiées | Tous les chemins connus sont classés par provenance ; divergence expliquée ; code revu et CI verte ; aucune mutation de production ; le gate historique G1b reste ouvert sans valoir conformité |
-| F02 `U/chore-F02-canonical-name` | F01 | Création approuvée du nouveau canon par seed direct audité ; ancien dépôt figé sans merge préparatoire ; références de développement et distribution distinctes | `SOURCE_SHA` revu et CI verte avant publication ; `SEED_SHA` audité avec arbre final identique ; SHA/cible et pertes de signatures approuvés ; CI exacte du seed sur le nouveau dépôt avant acceptation ; provenance et registre livrés ; ancien main/manifests/tags/releases inchangés |
+| F02 `U/docs-F02-provenance` | F01 | Canon créé par seed direct audité ; provenance canonique et registre dans leurs worktrees/PR distincts ; aucun gel ni merge préparatoire legacy | Source revue et CI verte avant publication ; seed audité à arbre identique et pertes de signatures approuvées ; preuve détaillée CI exacte sur le nouveau dépôt ; provenance et registre revus et livrés au SHA correspondant ; aucune mutation legacy ou production par le bootstrap |
 | F03 `U/feat-F03-core-contract` | F01, F02 | Contrat artefact/page/révision, schéma D1, configuration d'instance, ACL et résolution de routes réutilisées ; premières tranches de lecture métier exécutables | Parité des règles privé/public/partagé et des chemins ; identité/compte/cible explicitement isolés ; pas de moteur par marque |
 | F06 `U/spike-F06-mcp-auth` | F02 | Preuve hors prod du client OAuth/MCP et du transport d'un vrai fichier vers un récepteur temporaire authentifié ; choix de versions et origines | Les trois clients authentifient, transfèrent la fixture dont on compare les octets, refreshent et échouent après révocation ; aucun token CF local ; ne dépend pas de l'API de publication F04 |
 
@@ -375,7 +375,7 @@ Chaque gate exige ses preuves et, quand elle l'indique, l'autorisation opérateu
 
 | Gate | Recommandation / décision attendue | Bloque |
 |---|---|---|
-| G0 — nouveau canon | Runbook simplifié revu ; `SOURCE_SHA`, `SEED_SHA`, nouveau dépôt public, cible `main`, pertes de signatures et opérations de gel confirmés ; CI exacte sur le nouveau dépôt avant acceptation F02 | Publication et création du canon ; F03/F06 restent bloqués jusqu'à livraison complète F02 ; préparation privée seule déjà autorisée |
+| G0 — nouveau canon | Source/seed et pertes de signatures approuvés ; canon créé et CI seed détaillée réussie. Livraison F02 encore conditionnée aux PR provenance et registre revues, validées et mergées au SHA correspondant. Aucun gel ou drainage GitHub legacy préalable | F03/F06 jusqu'à livraison complète F02 ; aucune autorisation de migration |
 | G1 — corpus | Manifeste approuvé par instance : ce qui est déjà publié et ce qu'on ajoute volontairement | Import final, absence de perte démontrable |
 | G1b — propriété historique | `UNRESOLVED_HISTORICAL_OWNERSHIP` : graphe historique vérifié ou rapprochement probant page/parcours/ressource, validation opérateur | Toute importation du corpus historique, acceptation F10 et toute migration de production ; F11/F12 bloqués transitivement |
 | G2 — OAuth et MCP | Managed OAuth + adapter local ; preuve sur les trois clients, sinon alternative OAuth arbitrée | Distribution client et politique d'accès |
