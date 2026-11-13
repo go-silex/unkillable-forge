@@ -1,6 +1,14 @@
-# silex-forge — agent context
+# unkillable-forge — agent context
 
-## Mission
+## Canonical engine
+
+- Public upstream: `go-silex/unkillable-forge`. Instance accounts, origins and data stay isolated; no brand-specific engine.
+- New code follows [the core contract](docs/forge-core-contract.md), [GLOSSARY.md](GLOSSARY.md) and the active [axial ADR 0002](docs/architecture/adr/0002-axis-of-decomposition-business-authority.md). F03 implements the Catalogue & Policy decision layer in `domains/catalogue/`; it is not a production cutover.
+- D1 primary is the new authority for metadata and authorization; R2 is the byte authority. Do not apply the legacy KV model below to the new engine or put administration credentials in publisher adapters.
+- Existing `functions/`, `site/`, `plugins/` and the following operational reference remain legacy until their planned replacement. New engine work does not authorize legacy deployment, rights changes, credential retirement or resource deletion.
+- Preserve `forge.unkillablecompanies.com`, existing access, share keys, assets and actual Shlink aliases **and destinations** through the separately approved migrations. Follow [the convergence plan](docs/forge-convergence-plan.md) and [delivery status](docs/forge-convergence-status.md).
+
+## Legacy Pages runtime
 
 **forge.unkillablecompanies.com** = team HTML artifact host (decks, talks, guides). The legacy `forge.gosilex.com` hostname remains registered and redirects web navigation (GET/HEAD) to it.
 

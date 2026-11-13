@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the **silex-forge engine and plugin** are documented here.
+All notable changes to the **unkillable-forge engine and its legacy silex-forge plugin** are documented here.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).  
 Versioning follows [Semantic Versioning](https://semver.org/) for the plugin surface (harness manifests / marketplaces / `package.json`).
@@ -11,9 +11,10 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ### Added
 
-- Add an isolated F06 OAuth and streamed-byte transport spike with a temporary authenticated receiver and local MCP adapter. Parent-run local SDK/Node synthetic-JWKS smoke and a named Worker dry-run bundle passed; neither proves live Access, Workers execution, nor the three-client authentication matrix. The historical review remains NOT CLEAR pending a new committed-SHA review. See `docs/forge-mcp-auth-spike.md` for boundaries and approvals.
+- Add an isolated F06 OAuth and streamed-byte transport spike with a temporary authenticated receiver and local MCP adapter. Source `143cb7e` received an independent CLEAR for preparation only; local SDK/Node synthetic-JWKS smoke and a named Worker dry-run bundle passed. A subsequent local Miniflare/workerd proof also exercised the receiver with synthetic assertions; none proves live Access or the three-client authentication matrix. The integrated final SHA requires its own review and CI. See `docs/forge-mcp-auth-spike.md` for boundaries and approvals.
 - `forge-inventory.py` writes a read-only inventory of one forge instance: local hub files, the canonical Pages deployment file map, optional production history, and KV visibility, share presence, and the snapshot anchor. It does not publish, reanchor, or mutate Cloudflare. Share values are not stored. A listed KV 404 is absence, not presence. `layout` `tree` records HTML path page ids; the default layout keeps the first directory. The configured root is resolved once, then opened without following. Output is refused inside a git worktree, including when the output parent is swapped for a symlink. See `docs/forge-inventory.md`.
-- F02 transition records the public canonical repository created from the privately audited direct seed on `main`, without modifying legacy refs. The new engine is not yet implemented; plugin distribution stays legacy until F08. Provenance and registry PR delivery still gate F02; production migration and historical imports require separate approval.
+- F02 creates the isolated public canonical repository from the privately audited direct seed on `main`, without modifying legacy refs. Provenance and registry were independently reviewed and delivered in canonical PR #7 and projects-meta PR #46. Plugin distribution stays legacy until F08; production migration and historical imports require separate approval.
+- F03 adds the shared Catalogue & Policy decision layer: validated per-instance read/manage configuration, cryptographic Access identities, primary-D1 schema and guarded authorization transitions, scoped grants, revision ownership and slug/tree routing. The contract, glossary and replacement axial ADR describe its boundaries; no new publication API or production deployment is claimed.
 
 ### Changed
 
@@ -24,6 +25,9 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 - F06 preparation preserves cached-token status through noninteractive refresh, distinguishes missing PRM metadata, and brackets cross-app probes with same-principal controls. A verified foreign-token acceptance is now an explicit failure, not inconclusive; its seven classification cases pass locally. The independent control profile cannot share a harness grant cache. Baseline SDK smoke and Wrangler 4.161.0 dry-run pass; actual Access, live revocation, binding and three-client execution remain unverified. See `docs/forge-mcp-auth-spike.md` for composite input-bound evidence and the final-SHA review requirement.
 
+- F03 pinned reads prefer their own revision's resource and bind external ownership to its provider artefact. Ownership admission and permissions share one primary-D1 batch and one verified, immutable, expiring manage actor; only authorized Catalogue reads mint pinned tokens.
+- F03 rejects unsafe alias destinations and encoded path separators in login return paths, while preserving encoded query data. Removing an alias cannot remove a page's primary route. No production redirect or access change is claimed.
+- An unusable pinned token, including one whose authorization basis no longer holds, counts as absent. It cannot hide an otherwise readable active revision, and its discarded grant cannot open an inactive revision or a private page.
 - `forge-inventory.py` treats an empty KV list cursor as the end of the list and does not request `?cursor=`. Symlink classification stats the original link from the bound root before `Path.resolve(strict=True)`, so a loop is `cycle` and a path through a non-directory is `broken` on every Python version. A missing target is `broken` even when that target is outside the root. File bytes are still read without following symlinks.
 - `forge-inventory.py` no longer treats a field name as a redaction exemption, a present invalid KV cursor as the end of the list, an internal directory alias as a broken link, or a chunk-end regex match as confirmed right context.
 - Forge now has a favicon on every page. `/favicon.ico` returned 404, so artifacts under `/a/` and `/s/`, `/login` and `404.html` showed no tab icon; only the catalogue linked `/images/favicon.png`. The site skeleton now ships `favicon.ico` (16/32/48), `apple-touch-icon.png` (180) and a new `images/favicon.png`, all drawn from the Unkillable Companies UC logo (it replaces the Silex stone). `/apple-touch-icon.png` joins the public shell in the middleware, and the catalogue, `/login` and `404.html` link the three icons. Artifacts need no change: browsers fall back to `/favicon.ico`.
