@@ -30,11 +30,13 @@ const digest = createHash('sha256').update(body).digest('hex');
 async function put(resource, token) {
   return fetch(resource, { method: 'PUT', redirect: 'manual', credentials: 'omit', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/octet-stream' }, body, signal });
 }
-async function validReceiver(resource, token) {
-  const response = await put(resource, token);
+async function validateReceiptResponse(response) {
   const identity = response.headers.get('x-f06-identity');
   if (!response.ok || !/^[0-9a-f]{64}$/.test(identity || '')) { await response.body?.cancel(); return undefined; }
   try { const receipt = await response.json(); return receipt.size === body.length && receipt.sha256 === digest ? identity : undefined; } catch { return undefined; }
+}
+async function validReceiver(resource, token) {
+  return validateReceiptResponse(await put(resource, token));
 }
 function accessChallenge(response, resource) {
   if (response.status !== 401 || !/^\s*Bearer(?:\s|$)/i.test(response.headers.get('www-authenticate') || '')) return false;
@@ -56,11 +58,12 @@ try {
     const response = await put(target, result.token);
     const targetHttpStatus = response.status;
     const challenged = accessChallenge(response, target);
-    await response.body?.cancel();
+    const foreignIdentity = await validateReceiptResponse(response);
     const targetAfter = await validReceiver(target, targetAuth.token);
     const samePrincipal = Boolean(otherAccepted && targetBefore && targetAfter && otherAccepted === targetBefore && targetBefore === targetAfter);
-    const verdict = samePrincipal && challenged ? 'wrong_resource_token_rejected' : 'inconclusive';
-    console.log(JSON.stringify({ mode, result: verdict, otherAccepted: Boolean(otherAccepted), targetBefore: Boolean(targetBefore), targetAfter: Boolean(targetAfter), samePrincipal, targetHttpStatus, accessChallenge: challenged }));
+    const foreignAccepted = Boolean(samePrincipal && foreignIdentity === targetBefore);
+    const verdict = samePrincipal && challenged ? 'wrong_resource_token_rejected' : foreignAccepted ? 'wrong_resource_token_accepted' : 'inconclusive';
+    console.log(JSON.stringify({ mode, result: verdict, otherAccepted: Boolean(otherAccepted), targetBefore: Boolean(targetBefore), targetAfter: Boolean(targetAfter), samePrincipal, foreignAccepted, targetHttpStatus, accessChallenge: challenged }));
     process.exitCode = verdict === 'wrong_resource_token_rejected' ? 0 : 1;
   }
 } catch (error) {
