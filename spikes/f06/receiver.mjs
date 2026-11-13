@@ -44,11 +44,11 @@ export default {
           hash.update(value);
         }
       } catch { return new Response('Incomplete stream', { status: 400 }); }
-      return Response.json({ size, sha256: bytesToHex(hash.digest()), identitySha256: identity }, { headers: { 'cache-control': 'no-store' } });
+      return Response.json({ size, sha256: bytesToHex(hash.digest()) }, { headers: { 'cache-control': 'no-store', 'x-f06-identity': identity } });
     }
     if (request.method !== 'POST' && request.method !== 'GET' && request.method !== 'DELETE') return new Response('Method not allowed', { status: 405 });
     const server = new McpServer({ name: 'forge-f06-receiver', version: '0.0.0' });
-    server.registerTool('receiver_info', { description: 'Authenticated receiver metadata only', inputSchema: {} }, async () => ({ content: [{ type: 'text', text: JSON.stringify({ authenticated: true, identitySha256: identity, maxFileBytes: 16 * 1024 * 1024 }) }] }));
+    server.registerTool('receiver_info', { description: 'Authenticated receiver metadata only', inputSchema: {} }, async () => ({ content: [{ type: 'text', text: JSON.stringify({ authenticated: true, maxFileBytes: 16 * 1024 * 1024 }) }] }));
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     await server.connect(transport);
     return transport.handleRequest(request);

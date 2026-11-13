@@ -16,6 +16,8 @@ async function fixturePath(localPath) {
   if (!process.env.F06_FIXTURE_ROOT || !isAbsolute(process.env.F06_FIXTURE_ROOT)) throw new SpikeFailure('collect', 'FIXTURE_ROOT_REQUIRED');
   const root = await realpath(process.env.F06_FIXTURE_ROOT);
   if (!(await lstat(root)).isDirectory()) throw new SpikeFailure('collect', 'FIXTURE_ROOT_INVALID');
+  const lexical = relative(root, resolve(localPath));
+  if (lexical === '..' || lexical.startsWith(`..${sep}`) || isAbsolute(lexical)) throw new SpikeFailure('collect', 'PATH_OUTSIDE_FIXTURE_ROOT');
   const target = await realpath(resolve(localPath));
   const rel = relative(root, target);
   if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new SpikeFailure('collect', 'PATH_OUTSIDE_FIXTURE_ROOT');
@@ -34,7 +36,7 @@ async function collect(path, relative, files) {
   } else throw Error('Only regular files are supported');
 }
 
-async function upload(file, token) {
+async function upload(file, token, signal) {
   const handle = await open(file.path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const info = await handle.stat();
@@ -48,30 +50,32 @@ async function upload(file, token) {
         hash.update(chunk); yield chunk;
       }
     }
-    const response = await fetch(oauth.resource, { method: 'PUT', redirect: 'manual', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/octet-stream' }, body: Readable.toWeb(Readable.from(content())), duplex: 'half' });
+    const response = await fetch(oauth.resource, { method: 'PUT', redirect: 'manual', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/octet-stream' }, body: Readable.toWeb(Readable.from(content())), duplex: 'half', signal });
     if (!response.ok) { await response.body?.cancel(); throw new SpikeFailure('upload', 'HTTP_ERROR', response.status); }
     const remote = await response.json();
     const localHash = hash.digest('hex');
     if (size !== file.size || remote.size !== size || remote.sha256 !== localHash) throw new SpikeFailure('integrity', 'HASH_OR_SIZE_MISMATCH');
-    if (typeof remote.identitySha256 !== 'string' || !/^[0-9a-f]{64}$/.test(remote.identitySha256)) throw new SpikeFailure('integrity', 'IDENTITY_FINGERPRINT_INVALID');
-    return { path: file.relative, size, sha256: localHash, identitySha256: remote.identitySha256 };
+    const identity = response.headers.get('x-f06-identity');
+    if (!identity || !/^[0-9a-f]{64}$/.test(identity)) throw new SpikeFailure('integrity', 'IDENTITY_FINGERPRINT_INVALID');
+    await oauth.saveIdentity(identity);
+    return { path: file.relative, size, sha256: localHash };
   } finally { await handle.close(); }
 }
 
-mcp.registerTool('transfer_fixture', { description: 'Transfer a synthetic local file or directory to the authenticated temporary receiver and compare actual streamed SHA-256. No publishing.', inputSchema: { localPath: z.string().min(1) } }, async ({ localPath }) => {
+mcp.registerTool('transfer_fixture', { description: 'Transfer a synthetic local file or directory to the authenticated temporary receiver and compare actual streamed SHA-256. No publishing.', inputSchema: { localPath: z.string().min(1), refreshOnly: z.boolean().optional() } }, async ({ localPath, refreshOnly }, { signal }) => {
   let stage = 'collect';
   try {
     const files = []; await collect(await fixturePath(localPath), '', files);
     if (!files.length) throw new SpikeFailure('collect', 'EMPTY_DIRECTORY');
     stage = 'oauth';
-    const token = await oauth.ensure();
+    const authResult = await oauth.ensure(signal, refreshOnly === true);
     stage = 'upload';
     const receipts = [];
-    for (const file of files) receipts.push(await upload(file, token));
-    return { content: [{ type: 'text', text: JSON.stringify({ files: receipts }) }] };
+    for (const file of files) receipts.push(await upload(file, authResult.token, signal));
+    return { content: [{ type: 'text', text: JSON.stringify({ authPath: authResult.authPath, ...(authResult.refresh ? { refresh: authResult.refresh } : {}), files: receipts }) }] };
   } catch (error) {
     const failure = error instanceof SpikeFailure ? error : new SpikeFailure(stage, 'FAILED');
-    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ stage: failure.stage, code: failure.code, ...(failure.status ? { httpStatus: failure.status } : {}) }) }] };
+    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ stage: failure.stage, code: failure.code, ...(failure.status ? { httpStatus: failure.status } : {}), ...(failure.oauthCode ? { oauthCode: failure.oauthCode } : {}), ...(failure.resource ? { resource: failure.resource } : {}) }) }] };
   }
 });
 await mcp.connect(new StdioServerTransport());
