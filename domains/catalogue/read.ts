@@ -243,12 +243,12 @@ async function decideReadAuthorized(db: D1Database, config: ReadInstanceConfig, 
       : row.route_kind === 'subtree'
         ? subject.path.startsWith(`/a/${row.route_key}/`) && (row.resource_artifact_id === row.artifact_id || (row.owned && (row.kind === 'fragment' || row.kind === 'asset')))
         : row.owned && (row.kind === 'fragment' || row.kind === 'asset')
-    const validProof = proof && proof.instanceId === config.instanceId && proof.pageId === subject.pageId && proof.revisionId === subject.revisionId && proof.policyEpoch === row.policy_epoch ? proof : null
-    const grantValid = validProof?.basis.kind === 'grant' && !!row.grant_id && row.visibility === 'shared' && (row.mode === 'follow_active' || row.pinned_revision_id === subject.revisionId)
-    const basisValid = validProof
-      ? validProof.basis.kind === 'team' ? team : validProof.basis.kind === 'public' ? row.visibility === 'public' : grantValid
-      : team || row.visibility === 'public'
-    if (!pathAllowed || !basisValid || !(row.active_revision_id === subject.revisionId || validProof || (grantValid && row.mode === 'pinned'))) return deny('not_found')
+    const matchingProof = proof && proof.instanceId === config.instanceId && proof.pageId === subject.pageId && proof.revisionId === subject.revisionId && proof.policyEpoch === row.policy_epoch ? proof : null
+    const grantHolds = matchingProof?.basis.kind === 'grant' && !!row.grant_id && row.visibility === 'shared' && (row.mode === 'follow_active' || row.pinned_revision_id === subject.revisionId)
+    const usableProof = matchingProof && (matchingProof.basis.kind === 'team' ? team : matchingProof.basis.kind === 'public' ? row.visibility === 'public' : grantHolds) ? matchingProof : null
+    const grantValid = usableProof?.basis.kind === 'grant'
+    const basisValid = !!usableProof || team || row.visibility === 'public'
+    if (!pathAllowed || !basisValid || !(row.active_revision_id === subject.revisionId || usableProof)) return deny('not_found')
     return makePlan(config, { ...row, artifact_id: row.resource_artifact_id }, row.resource_revision_id, 'pinned', row.page_id, grantValid ? row.grant_id : null, row.policy_epoch, null)
   } catch { return deny('unavailable') }
 }

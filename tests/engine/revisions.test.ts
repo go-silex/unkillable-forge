@@ -79,6 +79,27 @@ describe("revision and grant authority", () => {
     expect(await decideRead(env.DB, read, pinned, { ...none, team, pinnedProof: proof, nowSeconds: 3 }, null)).toEqual({ kind: "deny", reason: "not_found" })
     expect(await decideRead(env.DB, read, pinned, { ...none, team: { ...team }, pinnedProof: proof, nowSeconds: 2 }, null)).toEqual({ kind: "deny", reason: "not_found" })
   })
+  it("treats an unusable team proof like no proof without widening access to old revisions", async () => {
+    const { read, manage } = await configs()
+    await setVisibility({ db: env.DB, config: manage, jwks, now: () => 10 }, actor, { pageId, artifactId, expectedPolicyEpoch: 0, visibility: "public" })
+    const team = await authenticatedReader(1001)
+    const initial = await decideRead(env.DB, read, page, { ...none, team, nowSeconds: 1000 }, null)
+    if (initial.kind !== "allow" || initial.plan.authority.basis !== "team" || !initial.plan.pinnedProof) throw new Error("team-basis proof unavailable")
+    const proof = initial.plan.pinnedProof
+    expect(await decideRead(env.DB, read, pinned, { ...none, nowSeconds: 1000 }, null)).toMatchObject({ kind: "allow" })
+    expect(await decideRead(env.DB, read, pinned, { ...none, pinnedProof: proof, nowSeconds: 1000 }, null)).toMatchObject({ kind: "allow" })
+    expect(await decideRead(env.DB, read, pinned, { ...none, team, nowSeconds: 1100 }, null)).toMatchObject({ kind: "allow" })
+    expect(await decideRead(env.DB, read, pinned, { ...none, team, pinnedProof: proof, nowSeconds: 1100 }, null)).toMatchObject({ kind: "allow" })
+    await publishNext()
+    expect(await decideRead(env.DB, read, pinned, { ...none, team, pinnedProof: proof, nowSeconds: 1000 }, null)).toMatchObject({ kind: "allow", plan: { revisionId } })
+    expect(await decideRead(env.DB, read, pinned, { ...none, nowSeconds: 1000 }, null)).toEqual({ kind: "deny", reason: "not_found" })
+    expect(await decideRead(env.DB, read, pinned, { ...none, pinnedProof: proof, nowSeconds: 1000 }, null)).toEqual({ kind: "deny", reason: "not_found" })
+    expect(await decideRead(env.DB, read, pinned, { ...none, team, nowSeconds: 1100 }, null)).toEqual({ kind: "deny", reason: "not_found" })
+    expect(await decideRead(env.DB, read, pinned, { ...none, team, pinnedProof: proof, nowSeconds: 1100 }, null)).toEqual({ kind: "deny", reason: "not_found" })
+    const active: ReadSubject = { ...pinned, revisionId: nextRevision }
+    expect(await decideRead(env.DB, read, active, { ...none, team, nowSeconds: 1100 }, null)).toMatchObject({ kind: "allow" })
+    expect(await decideRead(env.DB, read, active, { ...none, team, pinnedProof: proof, nowSeconds: 1100 }, null)).toMatchObject({ kind: "allow" })
+  })
   it.each(["revoke", "rotate"] as const)("invalidates a previously valid grant proof on %s", async (change) => {
     const { read, manage } = await configs()
     const deps = { db: env.DB, config: manage, jwks, now: () => 10 }
