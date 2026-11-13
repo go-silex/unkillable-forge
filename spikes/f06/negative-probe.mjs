@@ -1,4 +1,6 @@
 // Operator-only: run against explicitly approved, freshly isolated test apps only.
+import { createHash } from 'node:crypto';
+import { extractWWWAuthenticateParams } from '@modelcontextprotocol/sdk/client/auth.js';
 import { OAuthClient } from './oauth.mjs';
 import { SpikeFailure } from './errors.mjs';
 
@@ -23,24 +25,47 @@ const client = mode === 'wrong-verifier'
 await client.load();
 if (client.data.tokens || client.data.client) throw Error('Negative probe needs a fresh isolated profile; do not reuse grants');
 const signal = new AbortController().signal;
+const body = Buffer.from('forge-f06-synthetic-control\n', 'utf8');
+const digest = createHash('sha256').update(body).digest('hex');
+async function put(resource, token) {
+  return fetch(resource, { method: 'PUT', redirect: 'manual', credentials: 'omit', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/octet-stream' }, body, signal });
+}
+async function validReceiver(resource, token) {
+  const response = await put(resource, token);
+  const identity = response.headers.get('x-f06-identity');
+  if (!response.ok || !/^[0-9a-f]{64}$/.test(identity || '')) { await response.body?.cancel(); return undefined; }
+  try { const receipt = await response.json(); return receipt.size === body.length && receipt.sha256 === digest ? identity : undefined; } catch { return undefined; }
+}
+function accessChallenge(response, resource) {
+  if (response.status !== 401 || !/^\s*Bearer(?:\s|$)/i.test(response.headers.get('www-authenticate') || '')) return false;
+  const { resourceMetadataUrl } = extractWWWAuthenticateParams(response);
+  return Boolean(resourceMetadataUrl && resourceMetadataUrl.protocol === 'https:' && resourceMetadataUrl.origin === resource.origin && !resourceMetadataUrl.username && !resourceMetadataUrl.password && !resourceMetadataUrl.search && !resourceMetadataUrl.hash);
+}
 try {
-  // ensure() authenticates to the selected resource and confirms its token is accepted there.
   const result = await client.ensure(signal);
   if (mode === 'wrong-verifier') {
     console.log(JSON.stringify({ mode, result: 'unexpected_success', interpretation: 'wrong verifier accepted; revoke only this isolated grant with owner approval' }));
     process.exitCode = 1;
   } else {
-    // Never call target.ensure(): it would reauthenticate and conceal cross-app rejection.
-    const response = await fetch(target, { method: 'GET', redirect: 'manual', credentials: 'omit', headers: { authorization: `Bearer ${result.token}`, accept: 'text/event-stream' }, signal });
-    const status = response.status;
+    if (!process.env.F06_CONTROL_PROFILE) throw new SpikeFailure('probe', 'CONTROL_PROFILE_REQUIRED');
+    const control = new OAuthClient(target, process.env.F06_CONTROL_PROFILE);
+    await control.load();
+    const targetAuth = await control.ensure(signal, 'noninteractive');
+    const otherAccepted = await validReceiver(other, result.token);
+    const targetBefore = await validReceiver(target, targetAuth.token);
+    const response = await put(target, result.token);
+    const targetHttpStatus = response.status;
+    const challenged = accessChallenge(response, target);
     await response.body?.cancel();
-    const verdict = [401, 403].includes(status) ? 'wrong_resource_token_rejected' : response.ok || status === 405 ? 'unexpected_success' : 'inconclusive';
-    console.log(JSON.stringify({ mode, result: verdict, otherAccepted: true, targetHttpStatus: status }));
+    const targetAfter = await validReceiver(target, targetAuth.token);
+    const samePrincipal = Boolean(otherAccepted && targetBefore && targetAfter && otherAccepted === targetBefore && targetBefore === targetAfter);
+    const verdict = samePrincipal && challenged ? 'wrong_resource_token_rejected' : 'inconclusive';
+    console.log(JSON.stringify({ mode, result: verdict, otherAccepted: Boolean(otherAccepted), targetBefore: Boolean(targetBefore), targetAfter: Boolean(targetAfter), samePrincipal, targetHttpStatus, accessChallenge: challenged }));
     process.exitCode = verdict === 'wrong_resource_token_rejected' ? 0 : 1;
   }
 } catch (error) {
   const known = error instanceof SpikeFailure;
-  const evidence = { mode, result: 'inconclusive', code: known ? error.code : 'FAILED', ...(known && error.status ? { httpStatus: error.status } : {}), ...(known && error.oauthCode ? { oauthCode: error.oauthCode } : {}) };
+  const evidence = { mode, result: 'inconclusive', code: known ? error.code : 'FAILED', ...(known && error.status ? { httpStatus: error.status } : {}), ...(known && error.cachedHttpStatus ? { cachedHttpStatus: error.cachedHttpStatus } : {}), ...(known && error.oauthCode ? { oauthCode: error.oauthCode } : {}) };
   if (mode === 'wrong-verifier' && error.code === 'CODE_EXCHANGE_FAILED' && error.oauthCode === 'invalid_grant') evidence.result = 'wrong_verifier_rejected';
   console.log(JSON.stringify(evidence));
   process.exitCode = evidence.result === 'wrong_verifier_rejected' ? 0 : 1;

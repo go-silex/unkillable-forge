@@ -55,6 +55,8 @@ export class OAuthClient {
     return this.resource;
   }
   async saveDiscoveryState(state) {
+    if (!state.resourceMetadata || typeof state.resourceMetadata !== 'object' || Array.isArray(state.resourceMetadata)) throw new SpikeFailure('oauth', 'PRM_UNAVAILABLE');
+    if (!Array.isArray(state.resourceMetadata.authorization_servers) || !state.resourceMetadata.authorization_servers.length) throw new SpikeFailure('oauth', 'PRM_AUTHORIZATION_SERVERS_MISSING');
     const issuer = new URL(state.authorizationServerUrl);
     if (issuer.protocol !== 'https:' || issuer.username || issuer.password || issuer.search || issuer.hash) throw new SpikeFailure('oauth', 'AUTHORIZATION_SERVER_INVALID');
     if (issuer.href !== this.expectedIssuer.href) throw new SpikeFailure('oauth', 'AUTHORIZATION_SERVER_MISMATCH');
@@ -66,14 +68,14 @@ export class OAuthClient {
     if (!Array.isArray(methods) || !methods.includes('S256')) throw new SpikeFailure('oauth', methods ? 'S256_NOT_ADVERTISED' : 'S256_METADATA_ABSENT');
   }
   async redirectToAuthorization(url) {
-    if (this.refreshOnly) throw this.refreshFailure || new SpikeFailure('oauth', 'REFRESH_ONLY_INTERACTIVE_BLOCKED');
+    if (this.authMode !== 'interactive') throw this.refreshFailure || new SpikeFailure('oauth', 'INTERACTIVE_AUTH_BLOCKED');
     this.authorizationUrl = url;
     console.error('Authenticate in your browser at http://127.0.0.1:39875/start');
   }
-  async authenticate(challenge, signal, refreshOnly) {
+  async authenticate(challenge, signal, authMode) {
     this.expectedState = randomBytes(32).toString('base64url');
-    this.authorizationUrl = undefined; this.verifier = undefined; this.refreshOnly = refreshOnly; this.refreshFailure = undefined; this.refreshSucceeded = false; this.refreshStatus = undefined;
-    if (refreshOnly && !this.data.tokens?.refresh_token) throw new SpikeFailure('oauth', 'REFRESH_TOKEN_MISSING');
+    this.authorizationUrl = undefined; this.verifier = undefined; this.authMode = authMode; this.refreshFailure = undefined; this.refreshSucceeded = false; this.refreshStatus = undefined;
+    if (authMode !== 'interactive' && (!this.data.tokens?.refresh_token || !this.data.client)) throw new SpikeFailure('oauth', 'CACHED_REFRESH_CREDENTIALS_MISSING');
     const { resourceMetadataUrl } = extractWWWAuthenticateParams(challenge);
     if (!resourceMetadataUrl) throw new SpikeFailure('oauth', 'RESOURCE_METADATA_MISSING', 401);
     if (resourceMetadataUrl.protocol !== 'https:' || resourceMetadataUrl.origin !== this.resource.origin || resourceMetadataUrl.username || resourceMetadataUrl.password || resourceMetadataUrl.hash || resourceMetadataUrl.search) throw new SpikeFailure('oauth', 'RESOURCE_METADATA_URL_INVALID');
@@ -84,6 +86,7 @@ export class OAuthClient {
       }
       const params = init.body instanceof URLSearchParams ? init.body : null;
       const isRefresh = params?.get('grant_type') === 'refresh_token';
+      if ((init.method || 'GET').toUpperCase() === 'POST' && authMode !== 'interactive' && !isRefresh) throw new SpikeFailure('oauth', 'NONINTERACTIVE_POST_BLOCKED');
       let response;
       try { response = await fetch(url, { ...init, signal, redirect: 'manual' }); }
       catch (error) { if (isRefresh && !signal.aborted) this.refreshFailure = new SpikeFailure('oauth', 'REFRESH_NETWORK_ERROR'); throw error; }
@@ -126,7 +129,7 @@ export class OAuthClient {
     let timer;
     try {
       if (signal.aborted) throw new SpikeFailure('oauth', 'CANCELLED');
-      await new Promise((resolve, reject) => server.listen(39875, '127.0.0.1', resolve).once('error', reject));
+      if (authMode === 'interactive') await new Promise((resolve, reject) => server.listen(39875, '127.0.0.1', resolve).once('error', reject));
       const result = await auth(this, { serverUrl: this.resource, resourceMetadataUrl, fetchFn });
       if (result === 'REDIRECT') {
         const child = spawn('xdg-open', ['http://127.0.0.1:39875/start'], { stdio: 'ignore', detached: true }); child.on('error', () => {}); child.unref();
@@ -141,21 +144,28 @@ export class OAuthClient {
       return 'refreshed';
     } finally { clearTimeout(timer); resolveCompletion(false); signal.removeEventListener('abort', aborted); server.closeAllConnections(); server.close(); }
   }
-  async ensure(signal, refreshOnly = false) {
+  async ensure(signal, authMode = 'interactive') {
+    if (!['interactive', 'noninteractive', 'refresh-only'].includes(authMode)) throw new SpikeFailure('oauth', 'AUTH_MODE_INVALID');
     if (this.busy) throw new SpikeFailure('oauth', 'AUTH_IN_PROGRESS');
     this.busy = true;
+    let cachedHttpStatus;
     try {
       const headers = { accept: 'text/event-stream' };
-      if (!refreshOnly && this.data.tokens) headers.authorization = `Bearer ${this.data.tokens.access_token}`;
+      if (authMode !== 'refresh-only' && this.data.tokens?.access_token) headers.authorization = `Bearer ${this.data.tokens.access_token}`;
+      if (authMode === 'noninteractive' && !headers.authorization) throw new SpikeFailure('oauth', 'CACHED_TOKEN_MISSING');
       let response = await fetch(this.resource, { method: 'GET', redirect: 'manual', headers, signal });
+      if (headers.authorization) cachedHttpStatus = response.status;
       let authPath = 'cached';
       if (response.status === 401) {
-        authPath = await this.authenticate(response, signal, refreshOnly);
+        authPath = await this.authenticate(response, signal, authMode);
         response = await fetch(this.resource, { method: 'GET', redirect: 'manual', headers: { authorization: `Bearer ${this.data.tokens.access_token}`, accept: 'text/event-stream' }, signal });
-      } else if (refreshOnly) throw new SpikeFailure('oauth', 'REFRESH_CHALLENGE_NOT_OBSERVED', response.status);
+      } else if (authMode === 'refresh-only') throw new SpikeFailure('oauth', 'REFRESH_CHALLENGE_NOT_OBSERVED', response.status);
       if ((response.status !== 405 && !response.ok) || !this.data.tokens?.access_token) throw new SpikeFailure('oauth', 'HTTP_ERROR', response.status);
       await response.body?.cancel();
-      return { token: this.data.tokens.access_token, authPath, ...(authPath === 'refreshed' ? { refresh: { httpStatus: this.refreshStatus } } : this.refreshFailure && authPath === 'authorized' ? { refresh: { code: this.refreshFailure.code, httpStatus: this.refreshFailure.status, oauthCode: this.refreshFailure.oauthCode } } : {}) };
+      return { token: this.data.tokens.access_token, authPath, ...(cachedHttpStatus ? { cachedHttpStatus } : {}), ...(authPath === 'refreshed' ? { refresh: { httpStatus: this.refreshStatus } } : this.refreshFailure && authPath === 'authorized' ? { refresh: { code: this.refreshFailure.code, httpStatus: this.refreshFailure.status, oauthCode: this.refreshFailure.oauthCode } } : {}) };
+    } catch (error) {
+      if (error instanceof SpikeFailure && cachedHttpStatus) error.cachedHttpStatus = cachedHttpStatus;
+      throw error;
     } finally { this.busy = false; }
   }
 }

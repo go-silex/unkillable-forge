@@ -62,20 +62,20 @@ async function upload(file, token, signal) {
   } finally { await handle.close(); }
 }
 
-mcp.registerTool('transfer_fixture', { description: 'Transfer a synthetic local file or directory to the authenticated temporary receiver and compare actual streamed SHA-256. No publishing.', inputSchema: { localPath: z.string().min(1), refreshOnly: z.boolean().optional() } }, async ({ localPath, refreshOnly }, { signal }) => {
+mcp.registerTool('transfer_fixture', { description: 'Transfer a synthetic local file or directory to the authenticated temporary receiver and compare actual streamed SHA-256. No publishing.', inputSchema: { localPath: z.string().min(1), authMode: z.enum(['interactive', 'noninteractive', 'refresh-only']).optional() } }, async ({ localPath, authMode }, { signal }) => {
   let stage = 'collect';
   try {
     const files = []; await collect(await fixturePath(localPath), '', files);
     if (!files.length) throw new SpikeFailure('collect', 'EMPTY_DIRECTORY');
     stage = 'oauth';
-    const authResult = await oauth.ensure(signal, refreshOnly === true);
+    const authResult = await oauth.ensure(signal, authMode);
     stage = 'upload';
     const receipts = [];
     for (const file of files) receipts.push(await upload(file, authResult.token, signal));
-    return { content: [{ type: 'text', text: JSON.stringify({ authPath: authResult.authPath, ...(authResult.refresh ? { refresh: authResult.refresh } : {}), files: receipts }) }] };
+    return { content: [{ type: 'text', text: JSON.stringify({ authPath: authResult.authPath, ...(authResult.cachedHttpStatus ? { cachedHttpStatus: authResult.cachedHttpStatus } : {}), ...(authResult.refresh ? { refresh: authResult.refresh } : {}), files: receipts }) }] };
   } catch (error) {
     const failure = error instanceof SpikeFailure ? error : new SpikeFailure(stage, 'FAILED');
-    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ stage: failure.stage, code: failure.code, ...(failure.status ? { httpStatus: failure.status } : {}), ...(failure.oauthCode ? { oauthCode: failure.oauthCode } : {}), ...(failure.resource ? { resource: failure.resource } : {}) }) }] };
+    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ stage: failure.stage, code: failure.code, ...(failure.status ? { httpStatus: failure.status } : {}), ...(failure.cachedHttpStatus ? { cachedHttpStatus: failure.cachedHttpStatus } : {}), ...(failure.oauthCode ? { oauthCode: failure.oauthCode } : {}), ...(failure.resource ? { resource: failure.resource } : {}) }) }] };
   }
 });
 await mcp.connect(new StdioServerTransport());
