@@ -9,7 +9,7 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.8.1",
-    "@cloudflare/workers-types": "^4.20250214.0",
+    "@cloudflare/workers-types": "^5.20261110.1",
     "@types/node": "^26.2.0",
     "lefthook": "^2.1.12",
     "typescript": "^5.8.2",
