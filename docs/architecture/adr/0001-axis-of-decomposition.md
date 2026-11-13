@@ -1,13 +1,16 @@
 ---
 title: Axis of decomposition — pipeline stages, not publish commands
-status: accepted
+status: superseded
 date: 2026-09-07
 deciders: mickael
-axial: true
+axial: false
+superseded_by: 0002-axis-of-decomposition-business-authority
 tags: [architecture, decomposition, publish-pipeline]
 ---
 
 # Axis of decomposition
+
+> **Superseded** on 2026-11-12 by [ADR 0002 — business authority](0002-axis-of-decomposition-business-authority.md). Kept as the historical record. Its stage-composition rules still bind the legacy publisher (`plugins/silex-forge/scripts/`, `functions/`) until F15, through ADR 0002 § "Legacy tree until F15".
 
 ## Context
 
