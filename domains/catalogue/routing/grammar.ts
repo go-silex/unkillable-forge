@@ -24,7 +24,7 @@ const segmentRe = /^[A-Za-z0-9._-]+$/
 const keyRe = /^[A-Za-z0-9_-]{8,128}$/
 const idRe = /^(?:pg|rv)_[a-z2-7]{26}$/
 const pageRefRe = /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.html$/
-const validPageRef = (value: string): boolean => pageRefRe.test(value) && !value.includes("..")
+export const validPageRef = (value: string): boolean => pageRefRe.test(value) && !value.includes("..")
 
 export function subtreeSlugOf(path: string): string | null {
   if (!path.startsWith("/a/")) return null

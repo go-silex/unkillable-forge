@@ -11,6 +11,7 @@ Plan : [forge-convergence-plan.md](forge-convergence-plan.md). Dernière mise à
 - Checkouts principaux et changements utilisateur préservés. Le document initial reste dans son worktree ; une copie est incluse dans F01 pour son versionnement.
 - Toute écriture de code/documentation se fait en worktree dédié. Les inventaires de corpus et preuves privées restent hors Git ; aucune valeur de partage n'est publiée.
 - La fenêtre à froid retenue concerne F13 complet puis F14, après leurs prérequis et autorisations ; l'état final et la dernière mutation devront être vérifiés alors. Elle n'introduit aucun gel avant le nouveau moteur et ne vaut pas autorisation de mutation GitHub/Cloudflare.
+- Arbitrage explicite du 2026-11-13 : F04 peut démarrer après F03 mergé, uniquement pour Publication/Revision Store, `0002_*` et les preuves D1/R2 locales, en worktree et PR draft dédiés. `authenticateManage` reste le seul point d'entrée d'identité ; aucun code du spike ou contournement d'authentification. F06 accepté et mergé demeure requis avant adapter HTTP/configuration du manage Worker, acceptation, revue finale et merge F04. Les autres dépendances et les preuves réelles des trois clients restent inchangées ; cet arbitrage n'autorise aucune ressource Cloudflare ni mutation de production.
 
 ## F01 — observations réalisées en lecture seule
 
@@ -186,6 +187,14 @@ La [CI manuelle 43431632665](https://github.com/go-silex/unkillable-forge/action
 Zone Gosilex établie avec le grant opérateur existant rafraîchi ; DNS/Access et collisions exactes/wildcards restent à vérifier avec permissions suffisantes. Diagnostic actuel : le parent de cette session utilise un exécutable OMP18.18.8, tandis que le relay partagé et le CLI installé indiquent18.20.0 ; le protocole causal et l'effet d'un restart ne sont pas prouvés. Aucun restart global, fermeture Chrome ou changement de configuration exécuté. Aucun Worker/app/domaine F06, configuration client réelle, consentement ou révocation/suppression créé ou autorisé. F06 reste non livré.
 
 
+## F04 — Publication et Revision Store locaux ; non livré
+
+- Domaine implémenté dans le worktree dédié : transferts R2 immuables avec checksum natif et création conditionnelle, reprise et matérialisation des fichiers inchangés avant scellement ; activation sans copie ni renommage des fichiers.
+- Sessions, manifestes, reçus idempotents et activation CAS sur D1 primaire ; restore/unpublish, réadmission des ownerships et refus des providers étrangers sous un subtree. Les lectures de statut relisent l'autorité courante sans confondre conflit de contenu et perte du travail en staging.
+- La fermeture authentifiée de sa propre session réduit uniquement cette capacité ; elle ne publie rien et ne change aucun droit. Le discard permanent bloque restauration et nouveau pinning avant suppression des octets. La maintenance doit rebalayer les discards, y compris déjà balayés : un PUT natif tardif peut laisser des octets après une première purge.
+- Historique des preuves locales : premier passage 186/189 tests et TSC refusé ; après correction des trois causes, TSC réussi et 197/198 tests. Le dernier refus venait d'une fixture essayant de créer via le publisher un ownership désormais interdit ; le cas de défense en profondeur conserve ses assertions, avec injection explicite de cet état historique/corrompu. Les gates natives et la CI doivent être prouvées sur le SHA proposé ; cette trace historique ne les remplace pas.
+- Aucun adapter HTTP/configuration du manage Worker ni déploiement. F06 réel accepté et mergé, preuves cloud ciblées, revue indépendante du SHA final et CI requise restent dus. Pas de modification des accès de production ou des shortlinks.
+
 ## Lots et traçabilité
 
 ### Vague A
@@ -194,14 +203,14 @@ Zone Gosilex établie avec le grant opérateur existant rafraîchi ; DNS/Access 
 |---|---|---|---|
 | F01 | **Livré**, sous l'amendement de gate accepté | `~/.omp/wt/silex-forge/docs-F01-inventory` ; `docs/F01-inventory` | [PR #69](https://github.com/go-silex/silex-forge/pull/69), head revu `7ecc82b80d4ac7796aa2f128fd71405be44a585d`, merge `8440d7009ed771fcab2c64642048e96afa9b3a8c` ; [CI verte](https://github.com/go-silex/silex-forge/actions/runs/43094058384) et [secret scan vert](https://github.com/go-silex/silex-forge/actions/runs/43094058552) ; G1b ouvert |
 | F02 | **Livré** | Source legacy conservée ; `unkillable-forge/docs-F02-provenance`, `docs/F02-provenance` ; `projects-meta/chore-F02-forge-canonical-registry` | [PR canonique #7](https://github.com/go-silex/unkillable-forge/pull/7), head `a1319834301e1bf2322f3e95b540dc7f64286e1c`, merge `9722984354d4597d765b2d645240e6b2f98f3068` ; [CI cinq jobs réussis](https://github.com/go-silex/unkillable-forge/actions/runs/43298098734) ; [registre #46](https://github.com/Roxabi/projects-meta/pull/46), head `77b073dc850fac7cfb06c05ebd4e903d9d425afa`, merge `6ab276eee0f21e7c940bead561236a09d53db212`, hooks natifs réussis |
-| F03 | Implémenté ; règle usableProof éprouvée localement, **non livré** | `~/.omp/wt/unkillable-forge/feat-F03-core-contract`, `feat/F03-core-contract`, base `9722984354d4597d765b2d645240e6b2f98f3068` | [PR #9](https://github.com/go-silex/unkillable-forge/pull/9) ; CI66d8 réelle 24 fichiers/181 tests, N1/N1b traités par un prédicat complet et neuf cas ciblés réussis ; nouveau SHA à revoir et valider en CI |
-| F06 | Préparation revue ; **non livré** | `~/.omp/wt/unkillable-forge/spike-F06-mcp-auth`, `spike/F06-mcp-auth`, même base | [PR #8](https://github.com/go-silex/unkillable-forge/pull/8), head `143cb7e3703b23b90b0d466bc594ccd8d81ebf99`, source CLEAR et [CI cinq jobs réussis](https://github.com/go-silex/unkillable-forge/actions/runs/43431632665) ; vraie matrice, préflight et opérations isolées non exercés/non autorisés |
+| F03 | **Livré** | `~/.omp/wt/unkillable-forge/feat-F03-core-contract`, `feat/F03-core-contract` | [PR #9](https://github.com/go-silex/unkillable-forge/pull/9), source `dda21e21e4e25f9608baf9f04e4b295669bb84a9`, deux revues indépendantes CLEAR ; merge `48b1d11a44b817a642e095087457d7f24e94a088` ; [CI cinq jobs réussis](https://github.com/go-silex/unkillable-forge/actions/runs/43437954771), 24 fichiers/183 tests, [secret scan réussi](https://github.com/go-silex/unkillable-forge/actions/runs/43437954770) ; aucune application de migration en production |
+| F06 | Préparation revue ; **non livré** | `~/.omp/wt/unkillable-forge/spike-F06-mcp-auth`, `spike/F06-mcp-auth` | [PR #8](https://github.com/go-silex/unkillable-forge/pull/8), source intégrant F03 `c305cb8941312d13e92fb5066925a34c2ffd7d16`, revue CLEAR limitée à la préparation et [CI manuelle cinq jobs réussis](https://github.com/go-silex/unkillable-forge/actions/runs/43441635314) ; SDK/workerd locaux éprouvés sur fixture synthétique de 4,6 Mo. Préflight Cloudflare en lecture seule réalisé ; aucune création, consentement ou révocation autorisée/exécutée. Vraie matrice trois clients non éprouvée |
 
 ### Vague B
 
 | Lot | État | Dépendances bloquantes |
 |---|---|---|
-| F04 | Non démarré | F03, F06 |
+| F04 | Domaine local implémenté, validation en cours, **non livré** ; `~/.omp/wt/unkillable-forge/feat-F04-publication`, `feat/F04-publication`, base `48b1d11a44b817a642e095087457d7f24e94a088` | F03 satisfait ; exception de démarrage approuvée. F06 accepté et mergé reste bloquant avant adapter HTTP/config manage Worker, acceptation, revue finale et merge ; aucun déploiement |
 | F05 | Non démarré | F03, F04 |
 | F07 | Non démarré | F04, F06 |
 | F08 | Non démarré | F04, F05, F06, F07 ; worktrees consommateurs distincts |

@@ -1,7 +1,8 @@
 import { env } from "cloudflare:workers"
 import { beforeEach, describe, expect, it } from "vitest"
-import { assignRole, disablePrincipal, revokeRole } from "../../domains/catalogue/commands"
+import { assignRole, claimPageStatements, disablePrincipal, retirePageStatements, revokeRole } from "../../domains/catalogue/commands"
 import { executeGuarded, type GuardRequest } from "../../domains/catalogue/guard"
+import { documentRouteOf, validateRevisionPaths } from "../../domains/catalogue/revision-paths"
 import { actor, adminRoleId, artifactId, authenticatedActor, bootstrap, configs, digest, jwks, pageFixture, pageId, principalId, revisionId } from "./fixtures/catalogue"
 
 const guard: GuardRequest = { action: "set_visibility", pageId, artifactId, expectedPolicyEpoch: 0, requestDigest: digest, occurredAt: 10 }
@@ -45,6 +46,55 @@ describe("transactional policy guard", () => {
     const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
     await expect(executeGuarded(deps, actor, [{ action: "create_page", pageId: `pg_${"b".repeat(26)}`, artifactId: foreignArtifact, revisionId: foreignRevision, requestDigest: digest, occurredAt: 10 }], [effect()])).rejects.toMatchObject({ code: "conflict" })
     expect(await env.DB.prepare("SELECT visibility FROM pages WHERE page_id = ?").bind(pageId).first()).toEqual({ visibility: "private" })
+  })
+  it("rejects appending ownership to an active revision without changing the page", async () => {
+    const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
+    await expect(executeGuarded(deps, actor, [{ action: "stage", pageId, artifactId, revisionId, requestDigest: digest, occurredAt: 10 }], [effect()], { revisionId, edges: [{ ownerPageId: pageId, path: "/asset.js", providerArtifactId: artifactId }] })).rejects.toMatchObject({ code: "invalid_state" })
+    expect(await env.DB.prepare("SELECT visibility FROM pages WHERE page_id = ?").bind(pageId).first()).toEqual({ visibility: "private" })
+  })
+  it("does not activate or pin a discarded revision", async () => {
+    const discarded = `rv_${"d".repeat(26)}`
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO revisions (revision_id,artifact_id,origin,manifest_sha256,manifest_object_key,sealed_at) VALUES (?,?,'published',?,'discarded',2)").bind(discarded, artifactId, digest),
+      env.DB.prepare("INSERT INTO revision_discards (revision_id,discarded_at,verdict) VALUES (?,3,'ok')").bind(discarded),
+    ])
+    const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
+    await expect(executeGuarded(deps, actor, [{ action: "publish", pageId, artifactId, revisionId: discarded, expectedPolicyEpoch: 0, expectedContentVersion: 0, requestDigest: digest, occurredAt: 10 }], [effect()])).rejects.toMatchObject({ code: "not_found" })
+    await expect(executeGuarded(deps, actor, [{ action: "share", pageId, artifactId, revisionId: discarded, expectedPolicyEpoch: 0, requestDigest: digest, occurredAt: 10 }], [effect()])).rejects.toMatchObject({ code: "invalid_state" })
+    expect(await env.DB.prepare("SELECT visibility FROM pages WHERE page_id = ?").bind(pageId).first()).toEqual({ visibility: "private" })
+  })
+  it("maps canonical documents to their route without admitting malformed paths", () => {
+    expect(documentRouteOf("/a/sample/index.html")).toEqual({ kind: "subtree", slug: "sample" })
+    expect(documentRouteOf("/docs/page.html")).toEqual({ kind: "tree_page", pageRef: "docs/page.html" })
+    for (const path of ["/a/sample/sub/page.html", "/a/Bad/index.html", "/docs/../page.html", "/docs//page.html", "/api"]) expect(documentRouteOf(path)).toBeNull()
+  })
+  it("reports reserved, shell and foreign subtree paths against the primary", async () => {
+    const deps = { db: env.DB, config: (await configs()).manage }
+    const conflicts = await validateRevisionPaths(deps, { artifactId: `ar_${"b".repeat(26)}`, paths: ["/a/sample/file.js", "/a/unclaimed/file.js", "/api/private", "/login"], newSubtreeSlugs: [] })
+    expect(conflicts).toEqual([
+      { path: "/a/sample/file.js", reason: "foreign_subtree" },
+      { path: "/a/unclaimed/file.js", reason: "reserved" },
+      { path: "/api/private", reason: "reserved" },
+      { path: "/login", reason: "shell" },
+    ])
+    await expect(validateRevisionPaths({ ...deps, config: { ...deps.config, instanceId: "different" } }, { artifactId, paths: [], newSubtreeSlugs: [] })).rejects.toMatchObject({ code: "instance_mismatch" })
+  })
+  it("reports a foreign mount under a newly claimed subtree", async () => {
+    const foreign = `ar_${"b".repeat(26)}`, foreignRevision = `rv_${"b".repeat(26)}`
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO artifacts (artifact_id,origin,created_at) VALUES (?,'published',1)").bind(foreign),
+      env.DB.prepare("INSERT INTO revisions (revision_id,artifact_id,origin,manifest_sha256,manifest_object_key,sealed_at) VALUES (?,?,'published',?,'foreign',1)").bind(foreignRevision, foreign, digest),
+      env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?,'/a/future/foreign.js','asset','foreign',?,1,'application/javascript')").bind(foreignRevision, digest),
+      env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES ('/a/future/foreign.js',?,?,'asset')").bind(foreign, foreignRevision),
+    ])
+    const deps = { db: env.DB, config: (await configs()).manage }
+    expect(await validateRevisionPaths(deps, { artifactId, paths: ["/a/future/index.html"], newSubtreeSlugs: ["future"] })).toContainEqual({ path: "/a/future/foreign.js", reason: "foreign_subtree" })
+  })
+  it("refuses forged actors at the page statement builders", async () => {
+    const deps = { db: env.EMPTY_DB, config: (await configs()).manage, jwks, now: () => 10 }
+    const forged = { ...actor }
+    expect(() => claimPageStatements(deps, forged, { pageId, artifactId, route: { kind: "subtree", slug: "sample" }, at: 10 })).toThrowError(expect.objectContaining({ code: "unauthenticated" }))
+    expect(() => retirePageStatements(deps, forged, { pageId, at: 10 })).toThrowError(expect.objectContaining({ code: "unauthenticated" }))
   })
   it("maps real D1 missing-schema and named guard failures", async () => {
     const config = (await configs()).manage

@@ -241,7 +241,7 @@ async function decideReadAuthorized(db: D1Database, config: ReadInstanceConfig, 
     const pathAllowed = row.kind === 'document'
       ? row.resource_artifact_id === row.artifact_id && !!row.own_document
       : row.route_kind === 'subtree'
-        ? subject.path.startsWith(`/a/${row.route_key}/`) && (row.resource_artifact_id === row.artifact_id || (row.owned && (row.kind === 'fragment' || row.kind === 'asset')))
+        ? subject.path.startsWith(`/a/${row.route_key}/`) && row.resource_artifact_id === row.artifact_id
         : row.owned && (row.kind === 'fragment' || row.kind === 'asset')
     const matchingProof = proof && proof.instanceId === config.instanceId && proof.pageId === subject.pageId && proof.revisionId === subject.revisionId && proof.policyEpoch === row.policy_epoch ? proof : null
     const grantHolds = matchingProof?.basis.kind === 'grant' && !!row.grant_id && row.visibility === 'shared' && (row.mode === 'follow_active' || row.pinned_revision_id === subject.revisionId)
@@ -261,22 +261,53 @@ export async function decideRead(db: D1Database, config: ReadInstanceConfig, sub
   } catch { return deny('unavailable') }
 }
 
+function policyPrincipalStatement(db: D1Database, actor: ManageActor, pageIds: readonly string[]): D1PreparedStatement {
+  return db.prepare(`SELECT p.status, p.authority_epoch,
+    EXISTS (SELECT 1 FROM role_grants g WHERE g.principal_id = p.principal_id AND g.revoked_at IS NULL AND (g.role = 'admin' OR (g.role = 'publisher' AND g.scope_kind = 'installation'))) AS global_authority,
+    NOT EXISTS (SELECT 1 FROM json_each(?2) j WHERE NOT EXISTS
+      (SELECT 1 FROM role_grants g WHERE g.principal_id = p.principal_id AND g.revoked_at IS NULL
+        AND (g.role = 'admin' OR (g.role = 'publisher' AND (g.scope_kind = 'installation' OR (g.scope_kind = 'page' AND g.scope_page_id = j.value)))))) AS page_authority
+    FROM principals p WHERE p.principal_id = ?1`).bind(actor.principalId, JSON.stringify(pageIds))
+}
+
+function assertPolicyPrincipal(results: D1Result[], deps: ManageDeps, actor: ManageActor, pageCount: number): void {
+  if (!instanceMatches(results, deps.config.instanceId)) throw new PolicyError('instance_mismatch')
+  const principal = results[1].results[0] as Row | undefined
+  if (!principal || principal.status !== 'active') throw new PolicyError('unauthenticated')
+  if (principal.authority_epoch !== actor.authorityEpoch) throw new PolicyError('conflict')
+  if (pageCount === 0 ? !principal.global_authority : !principal.page_authority) throw new PolicyError('forbidden')
+}
+
 export async function readPagePolicy(deps: ManageDeps, actor: ManageActor, pageId: string): Promise<PagePolicyView | null> {
   try {
     requireManageActor(actor, deps)
     const results = await deps.db.batch([
       instanceStatement(deps.db),
-      deps.db.prepare(`SELECT p.status, p.authority_epoch, EXISTS (SELECT 1 FROM role_grants g WHERE g.principal_id = p.principal_id AND g.revoked_at IS NULL AND (g.role = 'admin' OR (g.role = 'publisher' AND (g.scope_kind = 'installation' OR g.scope_page_id = ?2)))) AS authorized FROM principals p WHERE p.principal_id = ?1`).bind(actor.principalId, pageId),
+      policyPrincipalStatement(deps.db, actor, [pageId]),
       deps.db.prepare(`SELECT p.page_id, p.artifact_id, p.visibility, p.policy_epoch, a.content_version, g.grant_id, g.mode, g.pinned_revision_id, (g.sealed_key IS NOT NULL) AS revealable FROM pages p JOIN artifacts a ON a.artifact_id = p.artifact_id LEFT JOIN share_grants g ON g.page_id = p.page_id AND g.revoked_at IS NULL WHERE p.page_id = ?1 AND p.tombstoned_at IS NULL`).bind(pageId),
     ])
-    if (!instanceMatches(results, deps.config.instanceId)) throw new PolicyError('instance_mismatch')
-    const principal = results[1].results[0] as Row | undefined
-    if (!principal || principal.status !== 'active') throw new PolicyError('unauthenticated')
-    if (principal.authority_epoch !== actor.authorityEpoch) throw new PolicyError('conflict')
-    if (!principal.authorized) throw new PolicyError('forbidden')
+    assertPolicyPrincipal(results, deps, actor, 1)
     const row = results[2].results[0] as Row | undefined
     if (!row) return null
     return { pageId: row.page_id, artifactId: row.artifact_id, visibility: row.visibility, policyEpoch: row.policy_epoch, contentVersion: row.content_version,
       grant: row.grant_id ? { grantId: row.grant_id, mode: row.mode, revisionId: row.pinned_revision_id, revealable: !!row.revealable } : null }
+  } catch (error) { if (error instanceof PolicyError) throw error; throw new PolicyError('unavailable') }
+}
+
+/** Authorize receipt reads on the primary, including pages retired by the original command. */
+export async function assertReplayAuthority(deps: ManageDeps, actor: ManageActor, input: { readonly artifactId: string; readonly pageIds: readonly string[]; readonly expectedActorAuthorityEpoch: number }): Promise<void> {
+  requireManageActor(actor, deps)
+  if (input.expectedActorAuthorityEpoch !== actor.authorityEpoch) throw new PolicyError('conflict')
+  try {
+    const pages = JSON.stringify(input.pageIds)
+    const results = await deps.db.batch([
+      instanceStatement(deps.db),
+      policyPrincipalStatement(deps.db, actor, input.pageIds),
+      deps.db.prepare(`SELECT NOT EXISTS (SELECT 1 FROM json_each(?2) j WHERE NOT EXISTS
+          (SELECT 1 FROM pages WHERE page_id = j.value AND artifact_id = ?1)) AS pages_exist`).bind(input.artifactId, pages),
+    ])
+    assertPolicyPrincipal(results, deps, actor, input.pageIds.length)
+    const target = results[2].results[0] as Row | undefined
+    if (!target?.pages_exist) throw new PolicyError('not_found')
   } catch (error) { if (error instanceof PolicyError) throw error; throw new PolicyError('unavailable') }
 }

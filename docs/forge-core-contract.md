@@ -7,7 +7,7 @@ Decision: [ADR 0002](architecture/adr/0002-axis-of-decomposition-business-author
 - This document is the implementable contract for lot F03: artefact/page/revision model, D1 schema, instance configuration, identity, roles, ACL, route resolution and the first executable read decisions. The F03 PR implements it.
 - **Owner-approved** items come from the accepted plan and the owner's instruction to build the new engine as designed. **Contract decisions** are technical choices made here to make the plan implementable; they are marked *(contract decision)* and can be changed by a later contract revision without owner arbitration. **Owner decisions** still open are listed in §17 and none blocks F03 code.
 - The legacy runtime (`functions/`, `plugins/silex-forge/`, `site/`) is the parity oracle and stays untouched by F03.
-- **Normative SQL lives in code.** The schema is [`migrations/0001_catalogue.sql`](../migrations/0001_catalogue.sql). The guard, ownership admission, read, registration and builder statements are in [`domains/catalogue/`](../domains/catalogue/) (`guard.ts`, `read.ts`, `principals.ts`, `commands.ts`, `revision-paths.ts`, `catalogue-list.ts`). This contract states the rules that SQL must satisfy, the interfaces and the tests, and keeps no copy of the SQL. Code that breaks a rule here is a defect; changing a rule is a contract revision.
+- **Normative SQL lives in code.** The schemas are [`migrations/0001_catalogue.sql`](../migrations/0001_catalogue.sql) and [`migrations/0002_publication.sql`](../migrations/0002_publication.sql). Catalogue guard, ownership admission, read, registration and builder statements are in [`domains/catalogue/`](../domains/catalogue/); Publication session, event, assertion and discard statements are in [`domains/publication/`](../domains/publication/). This contract states the rules that SQL must satisfy, the interfaces and the tests, and keeps no copy of the SQL. Code that breaks a rule here is a defect; changing a rule requires changing this contract and its tests.
 
 Oracles:
 
@@ -51,8 +51,9 @@ Mount: path → (artefact, active revision, kind)   (one artefact per path)
 
 Rules:
 
-- **Identity is opaque.** Pages, artefacts, revisions, grants, principals, role grants and events have random IDs: prefix `pg_`, `ar_`, `rv_`, `gr_`, `pr_`, `rg_`, `ev_` followed by 26 characters of lowercase RFC 4648 base32 (`a-z2-7`) encoding 16 random bytes *(contract decision)*. Slugs and tree paths are route keys.
+- **Identity is opaque.** Pages, artefacts, revisions, grants, principals, role grants, guard events, Publication sessions and Publication events have random IDs: prefix `pg_`, `ar_`, `rv_`, `gr_`, `pr_`, `rg_`, `ev_`, `ps_`, `pe_` respectively followed by 26 characters of lowercase RFC 4648 base32 (`a-z2-7`) encoding 16 random bytes *(contract decision)*. Slugs and tree paths are route keys.
 - **Page ≠ file.** A page is the ACL unit; its document is one resource. Subtree pages (Silex `/a/<slug>/`) govern every resource under their prefix. Tree pages (R) govern their document; fragments and assets are reached only through ownership.
+- **Subtree ownership is local.** Every ownership edge of a subtree page names its own artefact and a resource under that page's exact `/a/<slug>/` prefix, including for administrators and installation publishers. Admission asserts this in the same guarded batch as the revision-page and edge; tree-page ownership may cross artefacts under the authority rule below.
 - **Ownership is declared, not guessed.** A revision's pages declare the paths they use. Access to a fragment or asset outside a subtree requires an owner page whose *active* revision (for a pinned read, whose authorized revision) declares that path together with the artefact that provides it. Ownership may cross artefacts (a shared asset mounted by artefact Y and used by pages of artefact X). The edge then names Y, and only Y's current mount satisfies it: the resource follows Y's active revision, not X's revision. A later mount of the same path by another artefact Z never satisfies the edge. Adding or retargeting a cross-artefact edge needs administrator or installation-publisher authority (§9, ownership admission).
 - **No laundering.** A path is mounted by exactly one artefact with exactly one kind. A path that is a page document can never be mounted or read as a fragment or asset (§7 foreign keys). Inside the pinned namespace, a page reads only its own document, its subtree, or fragments and assets its revision owns. A resource held by the pinned revision itself always takes precedence over any mount.
 - **Revision ≠ authorization.** Knowing a revision ID grants nothing. A public page does not open its older revisions.
@@ -196,7 +197,7 @@ Owner-approved (plan §2.5): team readers read and never mutate; publishing and 
 | Action | Who may | Target must | Versions asserted |
 |---|---|---|---|
 | `create_page` | admin · publisher@installation | page ID unused; revision belongs to artefact; new revision's paths unclaimed by other artefacts | actor authority |
-| `stage` (F04: begin/upload/seal) | admin · publisher@installation · publisher@page (page given) | page live if given; none → installation scope only | actor authority |
+| `stage` (F04: begin/upload/seal) | admin · publisher@installation · publisher@page (live page given) | live page if given; a tombstoned page of the same artefact is permitted only for admin or installation publisher with its expected policy epoch; none → installation scope only | actor authority; tombstoned page policy epoch |
 | `publish` | admin · publisher@installation · publisher@page | page live in artefact; revision belongs to artefact; paths unclaimed by other artefacts | actor authority · page policy epoch · artefact content version |
 | `unpublish` | same as `publish` | page live | actor authority · policy epoch · content version |
 | `restore_page` (F04 restore, §9.4) | admin · publisher@installation | page tombstoned in artefact; revision belongs to artefact and contains the page; paths unclaimed by other artefacts; former route free | actor authority · artefact content version (the tombstone is the page precondition; the effect increments the policy epoch) |
@@ -217,7 +218,7 @@ Owner-approved (plan §2.5): team readers read and never mutate; publishing and 
 
 ## 7. D1 schema (S2)
 
-File `migrations/0001_catalogue.sql`, wrangler D1 migration format, raw SQL, no ORM *(contract decision: the guard must be literal, reviewable SQL)*. D1 enforces foreign keys. F04 adds `0002_*` for publication sessions, uploads and idempotency; it may add columns to `revisions`, never redefine the tables below.
+File `migrations/0001_catalogue.sql`, wrangler D1 migration format, raw SQL, no ORM *(contract decision: the guard must be literal, reviewable SQL)*. D1 enforces foreign keys. Publication owns the additional tables in `migrations/0002_publication.sql`; it does not redefine the Catalogue tables below.
 
 Required content, table by table (the migration is the normative SQL):
 
@@ -236,6 +237,13 @@ Required content, table by table (the migration is the normative SQL):
 | `resource_owners` | primary key (owner revision, owner page, path); `(owner revision, owner page)` references `revision_pages`; path absolute, at most 1024 characters; `provider_artifact_id` (not null) references `artifacts`; `admission` is `local`, `global` or `preserved`, and the value `forbidden` violates the named CHECK `guard_forbidden` (§9, ownership admission) |
 | `share_grants` | `gr_` ID; key verifier `(key_kid, key_hmac)` (§10); `mode` `follow_active` or `pinned`, with `pinned_revision_id` set exactly when pinned; `origin` `minted` or `imported`; sealed copy and seal `kid` set together and erased on revocation; revocation time and reason (`revoked`, `rotated`, `visibility`, `unpublished`) set together; at most one active grant per page |
 | `mutation_events` | `ev_` ID; `action` among the 15 guard actions (§8.2); request digest of 64 lowercase hex; no foreign key; `verdict` in the guard domain, with one named CHECK per refusal: `guard_instance_mismatch`, `guard_unauthenticated`, `guard_forbidden`, `guard_not_found`, `guard_conflict`, `guard_invalid_state`, `guard_last_admin` |
+| `publication_sessions` | `ps_` ID; instance, actor and authority epoch, idempotency key and digest, artefact, new-artefact flag, allocated revision, base revision and content version, creation/expiry/close times and closing principal where present |
+| `publication_files` | per-session path, kind, digest, size, content type, source (`client` or `base`), and paired object key/stored time |
+| `publication_pages` | per-session page ID, disposition (`new`, `keep`, `drop`, `restore`), document path, metadata and expected policy epoch |
+| `publication_edges` | per-session owner page, resource path and provider artefact |
+| `publication_events` | `pe_` ID; seal/commit/restore/unpublish event, instance, actor, artefact, revision, digest, time, receipt and named verdict checks; session-action and actor-idempotency uniqueness |
+| `publication_assertions` | Publication-owned assertion ID and named CHECK verdict (`ok`, `not_found`, `closed`, `expired`, `conflict`); asserts session and idempotency state, never actor authority |
+| `revision_discards` | permanent per-revision claim with discard time, optional first successful sweep time (`purged_at`) and named eligibility verdict checks; a purge timestamp is not a final physical-deletion fence |
 
 Indexes: pages by artefact, mounts by artefact, ownership edges by path, active grants by `(page, key_kid, key_hmac)`, events by page and time.
 
@@ -258,6 +266,7 @@ Write authority (statement builders are the only writers):
 | `resource_owners` | Catalogue & Policy (`executeGuarded` ownership admission) | Publication's seal or commit batch that first writes the revision's edges (F04); import (F10) |
 | `artifacts`, `revisions`, `revision_resources`, `revision_pages`, `mounts` | Publication (F04) | Publication; import (F10) through Publication |
 | `mutation_events` | Catalogue & Policy (guard) | every guarded batch |
+| `publication_sessions`, `publication_files`, `publication_pages`, `publication_edges`, `publication_events`, `publication_assertions`, `revision_discards` | Publication | guarded publication operations, bounded own-session close and internal retention maintenance (§8.3) |
 
 Epochs: `pages.policy_epoch` increments on every change of visibility or grants, on unpublish and on restore; `principals.authority_epoch` on every role grant, role revocation or disable; `artifacts.content_version` on every commit (a restore included) or unpublish of the artefact (F04).
 
@@ -277,27 +286,30 @@ Normative SQL: `GUARD_SQL` in [`domains/catalogue/guard.ts`](../domains/catalogu
    - `import_share`, `set_alias`, `assign_role`, `revoke_role`, `disable_principal`: an active `admin` grant;
    - `create_page`, `restore_page`: an active `admin` or installation `publisher` grant;
    - `stage`, `publish`, `unpublish`, `set_visibility`, `share`, `rotate_share`, `revoke_share`, `reveal_share`: an active `admin` grant, installation `publisher` grant, or `publisher` grant scoped to page `?6`.
+   - `stage` on a tombstoned page of `?7`: active `admin` or installation `publisher` only;
 5. **Target** (`not_found` unless stated):
    - `create_page`: page `?6` already exists → `conflict`;
-   - `publish`, `unpublish`, `set_visibility`, `share`, `rotate_share`, `revoke_share`, `reveal_share`, `import_share`, and `stage` with a page: page `?6` is live in artefact `?7`;
-   - `create_page`, `publish`, `restore_page`: revision `?17` is given and belongs to artefact `?7`;
+   - `publish`, `unpublish`, `set_visibility`, `share`, `rotate_share`, `revoke_share`, `reveal_share`, `import_share`: page `?6` is live in artefact `?7`; `stage` with a page requires that page to belong to `?7`;
+   - `create_page`, `publish`, `restore_page`: revision `?17` is given, belongs to artefact `?7`, and is not discarded;
    - `restore_page`: page `?6` belongs to `?7`, and `revision_pages(?17, ?6)` exists;
    - `set_alias` with a target page: that page is live;
    - `rotate_share`, `revoke_share`, `reveal_share`: grant `?8` is active on page `?6`;
    - `assign_role`, `revoke_role`, `disable_principal`: principal `?9` exists. Also, `assign_role` with a page scope needs page `?6` to exist, and `revoke_role` needs role grant `?10` active for `?9`.
 6. **Concurrency** (`conflict` unless stated):
    - `restore_page`: page `?6` is live;
-   - the page policy actions of rule 5 (`stage` excluded): `policy_epoch` differs from `?12`;
+   - the page policy actions of rule 5, and `stage` on a tombstone: `policy_epoch` differs from `?12`;
    - `publish`, `unpublish`, `restore_page`: `content_version` differs from `?13`;
    - `assign_role`, `revoke_role`, `disable_principal`: the target's `authority_epoch` differs from `?14`. Disabling an already disabled principal → `invalid_state`;
-   - path claims, for `create_page`, `publish` and `restore_page` with `?17`: a resource path of `?17` is mounted by another artefact, or lies under `/a/<key>/` for a subtree route `<key>` of another artefact.
+   - path claims, for `create_page`, `publish` and `restore_page` with `?17`: a resource path of `?17` is mounted by another artefact, lies under another artefact's subtree route, or a newly claimed subtree contains another artefact's mounted resource.
 7. **State:**
-   - `share`, `rotate_share` with `?17`: the revision does not belong to `?7` → `invalid_state`;
+   - `share`, `rotate_share` with `?17`: the revision does not belong to `?7` or is discarded → `invalid_state`;
    - `reveal_share`: the grant has no sealed copy → `invalid_state`;
    - `revoke_role` of an `admin` grant, or `disable_principal` of a principal holding one, would leave no other active administrator held by an active principal → `last_admin`.
 8. Otherwise `ok`.
 
 Parameters: `?1` event ID · `?2` configured instance ID · `?3` action · `?4` actor principal · `?5` actor surface (always `manage`; `?4` and `?11` come from the `ManageActor`, never from a caller field) · `?6` page · `?7` artefact · `?8` share grant · `?9` target principal · `?10` role grant · `?11` expected actor authority epoch · `?12` expected policy epoch · `?13` expected content version · `?14` expected target authority epoch · `?15` request digest (SHA-256 hex of the canonical command without secrets) · `?16` time (epoch ms) · `?17` revision being committed (required for `create_page`, `publish` and `restore_page`), or the pinned revision requested by `share` / `rotate_share` (NULL for `follow_active`). For `rotate_share` without a new mode, bind the existing pinned revision when the existing grant is pinned. A pinned revision missing from this artefact is therefore refused atomically as `invalid_state`. Unused parameters are bound to `NULL`; every comparison is null-safe (`IS NOT`), so a missing expected value is a `conflict`, never a pass.
+
+`?18` is an internal boolean derived by `executeGuarded` from whether ownership edges target this guard's page; callers never supply it. It enforces the first-write ownership rule in §8.3.
 
 `restore_page` neither binds nor asserts `?12`: the tombstone is its page precondition, no other action can change a tombstoned page, and every unpublish or restore also moves the artefact `content_version` asserted through `?13`.
 
@@ -350,12 +362,14 @@ The guard statement builder and the ownership admission builder are module-inter
 
 ### 8.3 Composition rules (normative for every lot)
 
-1. Every D1 write to a table in §7's write-authority list goes through `executeGuarded`, with at least one guard. The batch is `[...guards, ...effects, ...ownership admissions, ...finalEffects]`. When ownership edges are present, every statement that changes an artefact's `active_revision_id` belongs in `finalEffects`, so admissions compare against the previous active revision. There are exactly two unguarded writes, and no policy effect may use either:
+1. Every D1 write to a table in §7's write-authority list goes through `executeGuarded`, with at least one guard. The batch is `[...guards, ...effects, ...ownership admissions, ...finalEffects]`. When ownership edges are present, every statement that changes an artefact's `active_revision_id` belongs in `finalEffects`, so admissions compare against the previous active revision. Only the following bounded unguarded writes are permitted; no policy effect may use them:
    - **Principal self-registration** (§9.1): inserts a new `principals` row for a verified manage-surface identity, keyed by `(issuer, subject)`, conditioned on `instance_meta`. It never writes a role and never changes an existing principal (no reactivation, no field update).
    - **Operator bootstrap** (F11 runbook): the `instance_meta` row and the first administrator's `role_grants` row (`origin = 'bootstrap'`), run once per instance by the operator with deploy credentials.
+   - **Internal retention maintenance** (F04): claims an eligible revision in `revision_discards` using Publication-owned named eligibility checks and records its purge after Store collection. It never changes Catalogue policy, active state or grants; the permanent claim prevents activation or new pins.
+   - **Own Publication session close** (F04): `abort` validates a minted handle with `requireManageActor`, then performs an instance- and actor-bound monotonic update of only its own session's close fields, attributing the close to that principal. It is idempotent, returns void without disclosing whether a session exists, and never derives refusal from affected-row counts. Even after role revocation or principal disable, an authentic handle may reduce the capability of its own draft this way; it grants no publication or read access and cannot alter pages, policy, active state or grants. Actorless retention maintenance may likewise close expired sessions monotonically. Subsequent seal and commit reject closed sessions with `publication_closed`. This exception adds no Catalogue action or guard and does not relax `stage`.
 2. One guard row per targeted page (multi-page publish: one per page) or per targeted principal. `executeGuarded` first refuses an invalid handle (`unauthenticated`, §9.1). It then refuses structurally, with `PolicyError("invalid_state")` and no D1 call, when:
    - the guard list is empty;
-   - an ownership edge has no guard that names the edge's owner page, uses an action among `stage`, `create_page` and `publish`, and has a `revisionId` strictly equal to the ownership revision;
+   - an ownership edge has no guard that names the edge's owner page, uses `stage` or `create_page`, and has a `revisionId` strictly equal to the ownership revision;
    - it contains `assign_role`, `revoke_role` or `disable_principal` together with any other guard. Role and principal changes are one guard per batch: every guard runs before any effect, so two administrator removals in one batch would each still see the other administrator and remove both. Separate batches are separate transactions on the primary, so the second removal sees the first and gets `last_admin`;
    - two guards target the same page, or the same target principal (`targetPrincipalId`, not the common actor).
 
@@ -363,6 +377,8 @@ The guard statement builder and the ownership admission builder are module-inter
 3. **Prepare, then guard.** A command may read current state to build its effects. Its effects must be correct for exactly the state whose versions the guard asserts: if the guard passes, nothing changed since the read. Immutable facts may be inspected during prepare, but the pinned-revision ownership check for `share` and `rotate_share` is also asserted in the shared guard via `?17`; it is never left solely to prepare or an adapter.
 4. Never derive a refusal from `meta.changes`, zero affected rows, `INSERT OR IGNORE`, or `ON CONFLICT … DO UPDATE … WHERE` skipping a row. Path claims use plain `INSERT` (a primary-key violation is a conflict) or are asserted by the guard (`?17` path-claim check) before an unconditional upsert.
 5. Publication's own session state (open, expired, digest match) is asserted by Publication in its own tables (F04) with the same named-CHECK technique; authority and catalogue versions stay in this guard. There is no second authority guard.
+6. Ownership edges are admitted only with first insertion of their owner's `revision_pages` row in the same batch; active or discarded revisions and existing rows cannot gain edges. At publish, restore, and pinned share, existing cross-artefact edges are re-admitted against current global privilege or an identical edge in the current active revision. Discarded revisions cannot be activated or newly pinned. Reverse subtree claims also refuse foreign mounts already under the claimed prefix; these checks serialize on the primary.
+7. `claimPageStatements(deps, actor, input)` and `retirePageStatements(deps, actor, input)` require a minted, validated `ManageActor` and derive attribution from it; a caller cannot provide an actor principal ID. The path validator checks foreign mounts under every claimed subtree in addition to checking current subtree routes.
 
 ### 8.4 Error mapping
 
@@ -375,6 +391,7 @@ The guard statement builder and the ownership admission builder are module-inter
 | `CHECK constraint failed: guard_conflict` | `conflict` | 409 |
 | `CHECK constraint failed: guard_invalid_state` | `invalid_state` | 409 |
 | `CHECK constraint failed: guard_last_admin` | `last_admin` | 409 |
+| Named Publication transition checks (`publication_not_found`, `publication_closed`, `publication_expired`, `publication_incomplete`, `publication_not_sealed`, `publication_never_committed`, `publication_conflict`) and discard eligibility checks (`discard_not_found`, `discard_revision_active`, `discard_revision_pinned`, `discard_revision_staged`, `discard_revision_retained`) | `not_found` for `*_not_found`, `conflict` for `publication_conflict`, otherwise `invalid_state`; `detail` = exact CHECK name | 404 or 409 |
 | `UNIQUE constraint failed` | `conflict`, `detail` = `table.column` | 409 |
 | `FOREIGN KEY constraint failed`, any other constraint | `invariant_violation` (logged) | 500 |
 | anything else (network, timeout, overload) | `unavailable` | 503 |
@@ -413,6 +430,7 @@ export interface PagePolicyView {
 }
 
 export function readPagePolicy(deps: ManageDeps, actor: ManageActor, pageId: string): Promise<PagePolicyView | null>
+export function assertReplayAuthority(deps: ManageDeps, actor: ManageActor, input: { readonly artifactId: string; readonly pageIds: readonly string[]; readonly expectedActorAuthorityEpoch: number }): Promise<void>
 export function setVisibility(deps: ManageDeps, actor: ManageActor, cmd: PageTarget & { readonly visibility: "private" | "public" }): Promise<{ readonly policyEpoch: number }>
 export function share(deps: ManageDeps, actor: ManageActor, cmd: PageTarget & GrantMode): Promise<ShareResult>
 export function rotateShare(deps: ManageDeps, actor: ManageActor, cmd: PageTarget & { readonly grantId: string; readonly next?: GrantMode }): Promise<ShareResult>
@@ -427,12 +445,13 @@ export function revokeRole(deps: ManageDeps, actor: ManageActor, cmd: { readonly
 export function disablePrincipal(deps: ManageDeps, actor: ManageActor, cmd: { readonly targetPrincipalId: string; readonly expectedTargetAuthorityEpoch: number }): Promise<void>
 
 // builders composed by Publication (F04) and import (F10) as executeGuarded effects
-export function claimPageStatements(db: D1Database, p: { readonly pageId: string; readonly artifactId: string; readonly route: { readonly kind: "subtree"; readonly slug: string } | { readonly kind: "tree_page"; readonly pageRef: string }; readonly actorPrincipalId: string | null; readonly at: number }): readonly D1PreparedStatement[]
-export function retirePageStatements(db: D1Database, p: { readonly pageId: string; readonly actorPrincipalId: string; readonly at: number }): readonly D1PreparedStatement[]
+export function claimPageStatements(deps: ManageDeps, actor: ManageActor, p: { readonly pageId: string; readonly artifactId: string; readonly route: { readonly kind: "subtree"; readonly slug: string } | { readonly kind: "tree_page"; readonly pageRef: string }; readonly at: number }): readonly D1PreparedStatement[]
+export function retirePageStatements(deps: ManageDeps, actor: ManageActor, p: { readonly pageId: string; readonly at: number }): readonly D1PreparedStatement[]
 export function restorePageStatements(db: D1Database, p: { readonly pageId: string; readonly revisionId: string; readonly at: number }): readonly D1PreparedStatement[]
 
 // domains/catalogue/revision-paths.ts (S2)
 export interface RevisionPathConflict { readonly path: string; readonly reason: "reserved" | "shell" | "foreign_subtree" }
+export function documentRouteOf(path: string): SubtreeOrTree | null // canonical document path; no route on invalid input
 export function validateRevisionPaths(
   deps: { readonly db: D1Database; readonly config: ReadInstanceConfig | ManageInstanceConfig },
   input: { readonly artifactId: string | null; readonly paths: readonly string[]; readonly newSubtreeSlugs: readonly string[] },
@@ -490,7 +509,17 @@ Self-registration (unguarded exception, §8.3) is one batch on the primary; the 
 
 Decision order mirrors the guard: instance from `B0` (`instance_mismatch`) → actor active (`unauthenticated`) → actor epoch equals the handle's (`conflict`) → authorized (`forbidden`) → page live (`not_found`). An unauthorized caller learns nothing about the page. Commands use an internal, unexported snapshot helper for their prepare step (§8.3 rule 3); adapters never get an unauthorized policy read.
 
+`assertReplayAuthority` is a read-only primary-snapshot authorization for a previously recorded Publication receipt, not a mutation guard or a capability. It shares principal and role validation with `readPagePolicy`, validates the handle and recorded actor epoch, current principal and current role on every originally guarded page, including new, dropped, restored and tombstoned pages; every named page must belong to the recorded artefact. Empty page lists require installation authority and may name a not-yet-created artefact. Publication persists the complete original page scope. A revoked or stale actor cannot use a receipt to regain authority. The original guarded mutation is never repeated by this read.
+
+Publication `status` and receipt replay use this read-only authority check in every session phase, rather than a staging mutation guard: content or policy changes alone do not prevent observing a session while current principal, epoch and scope remain authorized.
+
 ### 9.3 Publication commit composition
+
+Publication's typed interface is `PublicationService` in `domains/publication/index.ts`; `types.ts` defines `BeginCommand` (idempotency key, artefact/base revision and content version, files, pages, edges), `PublicationStatus` (session, artefact/revision/base, expiry, state, per-file source and stored flag), `PublicationReceipt` (artefact, active revision or null, content version and page URLs), and `PromotionCommand`/`RestoreCommand`. Its methods are `begin`, `upload`, `materialize`, `seal`, `commit`, `status`, `abort`, `restore` and `unpublish`. Actor-bearing methods require a minted handle; neither transport nor caller supplies authority.
+
+Trusted server configuration requires `sessionTtlMs`, `maxUploadTimeoutMs`, `retainMs`, `marginMs`, `manageClockSkewMs` and `readClockSkewMs`, plus a matching-instance `RevisionStore`. `retainMs` must cover 900 seconds of pinned proof lifetime plus both clock skews; `marginMs` must cover maximum upload timeout plus both skews. There are no production defaults. Unchanged files use verified server-side Store read and create-once write into the new staging revision; no client re-upload, shared key, or commit-time copy is required.
+
+The upload timeout and clock-skew margins bound admission and preflight timing; they do not prove that a provider's native PUT cannot finish after an abort or after deletion. The permanent discard claim immediately fences activation and new pins, independently of physical cleanup. Collection re-sweeps every discard, including those with `purged_at` already set, and `purged_at` records the first successful sweep only. `already_purged` means this sweep found no objects, not that none can appear later. A future maintenance process must revisit **all** discards and closed-session orphans, not only null `purged_at` rows, so late PUT residue is removed by a subsequent sweep; each revisit incurs an R2 list per discard. No scheduler is implied by this contract.
 
 Publication's commit composition (normative example for F04; set-based so large artefacts stay within D1 limits):
 
@@ -519,6 +548,8 @@ The upsert is unconditional because the guard already refused any path mounted b
 
 Sealing precedes the commit. The commit's guards read `:r` and its resources (`?17` path claims), so those rows must already exist. The work splits as follows:
 
+`stage` may cover an existing tombstoned page only when the current actor is an administrator or installation publisher and the page belongs to the specified artefact. It asserts the supplied `expectedPolicyEpoch` against the tombstone; page-scoped publishers are forbidden. Staging never changes the tombstone, visibility or grants. Commit still requires `restore_page`, global authority and the artefact content-version assertion.
+
 - **Seal batch.** It carries `stage` guards, one per already existing page, bound to `:r`. Its effects write `revisions`, `revision_resources`, and the `revision_pages` rows of already existing pages.
 - **Commit batch, effects.** The `revision_pages` rows of pages new in `:r` go here, after `claimPageStatements`, because a `revision_pages` row needs its page to exist.
 - **Ownership edges.** The edges of `:r` are written once, as `executeGuarded`'s `ownership` argument, in the batch that writes their page's `revision_pages` row (seal or commit). They follow those effects and precede `finalEffects`, which hold the `active_revision_id` update and the receipt. Each edge needs that batch's guard for its owner page bound to `:r` (§8.3 rule 2), and its admission is decided in the same transaction (§9). A restore writes none.
@@ -531,7 +562,7 @@ Restore (plan §3: a new promotion of a retained revision that reactivates no fo
 
 - **Prepare (Publication).** Publication reads its own `artifacts.content_version` and the pages of `:r` from `revision_pages`, and proves through the Revision Store that the bytes of `:r` are still retained before building the batch. For each page of `:r`, `readPagePolicy` returning a view means live (`publish`, with that view's epochs); returning `null` means tombstoned, because `revision_pages` only references existing pages (`restore_page`). Live pages of the current active revision, if any, that `:r` does not contain get `unpublish`.
 - **Batch.** The §9.3 order is unchanged: guards (exactly one per page), retire dropped pages, replace the artefact's mounts with the resources of `:r`, `restorePageStatements` for every `restore_page`, then `finalEffects` setting `active_revision_id = :r` with `content_version + 1`, and the receipt. This covers both a rollback of a live artefact whose `:r` contains pages dropped since, and the restore of a fully unpublished artefact, whatever its unpublish did with mounts or the active revision: the commit statements remount `:r` and make it active.
-- **Identity.** Page IDs are those of `revision_pages`, never new ones; `create_page` stays refused (`conflict`) for a known ID. Ownership edges of `:r` already exist (immutable, keyed by revision), so a restore passes no `ownership` argument.
+- **Identity.** Page IDs are those of `revision_pages`, never new ones; `create_page` stays refused (`conflict`) for a known ID. Ownership edges of `:r` already exist (immutable, keyed by revision), so a restore passes no `ownership` argument; the guard re-admits cross-artefact edges against current authority or identical current-active edges.
 - **No reactivation.** A restored page comes back `private`, with no active grant, under a new policy epoch. Grants revoked at unpublish stay revoked with their reason, so former share links, share cookies and pinned proofs keep failing. Exposure returns only through an explicit guarded `setVisibility`, `share` (new key) or administrator `importShare`. `role_grants` are not touched: revoked roles stay revoked; an unrevoked page-scoped role keeps naming the same page ID.
 - **Address.** The primary route is derived from `:r` (§7 note) and inserted plainly: if another page claimed it meanwhile, the whole batch fails as `conflict` (`routes` primary key) and nothing changes. A path mounted meanwhile by another artefact is refused by the guard's `?17` path-claim check. Aliases naming the page lead to it again for team readers once it is live (§12.5).
 - **Authority and scope.** `restore_page` requires an administrator or an installation publisher: reclaiming a released address is an installation-level act, like `create_page` *(contract decision)*. With one guard per page, a page-scoped publisher can neither restore a revision that brings back a tombstoned page, even its own, nor drop pages outside its scope. Role commands and last-administrator protection are unchanged.

@@ -1,8 +1,8 @@
 import { env } from "cloudflare:workers"
 import { beforeEach, describe, expect, it } from "vitest"
-import { assignRole, claimPageStatements, readPagePolicy, restorePageStatements, retirePageStatements, share } from "../../domains/catalogue/commands"
+import { assignRole, claimPageStatements, readPagePolicy, restorePageStatements, retirePageStatements, revokeRole, share } from "../../domains/catalogue/commands"
 import { executeGuarded, type GuardRequest } from "../../domains/catalogue/guard"
-import { decideRead, type ReadCredentials, type ReadSubject } from "../../domains/catalogue/read"
+import { assertReplayAuthority, decideRead, type ReadCredentials, type ReadSubject } from "../../domains/catalogue/read"
 import { actor, artifactId, authenticatedActor, bootstrap, configs, digest, jwks, pageFixture, pageId, principalId, revisionId } from "./fixtures/catalogue"
 
 const route = { kind: "tree_page" as const, pageRef: "docs/page.html" }
@@ -19,7 +19,7 @@ async function retire(): Promise<{ key: string; proof: string }> {
   const decision = await decideRead(env.DB, read, { kind: "share", route, candidates: ["/docs/page.html"] }, { ...anonymous, shareKey: grant.key }, null)
   if (decision.kind !== "allow" || !decision.plan.pinnedProof || !grant.key) throw new Error("share fixture did not authorize a proof")
   await executeGuarded(deps, actor, [unpublish], [
-    ...retirePageStatements(env.DB, { pageId, actorPrincipalId: principalId, at: 20 }),
+    ...retirePageStatements(deps, actor, { pageId, at: 20 }),
     env.DB.prepare("UPDATE artifacts SET content_version = content_version + 1 WHERE artifact_id = ?").bind(artifactId),
   ])
   return { key: grant.key, proof: decision.plan.pinnedProof }
@@ -58,7 +58,7 @@ describe("restore composition", () => {
     const claimant = `pg_${"b".repeat(26)}`
     const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 25 }
     const create: GuardRequest = { action: "create_page", pageId: claimant, artifactId, revisionId, requestDigest: digest, occurredAt: 25 }
-    await executeGuarded(deps, actor, [create], claimPageStatements(env.DB, { pageId: claimant, artifactId, route, actorPrincipalId: principalId, at: 25 }))
+    await executeGuarded(deps, actor, [create], claimPageStatements(deps, actor, { pageId: claimant, artifactId, route, at: 25 }))
     await expect(executeGuarded(deps, actor, [restore], restorePageStatements(env.DB, { pageId, revisionId, at: 30 }))).rejects.toMatchObject({ code: "conflict" })
     expect(await env.DB.prepare("SELECT tombstoned_at, policy_epoch FROM pages WHERE page_id = ?").bind(pageId).first()).toEqual({ tombstoned_at: 20, policy_epoch: 2 })
     expect(await env.DB.prepare("SELECT page_id FROM routes WHERE kind = 'tree_page' AND route_key = 'docs/page.html'").first()).toEqual({ page_id: claimant })
@@ -74,6 +74,48 @@ describe("restore composition", () => {
     await expect(executeGuarded(deps, actor, [{ ...restore, expectedContentVersion: 0 }], [])).rejects.toMatchObject({ code: "conflict" })
     await expect(executeGuarded(deps, actor, [{ ...restore, pageId: `pg_${"c".repeat(26)}` }], [])).rejects.toMatchObject({ code: "not_found" })
     await expect(executeGuarded(deps, actor, [{ ...restore, revisionId: `rv_${"c".repeat(26)}` }], [])).rejects.toMatchObject({ code: "not_found" })
+  })
+  it("authorizes receipt replay for a scoped publisher after retirement but not after revocation", async () => {
+    const publisherId = `pr_${"b".repeat(26)}`
+    await env.DB.prepare("INSERT INTO principals (principal_id,issuer,subject,created_at) VALUES (?, 'https://team.cloudflareaccess.com', 'publisher', 1)").bind(publisherId).run()
+    const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
+    const role = await assignRole(deps, actor, { targetPrincipalId: publisherId, expectedTargetAuthorityEpoch: 0, role: "publisher", scope: { kind: "page", pageId } })
+    const publisher = await authenticatedActor("publisher")
+    await retire()
+    const input = { artifactId, pageIds: [pageId], expectedActorAuthorityEpoch: publisher.authorityEpoch }
+    await expect(assertReplayAuthority(deps, publisher, input)).resolves.toBeUndefined()
+    await expect(assertReplayAuthority(deps, publisher, { ...input, artifactId: `ar_${"z".repeat(26)}` })).rejects.toMatchObject({ code: "not_found" })
+    await expect(assertReplayAuthority(deps, publisher, { ...input, pageIds: [] })).rejects.toMatchObject({ code: "forbidden" })
+    await expect(assertReplayAuthority(deps, actor, { artifactId: `ar_${"z".repeat(26)}`, pageIds: [], expectedActorAuthorityEpoch: actor.authorityEpoch })).resolves.toBeUndefined()
+    await revokeRole(deps, actor, { targetPrincipalId: publisherId, expectedTargetAuthorityEpoch: 1, roleGrantId: role.roleGrantId })
+    await expect(assertReplayAuthority(deps, publisher, input)).rejects.toMatchObject({ code: "conflict" })
+  })
+  it("stages a tombstone only for current installation authority and its policy epoch", async () => {
+    const scopedId = `pr_${"b".repeat(26)}`, globalId = `pr_${"c".repeat(26)}`
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO principals (principal_id,issuer,subject,created_at) VALUES (?, 'https://team.cloudflareaccess.com', 'scoped', 1)").bind(scopedId),
+      env.DB.prepare("INSERT INTO principals (principal_id,issuer,subject,created_at) VALUES (?, 'https://team.cloudflareaccess.com', 'global', 1)").bind(globalId),
+    ])
+    const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
+    await assignRole(deps, actor, { targetPrincipalId: scopedId, expectedTargetAuthorityEpoch: 0, role: "publisher", scope: { kind: "page", pageId } })
+    await assignRole(deps, actor, { targetPrincipalId: globalId, expectedTargetAuthorityEpoch: 0, role: "publisher", scope: { kind: "installation" } })
+    const scoped = await authenticatedActor("scoped"), global = await authenticatedActor("global")
+    await retire()
+    const stage: GuardRequest = { action: "stage", pageId, artifactId, expectedPolicyEpoch: 2, requestDigest: digest, occurredAt: 30 }
+    await expect(executeGuarded(deps, scoped, [stage], [])).rejects.toMatchObject({ code: "forbidden" })
+    await expect(executeGuarded(deps, global, [{ ...stage, expectedPolicyEpoch: 1 }], [])).rejects.toMatchObject({ code: "conflict" })
+    await expect(executeGuarded(deps, global, [{ ...stage, artifactId: `ar_${"z".repeat(26)}` }], [])).rejects.toMatchObject({ code: "not_found" })
+    await expect(executeGuarded(deps, { ...global }, [stage], [])).rejects.toMatchObject({ code: "unauthenticated" })
+    const stagedRevision = `rv_${"d".repeat(26)}`
+    await executeGuarded(deps, global, [{ ...stage, revisionId: stagedRevision }], [
+      env.DB.prepare("INSERT INTO revisions (revision_id,artifact_id,origin,manifest_sha256,manifest_object_key,sealed_at) VALUES (?,?,'published',?,'staged',30)").bind(stagedRevision, artifactId, digest),
+      env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?,'/docs/page.html','document','staged-page',?,1,'text/html')").bind(stagedRevision, digest),
+      env.DB.prepare("INSERT INTO revision_pages (revision_id,page_id,document_path,metadata_json) VALUES (?,?,'/docs/page.html','{}')").bind(stagedRevision, pageId),
+    ], { revisionId: stagedRevision, edges: [{ ownerPageId: pageId, path: "/docs/asset.js", providerArtifactId: artifactId }] })
+    expect(await readPagePolicy(deps, global, pageId)).toBeNull()
+    expect(await decideRead(env.DB, (await configs()).read, { kind: "page", route, candidates: ["/docs/page.html"], fragmentPath: null }, anonymous, null)).not.toMatchObject({ kind: "allow" })
+    await assignRole(deps, actor, { targetPrincipalId: globalId, expectedTargetAuthorityEpoch: 1, role: "publisher", scope: { kind: "page", pageId } })
+    await expect(executeGuarded(deps, global, [stage], [])).rejects.toMatchObject({ code: "conflict" })
   })
   it("rejects live pages, wrong artefacts, missing page membership and foreign path claims", async () => {
     const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
@@ -96,7 +138,7 @@ describe("restore composition", () => {
     const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
     await assignRole(deps, actor, { targetPrincipalId: publisherId, expectedTargetAuthorityEpoch: 0, role: "publisher", scope: { kind: "installation" } })
     const publisher = await authenticatedActor("publisher")
-    await executeGuarded(deps, actor, [{ ...unpublish, pageId: otherPage, artifactId: otherArtifact, expectedPolicyEpoch: 0 }], [...retirePageStatements(env.DB, { pageId: otherPage, actorPrincipalId: principalId, at: 20 }), env.DB.prepare("UPDATE artifacts SET content_version = 1 WHERE artifact_id = ?").bind(otherArtifact)])
+    await executeGuarded(deps, actor, [{ ...unpublish, pageId: otherPage, artifactId: otherArtifact, expectedPolicyEpoch: 0 }], [...retirePageStatements(deps, actor, { pageId: otherPage, at: 20 }), env.DB.prepare("UPDATE artifacts SET content_version = 1 WHERE artifact_id = ?").bind(otherArtifact)])
     await executeGuarded(deps, publisher, [{ ...restore, pageId: otherPage, artifactId: otherArtifact, revisionId: otherRevision }], restorePageStatements(env.DB, { pageId: otherPage, revisionId: otherRevision, at: 30 }))
     expect(await env.DB.prepare("SELECT page_id, route_key FROM routes WHERE kind = 'subtree' AND route_key = 'second'").first()).toEqual({ page_id: otherPage, route_key: "second" })
     expect(await readPagePolicy(deps, publisher, otherPage)).toMatchObject({ pageId: otherPage, visibility: "private", policyEpoch: 2, grant: null })
