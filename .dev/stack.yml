@@ -3,8 +3,8 @@
 # Hand-written, NOT copied from stack.yml.example: that template assumes
 # bun + nestjs + tanstack-start + turbo + biome + vercel. None of it applies here.
 #
-# This repo is a publishing engine: bash (scripts) + Python 3.9 stdlib (lib/ + unittest)
-# + a tiny TS surface (functions/ Cloudflare Pages, vitest).
+# This repo contains the legacy bash/Python publisher and Pages Functions, plus
+# the common TypeScript engine in domains/ with D1 migrations in migrations/.
 #
 # WHAT COMMITTING THIS FILE TURNS ON. Its mere presence is the dev-core project
 # contract (omp/index.ts `hasProjectContract`), so for anyone working here with
@@ -35,8 +35,7 @@ package_manager: npm
 
 backend:
   framework: none
-  # Pages Functions are the server surface (Access middleware, /api/*, /s/*):
-  # R-backend-dev is the right reviewer for them, not R-frontend-dev.
+  # Legacy Pages Functions and the common engine are server surfaces.
   path: functions
 
 frontend:
@@ -118,9 +117,7 @@ review:
       R-backend-dev: default
       R-devops: default
       R-architect: default
-      # Structural gate AXIAL_RE = ^(infrastructure|adapters|domains|stages)/ —
-      # none of those directories exist here, so this agent stays no-path-hit
-      # whatever the value. ADR 0001 is enforced by tests and review, not by it.
+      # domains/ and future adapters/ hit AXIAL_RE; ADR 0002 governs the engine.
       R-axial-adr-review: default
 
 artifacts:

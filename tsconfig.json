@@ -13,5 +13,6 @@
       "@functions/*": ["./functions/*"]
     }
   },
-  "include": ["functions/**/*.ts", "tests/**/*.ts"]
+  "include": ["functions/**/*.ts", "tests/*.ts", "tests/helpers/**/*.ts"],
+  "exclude": ["tests/engine/**"]
 }

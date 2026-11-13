@@ -1,0 +1,150 @@
+import type { ManageInstanceConfig } from './instance-config'
+import { executeGuarded, PolicyError, type GuardAction, type GuardInput } from './guard'
+import { newId } from './ids'
+import { isShareKey, mintShareKey, sealShareKey, shareKeyDigests, unsealShareKey } from './share-secrets'
+export { readPagePolicy } from './read'
+
+export interface ManageDeps { readonly db: D1Database; readonly config: ManageInstanceConfig; readonly now: () => number }
+export interface Actor { readonly principalId: string; readonly authorityEpoch: number; readonly surface: 'read' | 'manage' }
+export interface PageTarget { readonly pageId: string; readonly artifactId: string; readonly expectedPolicyEpoch: number }
+export type GrantMode = { readonly mode: 'follow_active' } | { readonly mode: 'pinned'; readonly revisionId: string }
+export interface ShareResult { readonly grantId: string; readonly key: string | null; readonly mode: 'follow_active' | 'pinned'; readonly revealable: boolean; readonly policyEpoch: number }
+export interface PagePolicyView {
+  readonly pageId: string; readonly artifactId: string
+  readonly visibility: 'private' | 'shared' | 'public'; readonly policyEpoch: number; readonly contentVersion: number
+  readonly grant: { readonly grantId: string; readonly mode: 'follow_active' | 'pinned'; readonly revisionId: string | null; readonly revealable: boolean } | null
+}
+
+type ExistingGrant = { grant_id: string; mode: 'follow_active' | 'pinned'; pinned_revision_id: string | null; sealed_key: string | null; seal_kid: string | null }
+
+// Stable serialization excludes the share secret rather than hashing a guessable legacy key.
+function canonical(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
+  const obj = value as Record<string, unknown>
+  return `{${Object.keys(obj).filter(k => obj[k] !== undefined).sort().map(k => `${JSON.stringify(k)}:${canonical(obj[k])}`).join(',')}}`
+}
+async function digest(value: unknown): Promise<string> {
+  const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical(value))))
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+}
+async function input(deps: ManageDeps, actor: Actor, action: GuardAction, cmd: object, extra: Partial<GuardInput> = {}): Promise<GuardInput> {
+  const digestCommand = action === 'import_share' ? Object.fromEntries(Object.entries(cmd).filter(([key]) => key !== 'key')) : cmd
+  return { action, actor: { principalId: actor.principalId, surface: actor.surface, expectedAuthorityEpoch: actor.authorityEpoch }, requestDigest: await digest({ action, ...digestCommand }), occurredAt: deps.now(), ...extra }
+}
+function target(p: PageTarget): Partial<GuardInput> { return { pageId: p.pageId, artifactId: p.artifactId, expectedPolicyEpoch: p.expectedPolicyEpoch } }
+async function run(deps: ManageDeps, guard: GuardInput, effects: readonly D1PreparedStatement[]): Promise<readonly D1Result[]> {
+  return executeGuarded(deps.db, deps.config.instanceId, [guard], effects)
+}
+function revoke(db: D1Database, pageId: string, at: number, by: string, reason: string): D1PreparedStatement {
+  return db.prepare('UPDATE share_grants SET revoked_at = ?, revoked_by = ?, revoked_reason = ?, sealed_key = NULL, seal_kid = NULL WHERE page_id = ? AND revoked_at IS NULL').bind(at, by, reason, pageId)
+}
+function updatePage(db: D1Database, pageId: string, visibility: string): D1PreparedStatement {
+  return db.prepare('UPDATE pages SET visibility = ?, policy_epoch = policy_epoch + 1 WHERE page_id = ?').bind(visibility, pageId)
+}
+async function currentGrant(deps: ManageDeps, pageId: string): Promise<ExistingGrant | null> {
+  try { return await deps.db.prepare('SELECT grant_id, mode, pinned_revision_id, sealed_key, seal_kid FROM share_grants WHERE page_id = ? AND revoked_at IS NULL').bind(pageId).first<ExistingGrant>() }
+  catch { throw new PolicyError('unavailable') }
+}
+async function newGrant(deps: ManageDeps, pageId: string, key: string, mode: GrantMode, at: number, actor: string, origin: 'minted' | 'imported') {
+  const grantId = newId('gr')
+  const [digest] = await shareKeyDigests(deps.config.shareVerifierKeys.slice(0, 1), deps.config.instanceId, key)
+  const seal = deps.config.shareSealKey
+  const sealed = seal ? await sealShareKey(seal, deps.config.instanceId, pageId, grantId, key) : null
+  const statement = deps.db.prepare(`INSERT INTO share_grants (grant_id,page_id,key_kid,key_hmac,mode,pinned_revision_id,origin,sealed_key,seal_kid,created_at,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(grantId, pageId, digest.kid, digest.hmac, mode.mode, mode.mode === 'pinned' ? mode.revisionId : null, origin, sealed, seal?.kid ?? null, at, actor)
+  return { grantId, statement, revealable: sealed !== null }
+}
+
+export async function setVisibility(deps: ManageDeps, actor: Actor, cmd: PageTarget & { readonly visibility: 'private' | 'public' }): Promise<{ readonly policyEpoch: number }> {
+  const g = await input(deps, actor, 'set_visibility', cmd, target(cmd))
+  await run(deps, g, [revoke(deps.db, cmd.pageId, g.occurredAt, actor.principalId, 'visibility'), updatePage(deps.db, cmd.pageId, cmd.visibility)])
+  return { policyEpoch: cmd.expectedPolicyEpoch + 1 }
+}
+export async function share(deps: ManageDeps, actor: Actor, cmd: PageTarget & GrantMode): Promise<ShareResult> {
+  const existing = await currentGrant(deps, cmd.pageId)
+  const g = await input(deps, actor, 'share', cmd, { ...target(cmd), revisionId: !existing && cmd.mode === 'pinned' ? cmd.revisionId : undefined })
+  if (existing) {
+    await run(deps, g, [])
+    return { grantId: existing.grant_id, key: null, mode: existing.mode, revealable: existing.sealed_key !== null, policyEpoch: cmd.expectedPolicyEpoch }
+  }
+  const key = mintShareKey()
+  const created = await newGrant(deps, cmd.pageId, key, cmd, g.occurredAt, actor.principalId, 'minted')
+  await run(deps, g, [created.statement, updatePage(deps.db, cmd.pageId, 'shared')])
+  return { grantId: created.grantId, key, mode: cmd.mode, revealable: created.revealable, policyEpoch: cmd.expectedPolicyEpoch + 1 }
+}
+export async function rotateShare(deps: ManageDeps, actor: Actor, cmd: PageTarget & { readonly grantId: string; readonly next?: GrantMode }): Promise<ShareResult> {
+  const existing = await currentGrant(deps, cmd.pageId)
+  const mode: GrantMode = cmd.next ?? (existing?.mode === 'pinned' && existing.pinned_revision_id ? { mode: 'pinned', revisionId: existing.pinned_revision_id } : { mode: 'follow_active' })
+  const g = await input(deps, actor, 'rotate_share', cmd, { ...target(cmd), grantId: cmd.grantId, revisionId: mode.mode === 'pinned' ? mode.revisionId : undefined })
+  const key = mintShareKey()
+  const created = await newGrant(deps, cmd.pageId, key, mode, g.occurredAt, actor.principalId, 'minted')
+  await run(deps, g, [revoke(deps.db, cmd.pageId, g.occurredAt, actor.principalId, 'rotated'), created.statement, updatePage(deps.db, cmd.pageId, 'shared')])
+  return { grantId: created.grantId, key, mode: mode.mode, revealable: created.revealable, policyEpoch: cmd.expectedPolicyEpoch + 1 }
+}
+export async function revokeShare(deps: ManageDeps, actor: Actor, cmd: PageTarget & { readonly grantId: string }): Promise<{ readonly policyEpoch: number }> {
+  const g = await input(deps, actor, 'revoke_share', cmd, { ...target(cmd), grantId: cmd.grantId })
+  await run(deps, g, [revoke(deps.db, cmd.pageId, g.occurredAt, actor.principalId, 'revoked'), updatePage(deps.db, cmd.pageId, 'private')])
+  return { policyEpoch: cmd.expectedPolicyEpoch + 1 }
+}
+export async function revealShare(deps: ManageDeps, actor: Actor, cmd: PageTarget & { readonly grantId: string }): Promise<{ readonly key: string }> {
+  const g = await input(deps, actor, 'reveal_share', cmd, { ...target(cmd), grantId: cmd.grantId })
+  const results = await run(deps, g, [deps.db.prepare('SELECT sealed_key, seal_kid FROM share_grants WHERE grant_id = ? AND page_id = ? AND revoked_at IS NULL').bind(cmd.grantId, cmd.pageId)])
+  const row = results[1]?.results?.[0] as { sealed_key: string | null; seal_kid: string | null } | undefined
+  const seal = deps.config.shareSealKey
+  if (!row?.sealed_key || !seal || row.seal_kid !== seal.kid) throw new PolicyError('invalid_state')
+  try { return { key: await unsealShareKey(seal, deps.config.instanceId, cmd.pageId, cmd.grantId, row.sealed_key) } }
+  catch { throw new PolicyError('invalid_state') }
+}
+export async function importShare(deps: ManageDeps, actor: Actor, cmd: PageTarget & { readonly key: string; readonly mode: 'follow_active' }): Promise<{ readonly grantId: string; readonly policyEpoch: number }> {
+  if (!isShareKey(cmd.key)) throw new PolicyError('invalid_state')
+  const g = await input(deps, actor, 'import_share', cmd, target(cmd))
+  const created = await newGrant(deps, cmd.pageId, cmd.key, cmd, g.occurredAt, actor.principalId, 'imported')
+  await run(deps, g, [created.statement, updatePage(deps.db, cmd.pageId, 'shared')])
+  return { grantId: created.grantId, policyEpoch: cmd.expectedPolicyEpoch + 1 }
+}
+export async function setAlias(deps: ManageDeps, actor: Actor, cmd: { readonly op: 'put'; readonly kind: 'redirect_exact' | 'redirect_prefix'; readonly key: string; readonly to: string; readonly status: 301 | 302 | 307 | 308; readonly targetPageId: string | null } | { readonly op: 'remove'; readonly kind: 'redirect_exact' | 'redirect_prefix'; readonly key: string }): Promise<void> {
+  const g = await input(deps, actor, 'set_alias', cmd, { pageId: cmd.op === 'put' ? cmd.targetPageId ?? undefined : undefined })
+  const effect = cmd.op === 'put' ? deps.db.prepare('INSERT INTO routes (kind,route_key,redirect_to,redirect_status,target_page_id,created_at) VALUES (?,?,?,?,?,?)').bind(cmd.kind, cmd.key, cmd.to, cmd.status, cmd.targetPageId, g.occurredAt) : deps.db.prepare('DELETE FROM routes WHERE kind = ? AND route_key = ?').bind(cmd.kind, cmd.key)
+  await run(deps, g, [effect])
+}
+export async function assignRole(deps: ManageDeps, actor: Actor, cmd: { readonly targetPrincipalId: string; readonly expectedTargetAuthorityEpoch: number; readonly role: 'publisher' | 'admin'; readonly scope: { readonly kind: 'installation' } | { readonly kind: 'page'; readonly pageId: string } }): Promise<{ readonly roleGrantId: string }> {
+  const g = await input(deps, actor, 'assign_role', cmd, { targetPrincipalId: cmd.targetPrincipalId, expectedTargetAuthorityEpoch: cmd.expectedTargetAuthorityEpoch })
+  const roleGrantId = newId('rg')
+  await run(deps, g, [deps.db.prepare('INSERT INTO role_grants (role_grant_id,principal_id,role,scope_kind,scope_page_id,origin,granted_at,granted_by) VALUES (?,?,?,?,?,\'granted\',?,?)').bind(roleGrantId, cmd.targetPrincipalId, cmd.role, cmd.scope.kind, cmd.scope.kind === 'page' ? cmd.scope.pageId : null, g.occurredAt, actor.principalId), deps.db.prepare('UPDATE principals SET authority_epoch = authority_epoch + 1 WHERE principal_id = ?').bind(cmd.targetPrincipalId)])
+  return { roleGrantId }
+}
+export async function revokeRole(deps: ManageDeps, actor: Actor, cmd: { readonly targetPrincipalId: string; readonly expectedTargetAuthorityEpoch: number; readonly roleGrantId: string }): Promise<void> {
+  const g = await input(deps, actor, 'revoke_role', cmd, { targetPrincipalId: cmd.targetPrincipalId, expectedTargetAuthorityEpoch: cmd.expectedTargetAuthorityEpoch, roleGrantId: cmd.roleGrantId })
+  await run(deps, g, [deps.db.prepare('UPDATE role_grants SET revoked_at = ?, revoked_by = ? WHERE role_grant_id = ?').bind(g.occurredAt, actor.principalId, cmd.roleGrantId), deps.db.prepare('UPDATE principals SET authority_epoch = authority_epoch + 1 WHERE principal_id = ?').bind(cmd.targetPrincipalId)])
+}
+export async function disablePrincipal(deps: ManageDeps, actor: Actor, cmd: { readonly targetPrincipalId: string; readonly expectedTargetAuthorityEpoch: number }): Promise<void> {
+  const g = await input(deps, actor, 'disable_principal', cmd, { targetPrincipalId: cmd.targetPrincipalId, expectedTargetAuthorityEpoch: cmd.expectedTargetAuthorityEpoch })
+  await run(deps, g, [deps.db.prepare("UPDATE principals SET status = 'disabled', disabled_at = ?, authority_epoch = authority_epoch + 1 WHERE principal_id = ?").bind(g.occurredAt, cmd.targetPrincipalId)])
+}
+export function claimPageStatements(db: D1Database, p: { readonly pageId: string; readonly artifactId: string; readonly route: { readonly kind: 'subtree'; readonly slug: string } | { readonly kind: 'tree_page'; readonly pageRef: string }; readonly actorPrincipalId: string | null; readonly at: number }): readonly D1PreparedStatement[] {
+  const key = p.route.kind === 'subtree' ? p.route.slug : p.route.pageRef
+  const documentPath = p.route.kind === 'subtree' ? `/a/${key}/index.html` : `/${key}`
+  return [db.prepare('INSERT INTO pages (page_id,artifact_id,created_at,created_by) VALUES (?,?,?,?)').bind(p.pageId, p.artifactId, p.at, p.actorPrincipalId), db.prepare("INSERT INTO routes (kind,route_key,page_id,artifact_id,document_path,document_kind,created_at) VALUES (?,?,?,?,?,'document',?)").bind(p.route.kind, key, p.pageId, p.artifactId, documentPath, p.at)]
+}
+export function retirePageStatements(db: D1Database, p: { readonly pageId: string; readonly actorPrincipalId: string; readonly at: number }): readonly D1PreparedStatement[] {
+  return [db.prepare('UPDATE pages SET tombstoned_at = ?, tombstoned_by = ?, policy_epoch = policy_epoch + 1 WHERE page_id = ?').bind(p.at, p.actorPrincipalId, p.pageId), revoke(db, p.pageId, p.at, p.actorPrincipalId, 'unpublished'), db.prepare("DELETE FROM routes WHERE page_id = ? AND kind IN ('subtree','tree_page')").bind(p.pageId)]
+}
+export function restorePageStatements(db: D1Database, p: { readonly pageId: string; readonly revisionId: string; readonly at: number }): readonly D1PreparedStatement[] {
+  return [
+    db.prepare("UPDATE pages SET tombstoned_at = NULL, tombstoned_by = NULL, visibility = 'private', policy_epoch = policy_epoch + 1 WHERE page_id = ?").bind(p.pageId),
+    db.prepare(`INSERT INTO routes (kind, route_key, page_id, artifact_id, document_path, document_kind, created_at)
+      SELECT CASE WHEN rp.document_path GLOB '/a/*' THEN 'subtree' ELSE 'tree_page' END,
+        CASE WHEN rp.document_path GLOB '/a/*' THEN substr(rp.document_path, 4, length(rp.document_path) - 14) ELSE substr(rp.document_path, 2) END,
+        p.page_id, p.artifact_id, rp.document_path, 'document', ?3
+      FROM revision_pages rp JOIN pages p ON p.page_id = rp.page_id
+      WHERE rp.revision_id = ?2 AND rp.page_id = ?1`).bind(p.pageId, p.revisionId, p.at),
+  ]
+}
+export function ownershipStatements(db: D1Database, revisionId: string, edges: readonly { readonly ownerPageId: string; readonly path: string }[]): readonly D1PreparedStatement[] {
+  const statements: D1PreparedStatement[] = []
+  for (let i = 0; i < edges.length; i += 30) {
+    const chunk = edges.slice(i, i + 30)
+    statements.push(db.prepare(`INSERT INTO resource_owners (owner_revision_id,owner_page_id,path) VALUES ${chunk.map(() => '(?,?,?)').join(',')}`).bind(...chunk.flatMap(e => [revisionId, e.ownerPageId, e.path])))
+  }
+  return statements
+}
