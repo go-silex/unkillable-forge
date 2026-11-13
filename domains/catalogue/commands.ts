@@ -136,13 +136,17 @@ export async function disablePrincipal(deps: ManageDeps, actor: ManageActor, cmd
   const g = await input(deps, 'disable_principal', cmd, { targetPrincipalId: cmd.targetPrincipalId, expectedTargetAuthorityEpoch: cmd.expectedTargetAuthorityEpoch })
   await run(deps, actor, g, [deps.db.prepare("UPDATE principals SET status = 'disabled', disabled_at = ?, authority_epoch = authority_epoch + 1 WHERE principal_id = ?").bind(g.occurredAt, cmd.targetPrincipalId)])
 }
-export function claimPageStatements(db: D1Database, p: { readonly pageId: string; readonly artifactId: string; readonly route: { readonly kind: 'subtree'; readonly slug: string } | { readonly kind: 'tree_page'; readonly pageRef: string }; readonly actorPrincipalId: string | null; readonly at: number }): readonly D1PreparedStatement[] {
+export function claimPageStatements(deps: ManageDeps, actor: ManageActor, p: { readonly pageId: string; readonly artifactId: string; readonly route: { readonly kind: 'subtree'; readonly slug: string } | { readonly kind: 'tree_page'; readonly pageRef: string }; readonly at: number }): readonly D1PreparedStatement[] {
+  requireManageActor(actor, deps)
+  const db = deps.db
   const key = p.route.kind === 'subtree' ? p.route.slug : p.route.pageRef
   const documentPath = p.route.kind === 'subtree' ? `/a/${key}/index.html` : `/${key}`
-  return [db.prepare('INSERT INTO pages (page_id,artifact_id,created_at,created_by) VALUES (?,?,?,?)').bind(p.pageId, p.artifactId, p.at, p.actorPrincipalId), db.prepare("INSERT INTO routes (kind,route_key,page_id,artifact_id,document_path,document_kind,created_at) VALUES (?,?,?,?,?,'document',?)").bind(p.route.kind, key, p.pageId, p.artifactId, documentPath, p.at)]
+  return [db.prepare('INSERT INTO pages (page_id,artifact_id,created_at,created_by) VALUES (?,?,?,?)').bind(p.pageId, p.artifactId, p.at, actor.principalId), db.prepare("INSERT INTO routes (kind,route_key,page_id,artifact_id,document_path,document_kind,created_at) VALUES (?,?,?,?,?,'document',?)").bind(p.route.kind, key, p.pageId, p.artifactId, documentPath, p.at)]
 }
-export function retirePageStatements(db: D1Database, p: { readonly pageId: string; readonly actorPrincipalId: string; readonly at: number }): readonly D1PreparedStatement[] {
-  return [db.prepare('UPDATE pages SET tombstoned_at = ?, tombstoned_by = ?, policy_epoch = policy_epoch + 1 WHERE page_id = ?').bind(p.at, p.actorPrincipalId, p.pageId), revoke(db, p.pageId, p.at, p.actorPrincipalId, 'unpublished'), db.prepare("DELETE FROM routes WHERE page_id = ? AND kind IN ('subtree','tree_page')").bind(p.pageId)]
+export function retirePageStatements(deps: ManageDeps, actor: ManageActor, p: { readonly pageId: string; readonly at: number }): readonly D1PreparedStatement[] {
+  requireManageActor(actor, deps)
+  const db = deps.db
+  return [db.prepare('UPDATE pages SET tombstoned_at = ?, tombstoned_by = ?, policy_epoch = policy_epoch + 1 WHERE page_id = ?').bind(p.at, actor.principalId, p.pageId), revoke(db, p.pageId, p.at, actor.principalId, 'unpublished'), db.prepare("DELETE FROM routes WHERE page_id = ? AND kind IN ('subtree','tree_page')").bind(p.pageId)]
 }
 export function restorePageStatements(db: D1Database, p: { readonly pageId: string; readonly revisionId: string; readonly at: number }): readonly D1PreparedStatement[] {
   return [

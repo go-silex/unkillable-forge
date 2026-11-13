@@ -5,7 +5,7 @@ import { claimPageStatements, importShare, retirePageStatements, rotateShare, se
 import { executeGuarded } from "../../domains/catalogue/guard"
 import { decideRead, type ReadCredentials, type ReadSubject } from "../../domains/catalogue/read"
 import { listCatalogue } from "../../domains/catalogue/catalogue-list"
-import { actor, addOwnership, artifactId, bootstrap, configs, digest, jwks, pageFixture, pageId, principalId, revisionId, teamIdentity } from "./fixtures/catalogue"
+import { actor, artifactId, bootstrap, configs, digest, jwks, pageFixture, pageId, principalId, revisionId, teamIdentity } from "./fixtures/catalogue"
 
 const anonymous: ReadCredentials = { team: null, shareKey: null, shareCookie: null, pinnedProof: null, nowSeconds: 1 }
 let team: ReadCredentials
@@ -15,10 +15,14 @@ const otherArtifact = `ar_${"b".repeat(26)}`
 const otherRevision = `rv_${"b".repeat(26)}`
 const otherPage = `pg_${"b".repeat(26)}`
 
-beforeEach(async () => { await bootstrap(); team = { ...anonymous, team: teamIdentity }; await pageFixture({ route: { kind: "tree_page", pageRef: "docs/page.html" } }) })
+beforeEach(async () => { await bootstrap(); team = { ...anonymous, team: teamIdentity } })
+
+const ownerFixture = (ownership?: readonly { path: string; providerArtifactId: string }[]) =>
+  pageFixture({ route: { kind: "tree_page", pageRef: "docs/page.html" }, ownership })
 
 describe("primary D1 read decisions", () => {
   it("fails closed for an empty or mismatched instance and real missing schema", async () => {
+    await ownerFixture()
     const read = (await configs()).read
     expect(await decideRead(env.DB, { ...read, instanceId: "other-instance" }, page, anonymous, null)).toEqual({ kind: "deny", reason: "instance_mismatch" })
     expect(await decideRead(env.EMPTY_DB, read, page, anonymous, null)).toEqual({ kind: "deny", reason: "unavailable" })
@@ -26,6 +30,7 @@ describe("primary D1 read decisions", () => {
     expect(await decideRead(env.DB, read, page, anonymous, null)).toEqual({ kind: "deny", reason: "instance_mismatch" })
   })
   it("limits private pages to team and public catalogue to public pages", async () => {
+    await ownerFixture()
     const { read, manage } = await configs()
     expect(await decideRead(env.DB, read, page, anonymous, null)).toEqual({ kind: "deny", reason: "login_required" })
     expect(await decideRead(env.DB, read, page, team, null)).toMatchObject({ kind: "allow", plan: { revisionId, authority: { basis: "team" } } })
@@ -38,6 +43,7 @@ describe("primary D1 read decisions", () => {
     expect(JSON.stringify(entries)).not.toContain(principalId)
   })
   it("checks the current grant for each cookie read, including rotation and visibility changes", async () => {
+    await ownerFixture()
     const { read, manage } = await configs()
     const deps = { db: env.DB, config: manage, jwks, now: () => 10 }
     const imported = await importShare(deps, actor, { pageId, artifactId, expectedPolicyEpoch: 0, key: "historical_123", mode: "follow_active" })
@@ -51,6 +57,7 @@ describe("primary D1 read decisions", () => {
     expect(await decideRead(env.DB, read, page, newCookie, null)).toEqual({ kind: "deny", reason: "login_required" })
   })
   it("does not let team assurance bypass a share key or use a key for another page", async () => {
+    await ownerFixture()
     const { read, manage } = await configs()
     const deps = { db: env.DB, config: manage, jwks, now: () => 10 }
     await pageFixture({ artifact: otherArtifact, revision: otherRevision, page: otherPage, route: { kind: "tree_page", pageRef: "other/page.html" } })
@@ -61,15 +68,15 @@ describe("primary D1 read decisions", () => {
     expect(await decideRead(env.DB, read, subject, { ...team, shareKey: "first_key123" }, null)).toMatchObject({ kind: "allow", plan: { authority: { basis: "share_key" } } })
   })
   it("never treats a real sibling document as a candidate of a different authorized page", async () => {
+    await ownerFixture([{ path: "/docs/sibling.html", providerArtifactId: artifactId }])
     const { read, manage } = await configs()
     const sibling = `pg_${"c".repeat(26)}`
     await env.DB.batch([
       env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?,'/docs/sibling.html','document','sibling',?,1,'text/html')").bind(revisionId, digest),
       env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES ('/docs/sibling.html',?,?,'document')").bind(artifactId, revisionId),
-      ...claimPageStatements(env.DB, { pageId: sibling, artifactId, route: { kind: "tree_page", pageRef: "docs/sibling.html" }, actorPrincipalId: principalId, at: 1 }),
+      ...claimPageStatements({ db: env.DB, config: manage, jwks, now: () => 1 }, actor, { pageId: sibling, artifactId, route: { kind: "tree_page", pageRef: "docs/sibling.html" }, at: 1 }),
       env.DB.prepare("INSERT INTO revision_pages (revision_id,page_id,document_path,metadata_json) VALUES (?,?,'/docs/sibling.html','{}')").bind(revisionId, sibling),
     ])
-    await addOwnership("/docs/sibling.html", artifactId)
     const deps = { db: env.DB, config: manage, jwks, now: () => 10 }
     await setVisibility(deps, actor, { pageId, artifactId, expectedPolicyEpoch: 0, visibility: "public" })
     const forgedPage: ReadSubject = { ...page, candidates: ["/docs/sibling.html"] }
@@ -84,13 +91,13 @@ describe("primary D1 read decisions", () => {
   it("opens cross-artefact assets only through an active public or cookie owner", async () => {
     const { read, manage } = await configs()
     await pageFixture({ artifact: otherArtifact, revision: otherRevision, page: otherPage, route: { kind: "tree_page", pageRef: "other/page.html" } })
+    await ownerFixture([{ path: "/shared/app.js", providerArtifactId: otherArtifact }])
     await env.DB.batch([
       env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?, '/shared/app.js', 'asset', 'asset-object', ?, 1, 'application/javascript')").bind(otherRevision, digest),
       env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES ('/shared/app.js',?,?,'asset')").bind(otherArtifact, otherRevision),
       env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?, '/orphan.js', 'asset', 'orphan-object', ?, 1, 'application/javascript')").bind(otherRevision, digest),
       env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES ('/orphan.js',?,?,'asset')").bind(otherArtifact, otherRevision),
     ])
-    await addOwnership("/shared/app.js", otherArtifact)
     expect(await decideRead(env.DB, read, resource, anonymous, null)).toEqual({ kind: "deny", reason: "not_found" })
     const deps = { db: env.DB, config: manage, jwks, now: () => 10 }
     await setVisibility(deps, actor, { pageId, artifactId, expectedPolicyEpoch: 0, visibility: "public" })
@@ -102,11 +109,11 @@ describe("primary D1 read decisions", () => {
   it("opens a shared cross-artefact resource only while its owner cookie is valid", async () => {
     const { read, manage } = await configs()
     await pageFixture({ artifact: otherArtifact, revision: otherRevision, page: otherPage, route: { kind: "tree_page", pageRef: "other/page.html" } })
+    await ownerFixture([{ path: "/shared/app.js", providerArtifactId: otherArtifact }])
     await env.DB.batch([
       env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?, '/shared/app.js', 'asset', 'asset-object', ?, 1, 'application/javascript')").bind(otherRevision, digest),
       env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES ('/shared/app.js',?,?,'asset')").bind(otherArtifact, otherRevision),
     ])
-    await addOwnership("/shared/app.js", otherArtifact)
     const deps = { db: env.DB, config: manage, jwks, now: () => 10 }
     const grant = await importShare(deps, actor, { pageId, artifactId, expectedPolicyEpoch: 0, key: "historical_123", mode: "follow_active" })
     const cookie = { ...anonymous, shareCookie: { pageRef: "docs/page.html", key: "historical_123" } }
@@ -121,12 +128,12 @@ describe("primary D1 read decisions", () => {
     const replacementPage = `pg_${"c".repeat(26)}`
     await pageFixture({ artifact: otherArtifact, revision: otherRevision, page: otherPage, route: { kind: "tree_page", pageRef: "other/page.html" } })
     await pageFixture({ artifact: replacementArtifact, revision: replacementRevision, page: replacementPage, route: { kind: "tree_page", pageRef: "replacement/page.html" } })
+    await ownerFixture([{ path: "/shared/app.js", providerArtifactId: otherArtifact }])
     await env.DB.batch([
       env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?, '/shared/app.js', 'asset', 'original-provider', ?, 1, 'application/javascript')").bind(otherRevision, digest),
       env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?, '/shared/app.js', 'asset', 'replacement-provider', ?, 1, 'application/javascript')").bind(replacementRevision, digest),
       env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES ('/shared/app.js',?,?,'asset')").bind(otherArtifact, otherRevision),
     ])
-    await addOwnership("/shared/app.js", otherArtifact)
     await setVisibility({ db: env.DB, config: manage, jwks, now: () => 10 }, actor, { pageId, artifactId, expectedPolicyEpoch: 0, visibility: "public" })
     const pinned: ReadSubject = { kind: "pinned", pageId, revisionId, path: "/shared/app.js" }
     const pageDecision = await decideRead(env.DB, read, page, anonymous, null)
@@ -144,12 +151,12 @@ describe("primary D1 read decisions", () => {
   it("prefers the owner's pinned local resource over a later external mount at the same path", async () => {
     const { read, manage } = await configs()
     await pageFixture({ artifact: otherArtifact, revision: otherRevision, page: otherPage, route: { kind: "tree_page", pageRef: "other/page.html" } })
+    await ownerFixture([{ path: "/shared/app.js", providerArtifactId: artifactId }])
     await env.DB.batch([
       env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?, '/shared/app.js', 'asset', 'local-version', ?, 1, 'application/javascript')").bind(revisionId, digest),
       env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?, '/shared/app.js', 'asset', 'external-version', ?, 1, 'application/javascript')").bind(otherRevision, digest),
-      env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES ('/shared/app.js',?,?,'asset')").bind(otherArtifact, otherRevision),
     ])
-    await addOwnership("/shared/app.js", artifactId)
+    await env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES ('/shared/app.js',?,?,'asset')").bind(otherArtifact, otherRevision).run()
     await setVisibility({ db: env.DB, config: manage, jwks, now: () => 10 }, actor, { pageId, artifactId, expectedPolicyEpoch: 0, visibility: "public" })
     const pageDecision = await decideRead(env.DB, read, page, anonymous, null)
     if (pageDecision.kind !== "allow" || !pageDecision.plan.pinnedProof) throw new Error("public page proof unavailable")
@@ -157,6 +164,7 @@ describe("primary D1 read decisions", () => {
     expect(await decideRead(env.DB, read, resource, anonymous, null)).toEqual({ kind: "deny", reason: "not_found" })
   })
   it("resolves aliases only for team with a live target and stops after retirement", async () => {
+    await ownerFixture()
     const { read, manage } = await configs()
     const deps = { db: env.DB, config: manage, jwks, now: () => 10 }
     await setAlias(deps, actor, { op: "put", kind: "redirect_exact", key: "/old", to: "/docs/page", status: 301, targetPageId: pageId })
@@ -166,20 +174,22 @@ describe("primary D1 read decisions", () => {
     await setVisibility(deps, actor, { pageId, artifactId, expectedPolicyEpoch: 0, visibility: "public" })
     expect(await decideRead(env.DB, read, missing, anonymous, "/old")).toEqual({ kind: "deny", reason: "not_found" })
     expect(await decideRead(env.DB, read, missing, team, "/old")).toMatchObject({ kind: "alias", status: 301 })
-    await executeGuarded(deps, actor, [{ action: "unpublish", pageId, artifactId, expectedPolicyEpoch: 1, expectedContentVersion: 0, requestDigest: digest, occurredAt: 11 }], retirePageStatements(env.DB, { pageId, actorPrincipalId: principalId, at: 11 }))
+    await executeGuarded(deps, actor, [{ action: "unpublish", pageId, artifactId, expectedPolicyEpoch: 1, expectedContentVersion: 0, requestDigest: digest, occurredAt: 11 }], retirePageStatements(deps, actor, { pageId, at: 11 }))
     expect(await decideRead(env.DB, read, missing, anonymous, "/old")).toEqual({ kind: "deny", reason: "not_found" })
     expect(await decideRead(env.DB, read, missing, team, "/old")).toEqual({ kind: "deny", reason: "not_found" })
   })
   it("invalidates a share cookie on unpublish", async () => {
+    await ownerFixture()
     const { read, manage } = await configs()
     const deps = { db: env.DB, config: manage, jwks, now: () => 10 }
     await importShare(deps, actor, { pageId, artifactId, expectedPolicyEpoch: 0, key: "historical_123", mode: "follow_active" })
     const cookie = { ...anonymous, shareCookie: { pageRef: "docs/page.html", key: "historical_123" } }
     expect(await decideRead(env.DB, read, page, cookie, null)).toMatchObject({ kind: "allow" })
-    await executeGuarded(deps, actor, [{ action: "unpublish", pageId, artifactId, expectedPolicyEpoch: 1, expectedContentVersion: 0, requestDigest: digest, occurredAt: 11 }], retirePageStatements(env.DB, { pageId, actorPrincipalId: principalId, at: 11 }))
+    await executeGuarded(deps, actor, [{ action: "unpublish", pageId, artifactId, expectedPolicyEpoch: 1, expectedContentVersion: 0, requestDigest: digest, occurredAt: 11 }], retirePageStatements(deps, actor, { pageId, at: 11 }))
     expect(await decideRead(env.DB, read, page, cookie, null)).toEqual({ kind: "deny", reason: "login_required" })
   })
   it("prefers exact aliases and otherwise preserves the suffix of a prefix alias", async () => {
+    await ownerFixture()
     const { read, manage } = await configs()
     const deps = { db: env.DB, config: manage, jwks, now: () => 10 }
     await setVisibility(deps, actor, { pageId, artifactId, expectedPolicyEpoch: 0, visibility: "public" })
@@ -190,6 +200,7 @@ describe("primary D1 read decisions", () => {
     expect(await decideRead(env.DB, read, { kind: "resource", path: "/legacy/nested/file.js" }, anonymous, "/legacy/nested/file.js")).toEqual({ kind: "deny", reason: "not_found" })
   })
   it("allows a targetless legacy alias only to team readers", async () => {
+    await ownerFixture()
     const { read, manage } = await configs()
     const deps = { db: env.DB, config: manage, jwks, now: () => 10 }
     await importShare(deps, actor, { pageId, artifactId, expectedPolicyEpoch: 0, key: "historical_123", mode: "follow_active" })

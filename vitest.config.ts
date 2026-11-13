@@ -22,6 +22,7 @@ export default defineConfig({
           miniflare: {
             compatibilityDate: "2025-02-14",
             d1Databases: ["DB", "EMPTY_DB"],
+            r2Buckets: ["REVISION_BYTES"],
             bindings: { TEST_MIGRATIONS: await readD1Migrations(path.join(root, "migrations")) },
           },
         }))],

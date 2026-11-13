@@ -2,14 +2,16 @@ import { env } from "cloudflare:workers"
 import { beforeEach, describe, expect, it } from "vitest"
 import { share } from "../../domains/catalogue/commands"
 import { decideRead, type ReadCredentials, type ReadSubject } from "../../domains/catalogue/read"
-import { actor, addOwnership, artifactId, bootstrap, configs, digest, jwks, pageFixture, pageId, revisionId, teamIdentity } from "./fixtures/catalogue"
+import { actor, artifactId, bootstrap, configs, digest, jwks, pageFixture, pageId, revisionId, teamIdentity } from "./fixtures/catalogue"
 
 const none: ReadCredentials = { team: null, shareKey: null, shareCookie: null, pinnedProof: null, nowSeconds: 1 }
 const route = { kind: "subtree", slug: "sample" } as const
 const page: ReadSubject = { kind: "page", route, candidates: ["/a/sample/index.html"], fragmentPath: null }
 const pinned = (path: string): ReadSubject => ({ kind: "pinned", pageId, revisionId, path })
 
-beforeEach(async () => { await bootstrap(); await pageFixture() })
+beforeEach(async () => { await bootstrap(); await pageFixture({ ownership: [
+  { path: "/a/sample/inside.js", providerArtifactId: artifactId },
+] }) })
 
 describe("pinned subtree confinement", () => {
   it("serves a real owned subtree asset but rejects an equally real outside asset despite an ownership edge", async () => {
@@ -19,9 +21,10 @@ describe("pinned subtree confinement", () => {
         env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?,?,'asset',?,?,1,'application/javascript')").bind(revisionId, path, path, digest),
         env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES (?,?,?,'asset')").bind(path, artifactId, revisionId),
       ])
-      await addOwnership(path, artifactId)
     }
     const grant = await share({ db: env.DB, config: manage, jwks, now: () => 10 }, actor, { pageId, artifactId, expectedPolicyEpoch: 0, mode: "follow_active" })
+    // Simulate corrupt or legacy ownership that current admission forbids, to exercise read-side confinement in depth.
+    await env.DB.prepare("INSERT INTO resource_owners (owner_revision_id,owner_page_id,path,provider_artifact_id,admission) VALUES (?,?,'/a/other/outside.js',?,'local')").bind(revisionId, pageId, artifactId).run()
     const sharePage = await decideRead(env.DB, read, { kind: "share", route, candidates: ["/a/sample/index.html"] }, { ...none, shareKey: grant.key }, null)
     const teamPage = await decideRead(env.DB, read, page, { ...none, team: teamIdentity }, null)
     if (sharePage.kind !== "allow" || !sharePage.plan.pinnedProof || teamPage.kind !== "allow" || !teamPage.plan.pinnedProof) throw new Error("authorized page proofs unavailable")
