@@ -3,7 +3,7 @@ import { env } from "cloudflare:workers"
 import { beforeEach, describe, expect, it } from "vitest"
 import { importShare, revokeShare, setVisibility } from "../../domains/catalogue/commands"
 import { resolveRead } from "../../domains/catalogue/resolve"
-import { actor, artifactId, bootstrap, configs, pageFixture, pageId, revisionId } from "./fixtures/catalogue"
+import { actor, artifactId, bootstrap, configs, jwks, pageFixture, pageId, revisionId } from "./fixtures/catalogue"
 
 const secondArtifact = `ar_${"b".repeat(26)}`
 const secondRevision = `rv_${"b".repeat(26)}`
@@ -36,8 +36,8 @@ describe("source-derived tree route identity and canonical outcomes", () => {
     expect(await open("/x/y/")).toMatchObject({ kind: "login" })
     expect(await open("/d")).toMatchObject({ kind: "login" })
     const manage = (await configs()).manage
-    await setVisibility({ db: env.DB, config: manage, now: () => 10 }, actor, { pageId: thirdPage, artifactId: thirdArtifact, expectedPolicyEpoch: 0, visibility: "public" })
-    await setVisibility({ db: env.DB, config: manage, now: () => 10 }, actor, { pageId: fourthPage, artifactId: fourthArtifact, expectedPolicyEpoch: 0, visibility: "public" })
+    await setVisibility({ db: env.DB, config: manage, jwks, now: () => 10 }, actor, { pageId: thirdPage, artifactId: thirdArtifact, expectedPolicyEpoch: 0, visibility: "public" })
+    await setVisibility({ db: env.DB, config: manage, jwks, now: () => 10 }, actor, { pageId: fourthPage, artifactId: fourthArtifact, expectedPolicyEpoch: 0, visibility: "public" })
     expect(await open("/x/y/")).toMatchObject({ kind: "serve", plan: { revisionId: thirdRevision, resource: { path: "/x/y/index.html" } } })
     expect(await open("/x/y/index.html")).toEqual({ kind: "redirect", status: 308, location: "/x/y/" })
     expect(await open("/x/y/index")).toEqual({ kind: "redirect", status: 308, location: "/x/y/" })
@@ -57,7 +57,7 @@ describe("source-derived tree route identity and canonical outcomes", () => {
     await pageFixture({ route: { kind: "tree_page", pageRef } })
     const { read, manage } = await configs()
     const deps = { db: env.DB, config: read, jwks: async () => [], nowSeconds: () => 1000 }
-    const policy = { db: env.DB, config: manage, now: () => 10 }
+    const policy = { db: env.DB, config: manage, jwks, now: () => 10 }
     const request = (cookie?: string) => new Request(`https://forge.example.test${requested}`, cookie ? { headers: { Cookie: `forge_share=${encodeURIComponent(`${pageRef}|${cookie}`)}` } } : undefined)
     expect(await resolveRead(request(), deps)).toMatchObject({ kind: "login" })
     const grant = await importShare(policy, actor, { pageId, artifactId, expectedPolicyEpoch: 0, key: "historical_123", mode: "follow_active" })

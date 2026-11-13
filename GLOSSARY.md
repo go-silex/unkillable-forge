@@ -65,7 +65,7 @@ _Avoid_: partial page
 A non-HTML resource such as a style, script, image or data file.
 
 **Ownership**:
-A declared relation by which a page's revision uses a fragment or asset. A reader gets a fragment or asset only through a page that owns it.
+A declared relation by which a page's revision uses a fragment or asset, naming the artefact that provides it. A reader gets a fragment or asset only through a page that owns it, and only from that provider.
 _Avoid_: proximity, guessed reference
 
 **Unpublish**:
@@ -73,7 +73,7 @@ Removing a page from reading; its grants end and its address is freed.
 _Avoid_: delete (bytes are retained)
 
 **Restore**:
-Making a retained revision active again. Its unpublished pages return under the same page IDs, private, with no grant, at their former address only if it is still free.
+Making a retained revision active again. Its unpublished pages return under the same page IDs, private, with no grant, at their former address. If that address was claimed meanwhile, the whole restore fails and nothing changes.
 _Avoid_: undo, undelete, rollback (for the grants)
 
 ### Addresses
@@ -89,7 +89,7 @@ An address that leads to a page.
 The name in a subtree address `/a/<slug>/`. A route, not an identity.
 
 **Tree path**:
-The relative HTML path of a page in a tree instance, such as `talks/intro.html`. A route, not an identity.
+The relative HTML path of a page in a tree instance, such as `talks/intro.html`. A route, not an identity. In code: `pageRef`.
 
 **Alias**:
 An address that redirects to another address.
@@ -98,7 +98,7 @@ An address that redirects to another address.
 The instance's fixed public files: landing, login and icons.
 
 **Pinned read**:
-Reading the resources of one named revision of a page.
+Reading the resources of one named revision of a page. It needs a read right that holds now; a pinned-read token only makes that revision reachable for a short time.
 
 ### Access
 
@@ -125,7 +125,7 @@ May publish, change visibility and manage shares within its scope. Installation 
 May do everything a publisher may, assign roles and import historical shares.
 
 **Assurance**:
-What a verified identity proves: read access, management access, or nothing.
+What a verified identity proves on one surface: read access, management access, or nothing. In code: `surface` (`read` or `manage`).
 
 **Share grant**:
 The right a share key gives to read one shared page. Checked on every request.

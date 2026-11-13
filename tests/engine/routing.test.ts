@@ -24,11 +24,12 @@ describe("route grammar and redirect boundaries", () => {
       key: "newkey123", candidates: ["/a/sample/index.html"],
     })
   })
-  it.each(["https://evil.test/", "//evil.test/", "/\\evil.test/", "/a/../admin", "/login", "/login.html?next=/a"]) ("safeNext rejects %s", (next) => {
+  it.each(["https://evil.test/", "//evil.test/", "/\\evil.test/", "/%5cevil.test/", "/%2fevil.test/", "/\t/evil.test/", "/a/../admin", "/login", "/login.html?next=/a"]) ("safeNext rejects %s", (next) => {
     expect(safeNext(next, "https://forge.example.test")).toBe("/")
   })
   it("keeps local query and fragment in a safe next", () => {
     expect(safeNext("/a/sample/?view=1#section", "https://forge.example.test")).toBe("/a/sample/?view=1#section")
+    expect(safeNext("/dir/?filter=a%2Fb", "https://forge.example.test")).toBe("/dir/?filter=a%2Fb")
   })
   it("parses page-key shares before slug shares and preserves the browser indication", async () => {
     const read = (await configs()).read

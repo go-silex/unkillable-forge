@@ -26,8 +26,16 @@ const idRe = /^(?:pg|rv)_[a-z2-7]{26}$/
 const pageRefRe = /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.html$/
 const validPageRef = (value: string): boolean => pageRefRe.test(value) && !value.includes("..")
 
+export function subtreeSlugOf(path: string): string | null {
+  if (!path.startsWith("/a/")) return null
+  const slug = path.slice(3).split("/", 1)[0]
+  return slugRe.test(slug) ? slug : null
+}
+
 export function safeNext(raw: string | null, origin: string): string {
   if (!raw || !raw.startsWith("/") || raw.includes("..") || /[\\\u0000-\u001f\u007f]/.test(raw)) return "/"
+  const path = raw.split(/[?#]/, 1)[0]
+  if (/%(?:2f|5c|0[0-9a-f]|1[0-9a-f]|7f)/i.test(path)) return "/"
   try {
     const base = new URL(origin)
     const target = new URL(raw, base)

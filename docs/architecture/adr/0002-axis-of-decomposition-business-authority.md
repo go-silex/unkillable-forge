@@ -34,7 +34,7 @@ The engine varies along five dimensions:
 
 | Module | Sole authority over | Interface (summary) |
 |---|---|---|
-| **Catalogue & Policy** | verified identities and their assurance, principals, roles and scopes, page identity, routes and aliases, visibility, share grants, resource ownership, read decisions, the mutation guard | `authenticate` · `resolveRead` · policy commands · guard and statement builders |
+| **Catalogue & Policy** | verified identities and their assurance, principals, roles and scopes, page identity, routes and aliases, visibility, share grants, resource ownership, read decisions and pinned-read tokens, the mutation guard | `authenticateManage` · `resolveRead` · policy commands · `executeGuarded` and statement builders |
 | **Publication** | which sealed revision of an artefact is active (compare-and-set), publication sessions, idempotency, unpublish, restore | `begin` · `upload` · `status` · `commit` · `abort` · `remove` · `restore` |
 | **Revision Store** | immutable bytes and their integrity | `putOnce` · `inspect` · `seal` · `read` · `collect` |
 | **Delivery** | turning an authorized read plan into an HTTP response | `serve` |
@@ -56,7 +56,9 @@ Mapping from the plan's §2.1 names: *Accès* and *Catalogue* → Catalogue & Po
 - Instances differ by configuration and data, never by code branches on brand, instance or host name.
 - A slug or a tree path is a route to a page, never the page's identity.
 - Reading management policy requires an active manage principal with a current authority epoch and an administrator or in-scope publisher role, checked by Catalogue & Policy inside the same primary batch. An adapter cannot authorize that read.
-- Read and management run on distinct origins. The read path never holds a key that can mint or reveal shares.
+- Read and management run on distinct origins. The read Worker exposes no management endpoint and never holds the seal key, so it cannot reveal a share key, and artefact HTML on the read origin cannot reach management. It does hold the share verifier keys and a read-write D1 binding; see Expected debt.
+- Authority enters Catalogue & Policy only through handles it mints: a `ManageActor` from `authenticateManage`, a read identity registered by `authenticate`, and a pinned-read token minted by `decideRead` after an allow. No adapter supplies a principal ID, surface, epoch, ownership admission or token fields of its own (contract §5, §9.1, §12.6). This boundary guards against adapter forgery, not against hostile code in the same isolate.
+- The guard's action list is closed: an unknown action is refused. Adding an action takes a Catalogue-owned migration of the action CHECK together with the guard's action list and authority rule.
 
 ### Legacy tree until F15
 
@@ -71,6 +73,7 @@ Until F15 removes them, `plugins/silex-forge/scripts/` and `functions/` keep 000
 A reviewer flags any of these:
 
 - An adapter that reads `role_grants`, `share_grants`, `pages.visibility`, `routes` or `artifacts.active_revision_id`, or issues a D1 write, instead of calling the owning module.
+- An adapter or lot that builds an `AccessVerifier`, an actor, a guard row, a pinned-read token, or writes ownership edges outside `executeGuarded`.
 - A D1 batch that writes a policy or active-state table without the guard (other than the bounded operator bootstrap), a self-registration batch that grants a role or modifies an existing principal, or a second guard written for one action.
 - A refusal derived from a zero-row update, `changes()`, an `ON CONFLICT … WHERE` that silently skips, or a read followed by a separate write. Self-registration may use `ON CONFLICT (issuer, subject) DO NOTHING`, but its instance verdict comes from the same batch’s explicit instance read, never from affected-row counts.
 - An authorization input taken from KV, a cache, isolate memory, `withSession()` or a stale JWT claim beyond its own expiry.
@@ -81,7 +84,7 @@ A reviewer flags any of these:
 ## Enforcement
 
 - Behavioural tests on real D1 bindings own the policy (contract §14): each guard verdict, each read grammar, conflict with zero side effects, laundering denial, instance mismatch.
-- The contract fixes the authority guard SQL and its named CHECK constraints. `executeGuarded` also rejects structurally invalid batches before any D1 call: a role or principal mutation must be the only guard in its batch, so two removals cannot each count the other administrator. Multi-page publication remains allowed. Principal self-registration and operator bootstrap are the only unguarded exceptions.
+- The guard SQL, the ownership admission and their named CHECK constraints live in code (`domains/catalogue/guard.ts`, `migrations/0001_catalogue.sql`); the contract states the rules they must satisfy. `executeGuarded` also rejects structurally invalid batches before any D1 call: a role or principal mutation must be the only guard in its batch, so two removals cannot each count the other administrator. Multi-page publication remains allowed. An ownership edge is accepted only alongside a guard for its owner page bound to the same revision. Principal self-registration and operator bootstrap are the only unguarded exceptions.
 - `R-axial-adr-review` (dev-core) path-hits `domains/` and `adapters/` through `AXIAL_RE` and reviews diffs against this ADR.
 - Legacy enforcement listed in 0001 (`tests/publish-*.sh`, `tests/*.test.ts`) stays in force for the legacy tree until F15.
 
@@ -90,9 +93,10 @@ A reviewer flags any of these:
 - Policy partly lives in SQL (guard verdicts, read joins). It is reviewed as SQL; tests are the safety net.
 - The guard is a wide statement (17 parameters). Callers use one builder, never hand-written SQL.
 - A page read crosses Catalogue & Policy, Delivery and Revision Store: more indirection than one handler.
-- Keeping share-revealing keys off the read path means two Workers per instance (read, manage) and two deploy configurations.
+- Keeping the seal key and management endpoints off the read origin means two Workers per instance (read, manage) and two deploy configurations.
+- The read Worker still holds the share verifier keys and a read-write D1 binding. A compromised read Worker could create share verifiers or pinned-read tokens, or write the catalogue. No third Worker or read-only binding is assumed.
 - The legacy tree keeps 0001's rules until F15, so two architectures coexist during migration.
-- Ownership across artefacts follows the owner's active revision; a resource mounted by another artefact is not pinned by a revision of the page that uses it.
+- Ownership across artefacts follows the providing artefact's active revision: a resource provided by another artefact is not pinned by a revision of the page that uses it. The edge names its provider, and only an administrator or installation publisher adds or retargets a cross-artefact edge.
 
 ## Considered options
 

@@ -22,6 +22,7 @@ describe("instance config fails closed on either surface", () => {
       expect(read.config).not.toHaveProperty("manageAudiences")
       expect(read.config).not.toHaveProperty("shareSealKey")
       expect(manage.config).not.toHaveProperty("readAudiences")
+      expect(manage.config.shellPaths).toEqual(valid.shellPaths)
       expect(manage.config).not.toHaveProperty("login")
     }
   })
@@ -54,5 +55,19 @@ describe("instance config fails closed on either surface", () => {
     expect((await parseManageConfig({ ...bindings(), FORGE_SHARE_VERIFIER_KEYS: JSON.stringify([{ kid: "bad!", key }]) })).ok).toBe(false)
     expect((await parseManageConfig({ ...bindings(), FORGE_SHARE_VERIFIER_KEYS: JSON.stringify([{ kid: "one", key: "eA" }]) })).ok).toBe(false)
     expect((await parseReadConfig({ ...bindings(), FORGE_SHARE_SEAL_KEY: JSON.stringify({ kid: "seal", key }) })).ok).toBe(false)
+  })
+  it("rejects unknown configuration and key fields without rejecting unrelated environment bindings", async () => {
+    for (const parse of [parseReadConfig, parseManageConfig]) {
+      const root = await parse(bindings({ ...valid, manageAudiencesTypo: ["manage"] }))
+      expect(root.ok).toBe(false)
+      if (!root.ok) expect(root.errors.join(" ")).toContain("manageAudiencesTypo")
+      const verifier = await parse({ ...bindings(), FORGE_SHARE_VERIFIER_KEYS: JSON.stringify([{ kid: "one", key, unexpected: true }]) })
+      expect(verifier.ok).toBe(false)
+      if (!verifier.ok) expect(verifier.errors.join(" ")).toContain("unexpected")
+      expect((await parse({ ...bindings(), UNRELATED_BINDING: "allowed" })).ok).toBe(true)
+    }
+    const seal = await parseManageConfig({ ...bindings(), FORGE_SHARE_SEAL_KEY: JSON.stringify({ kid: "seal", key, unexpected: true }) })
+    expect(seal.ok).toBe(false)
+    if (!seal.ok) expect(seal.errors.join(" ")).toContain("unexpected")
   })
 })

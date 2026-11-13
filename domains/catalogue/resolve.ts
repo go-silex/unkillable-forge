@@ -1,6 +1,6 @@
 import { authenticate, type JwksSource } from "./identity"
 import type { ReadInstanceConfig } from "./instance-config"
-import { checkReadInstance, decideRead, type PinnedReadProof, type ReadSubject } from "./read"
+import { checkReadInstance, decideRead, type ReadSubject } from "./read"
 import { parseRequest } from "./routing/grammar"
 import { toOutcome, type RouteOutcome } from "./routing/outcome"
 
@@ -9,12 +9,13 @@ export interface ReadDeps {
   readonly config: ReadInstanceConfig
   readonly jwks: JwksSource
   readonly nowSeconds: () => number
-  /** F05 supplies a verified proof for a pinned request, never an unverified token. */
-  readonly pinnedProof?: PinnedReadProof | null
+  /** Opaque token; Catalogue verifies its authenticity and claims. */
+  readonly pinnedProof?: string | null
 }
 
 export async function resolveRead(request: Request, deps: ReadDeps): Promise<RouteOutcome> {
-  const identity = await authenticate(request, { teamDomain: deps.config.accessTeamDomain, audiences: deps.config.readAudiences, surface: "read" }, deps.jwks, deps.nowSeconds())
+  const nowSeconds = deps.nowSeconds()
+  const identity = await authenticate(request, { teamDomain: deps.config.accessTeamDomain, audiences: deps.config.readAudiences, surface: "read" }, deps.jwks, nowSeconds)
   const { parsed, credentials, aliasPath } = parseRequest(request, deps.config)
   if (parsed.kind === "deny") return parsed
   if (parsed.kind === "shell" || parsed.kind === "catalogue") {
@@ -39,6 +40,7 @@ export async function resolveRead(request: Request, deps: ReadDeps): Promise<Rou
     shareKey: parsed.kind === "share" || parsed.kind === "card" ? parsed.key : null,
     shareCookie: credentials.shareCookie,
     pinnedProof: deps.pinnedProof ?? null,
+    nowSeconds,
   }, aliasPath)
   return toOutcome(parsed, decision, identity, deps.config)
 }

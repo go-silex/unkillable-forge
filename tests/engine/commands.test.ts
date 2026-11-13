@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers"
 import { beforeEach, describe, expect, it } from "vitest"
 import { assignRole, disablePrincipal, importShare, readPagePolicy, revealShare, revokeRole, revokeShare, rotateShare, setVisibility, share } from "../../domains/catalogue/commands"
 import { shareKeyDigests } from "../../domains/catalogue/share-secrets"
-import { actor, artifactId, bootstrap, configs, pageFixture, pageId, principalId } from "./fixtures/catalogue"
+import { actor, artifactId, authenticatedActor, bootstrap, configs, jwks, pageFixture, pageId } from "./fixtures/catalogue"
 
 beforeEach(async () => { await bootstrap(); await pageFixture() })
 const target = { pageId, artifactId, expectedPolicyEpoch: 0 }
@@ -11,7 +11,7 @@ const otherPrincipal = `pr_${"b".repeat(26)}`
 describe("policy commands", () => {
   it("mints, reveals, rotates and revokes without persisting plaintext", async () => {
     const config = (await configs()).manage
-    const deps = { db: env.DB, config, now: () => 10 }
+    const deps = { db: env.DB, config, jwks, now: () => 10 }
     const minted = await share(deps, actor, { ...target, mode: "follow_active" })
     expect(minted.key).toMatch(/^[A-Za-z0-9_-]{24}$/)
     expect(await revealShare(deps, actor, { ...target, expectedPolicyEpoch: 1, grantId: minted.grantId })).toEqual({ key: minted.key })
@@ -31,7 +31,7 @@ describe("policy commands", () => {
   })
   it("imports the exact historical key and erases the seal when visibility changes", async () => {
     const config = (await configs()).manage
-    const deps = { db: env.DB, config, now: () => 12 }
+    const deps = { db: env.DB, config, jwks, now: () => 12 }
     const historical = "legacy_Key-12345678"
     const imported = await importShare(deps, actor, { ...target, key: historical, mode: "follow_active" })
     const [expected] = await shareKeyDigests(config.shareVerifierKeys, config.instanceId, historical)
@@ -45,28 +45,27 @@ describe("policy commands", () => {
   })
   it("cannot reveal when the manage surface has no seal key", async () => {
     const config = { ...(await configs()).manage, shareSealKey: null }
-    const deps = { db: env.DB, config, now: () => 10 }
+    const deps = { db: env.DB, config, jwks, now: () => 10 }
     const minted = await share(deps, actor, { ...target, mode: "follow_active" })
     expect(minted.revealable).toBe(false)
     await expect(revealShare(deps, actor, { ...target, expectedPolicyEpoch: 1, grantId: minted.grantId })).rejects.toMatchObject({ code: "invalid_state" })
   })
   it("enforces publisher scope when reading policy and after revocation", async () => {
-    const deps = { db: env.DB, config: (await configs()).manage, now: () => 10 }
+    const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
     await env.DB.prepare("INSERT INTO principals (principal_id, issuer, subject, created_at) VALUES (?, 'https://team.cloudflareaccess.com', 'publisher', 1)").bind(otherPrincipal).run()
     const role = await assignRole(deps, actor, { targetPrincipalId: otherPrincipal, expectedTargetAuthorityEpoch: 0, role: "publisher", scope: { kind: "page", pageId } })
-    const publisher = { principalId: otherPrincipal, surface: "manage" as const, authorityEpoch: 1 }
+    const publisher = await authenticatedActor("publisher")
     expect(await readPagePolicy(deps, publisher, pageId)).toMatchObject({ pageId, visibility: "private" })
-    await expect(readPagePolicy(deps, { ...publisher, surface: "read" }, pageId)).rejects.toMatchObject({ code: "forbidden" })
+    await expect(readPagePolicy(deps, { ...publisher }, pageId)).rejects.toMatchObject({ code: "unauthenticated" })
     await expect(readPagePolicy(deps, publisher, `pg_${"c".repeat(26)}`)).rejects.toMatchObject({ code: "forbidden" })
     await revokeRole(deps, actor, { targetPrincipalId: otherPrincipal, expectedTargetAuthorityEpoch: 1, roleGrantId: role.roleGrantId })
     await expect(setVisibility(deps, publisher, { ...target, visibility: "public" })).rejects.toMatchObject({ code: "conflict" })
-    await expect(readPagePolicy(deps, { ...publisher, authorityEpoch: 2 }, pageId)).rejects.toMatchObject({ code: "forbidden" })
+    await expect(readPagePolicy(deps, await authenticatedActor("publisher"), pageId)).rejects.toMatchObject({ code: "forbidden" })
     await disablePrincipal(deps, actor, { targetPrincipalId: otherPrincipal, expectedTargetAuthorityEpoch: 2 })
-    await expect(setVisibility(deps, { ...publisher, authorityEpoch: 3 }, { ...target, visibility: "public" })).rejects.toMatchObject({ code: "unauthenticated" })
-    expect(principalId).not.toBe(otherPrincipal)
+    await expect(setVisibility(deps, await authenticatedActor("publisher"), { ...target, visibility: "public" })).rejects.toMatchObject({ code: "unauthenticated" })
   })
   it("rolls back a conflicting second import without replacing the existing grant", async () => {
-    const deps = { db: env.DB, config: (await configs()).manage, now: () => 10 }
+    const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
     const first = await importShare(deps, actor, { ...target, key: "first_key123", mode: "follow_active" })
     const before = await env.DB.prepare("SELECT count(*) AS n FROM mutation_events").first()
     await expect(importShare(deps, actor, { ...target, expectedPolicyEpoch: 1, key: "second_key123", mode: "follow_active" })).rejects.toMatchObject({ code: "conflict" })

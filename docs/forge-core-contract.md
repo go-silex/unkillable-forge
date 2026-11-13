@@ -7,6 +7,7 @@ Decision: [ADR 0002](architecture/adr/0002-axis-of-decomposition-business-author
 - This document is the implementable contract for lot F03: artefact/page/revision model, D1 schema, instance configuration, identity, roles, ACL, route resolution and the first executable read decisions. The F03 PR implements it.
 - **Owner-approved** items come from the accepted plan and the owner's instruction to build the new engine as designed. **Contract decisions** are technical choices made here to make the plan implementable; they are marked *(contract decision)* and can be changed by a later contract revision without owner arbitration. **Owner decisions** still open are listed in §17 and none blocks F03 code.
 - The legacy runtime (`functions/`, `plugins/silex-forge/`, `site/`) is the parity oracle and stays untouched by F03.
+- **Normative SQL lives in code.** The schema is [`migrations/0001_catalogue.sql`](../migrations/0001_catalogue.sql). The guard, ownership admission, read, registration and builder statements are in [`domains/catalogue/`](../domains/catalogue/) (`guard.ts`, `read.ts`, `principals.ts`, `commands.ts`, `revision-paths.ts`, `catalogue-list.ts`). This contract states the rules that SQL must satisfy, the interfaces and the tests, and keeps no copy of the SQL. Code that breaks a rule here is a defect; changing a rule is a contract revision.
 
 Oracles:
 
@@ -44,7 +45,7 @@ Instance 1 ── * Artefact 1 ── * Revision (immutable, sealed)
                                  └── 0..1 active Share grant
 Revision ── * Resource (document | subdocument | fragment | asset)
 Revision ── * RevisionPage (page, document path, catalogue metadata)
-RevisionPage ── * Ownership edge → resource path
+RevisionPage ── * Ownership edge → (resource path, provider artefact)
 Mount: path → (artefact, active revision, kind)   (one artefact per path)
 ```
 
@@ -52,8 +53,8 @@ Rules:
 
 - **Identity is opaque.** Pages, artefacts, revisions, grants, principals, role grants and events have random IDs: prefix `pg_`, `ar_`, `rv_`, `gr_`, `pr_`, `rg_`, `ev_` followed by 26 characters of lowercase RFC 4648 base32 (`a-z2-7`) encoding 16 random bytes *(contract decision)*. Slugs and tree paths are route keys.
 - **Page ≠ file.** A page is the ACL unit; its document is one resource. Subtree pages (Silex `/a/<slug>/`) govern every resource under their prefix. Tree pages (R) govern their document; fragments and assets are reached only through ownership.
-- **Ownership is declared, not guessed.** A revision's pages declare the paths they use. Access to a fragment or asset outside a subtree requires an owner page whose *active* revision declares that path. Ownership may cross artefacts (a shared asset mounted by artefact Y and used by pages of artefact X); in that case the resource follows Y's active revision and is not pinned by X's revision.
-- **No laundering.** A path is mounted by exactly one artefact with exactly one kind. A path that is a page document can never be mounted or read as a fragment or asset (§7 foreign keys). Inside the pinned namespace, a page reads only its own document, its subtree, or paths its revision owns.
+- **Ownership is declared, not guessed.** A revision's pages declare the paths they use. Access to a fragment or asset outside a subtree requires an owner page whose *active* revision (for a pinned read, whose authorized revision) declares that path together with the artefact that provides it. Ownership may cross artefacts (a shared asset mounted by artefact Y and used by pages of artefact X). The edge then names Y, and only Y's current mount satisfies it: the resource follows Y's active revision, not X's revision. A later mount of the same path by another artefact Z never satisfies the edge. Adding or retargeting a cross-artefact edge needs administrator or installation-publisher authority (§9, ownership admission).
+- **No laundering.** A path is mounted by exactly one artefact with exactly one kind. A path that is a page document can never be mounted or read as a fragment or asset (§7 foreign keys). Inside the pinned namespace, a page reads only its own document, its subtree, or fragments and assets its revision owns. A resource held by the pinned revision itself always takes precedence over any mount.
 - **Revision ≠ authorization.** Knowing a revision ID grants nothing. A public page does not open its older revisions.
 - **Visibility unknown means private**; the schema only admits the three values.
 
@@ -90,6 +91,7 @@ export interface ManageInstanceConfig extends InstanceBase {
   readonly surface: "manage"
   readonly manageHost: string
   readonly manageAudiences: readonly string[]
+  readonly shellPaths: readonly string[]          // manifest validation (§9, validateRevisionPaths)
   readonly shareSealKey: ShareSealKey | null
 }
 export type ConfigResult<T> =
@@ -114,10 +116,11 @@ Bindings and variables:
 | Fields | Group | Read parser | Manage parser |
 |---|---|---|---|
 | `instanceId`, `canonicalHost`, `aliasHosts`, `accessTeamDomain`, `routeGrammars`, `shareGrammars` | common | required | required |
-| `readAudiences`, `login`, `shareCookie`, `shellPaths` | read | required | validated when present |
-| `manageHost`, `manageAudiences` | manage | validated when present | required |
+| `shellPaths` | common | required, exposed | required, exposed |
+| `readAudiences`, `login`, `shareCookie` | read | required, exposed | required, validated, not exposed |
+| `manageHost`, `manageAudiences` | manage | required, validated, not exposed | required, exposed |
 
-Both parsers run the same validation over the **whole document** before building their typed result: every common field, every field present from either surface group, and every cross constraint whose inputs are present. Only then does each parser require its own group and expose its own surface. A parser never skips the other group's fields or cross constraints because its typed result does not carry them. An unknown field is an error.
+Both parsers require and validate the **whole document** (every group, every field and every cross constraint) before building their typed result. Each then exposes only its own surface's fields. A parser never skips the other group's fields or cross constraints because its typed result does not carry them. An unknown field is an error.
 
 Validation (all errors collected; any error → the Worker answers every request `503`, `cache-control: no-store`, no partial defaults):
 
@@ -142,7 +145,14 @@ Instance values (non-secret parts):
 | `shareCookie` | `false` | `true` |
 | `shellPaths` | `/`, `/index.html`, `/login`, `/login.html`, `/robots.txt`, `/favicon.ico`, `/apple-touch-icon.png`, `/images/favicon.png` | `/`, `/index.html`, `/login`, `/login.html`, `/robots.txt`, `/favicon.ico`, `/favicon.svg`, `/favicon-32.png`, `/apple-touch-icon.png`, `/_shared/hero-base.css`, `/_shared/hero-base.js`, `/_shared/gallery-base.css`, `/_shared/gallery-base.js`, `/_shared/fgraph-base.css`, `/_shared/explainer-base.css` |
 
-Two Workers per instance *(contract decision, follows from "the read path never holds a key that can mint or reveal shares")*: a **read Worker** on the read origin and a **manage Worker** on the management origin, built from the same code, sharing the instance's D1 (and R2 from F04). Wrangler configurations for them are created by F04/F05 with real entry points; F03 adds none.
+Two Workers per instance *(contract decision)*: a **read Worker** on the read origin and a **manage Worker** on the management origin, built from the same code, sharing the instance's D1 (and R2 from F04). Wrangler configurations for them are created by F04/F05 with real entry points; F03 adds none.
+
+What the split buys, and what it does not:
+
+- The read Worker exposes no management endpoint and never holds the seal key, so it cannot reveal a share key.
+- Artefact HTML, served on the read origin, cannot reach management credentials or endpoints.
+- The read Worker does hold the share verifier keys, which it needs to verify keys and to sign pinned-read tokens (§12.6), plus a read-write D1 binding. A compromised read Worker could therefore compute verifiers for keys of its choice, or write the catalogue.
+- No third Worker and no read-only D1 binding is assumed. This is recorded as expected debt in ADR 0002 and §17.
 
 ## 5. Identity and assurance (S4)
 
@@ -164,6 +174,7 @@ export interface AccessVerifier {
 export type JwksSource = (teamDomain: string) => Promise<readonly JsonWebKey[]>
 export function accessJwksSource(fetcher?: typeof fetch): JwksSource
 export function authenticate(request: Request, verifier: AccessVerifier, jwks: JwksSource, nowSeconds: number): Promise<VerifiedIdentity | null>
+export function isVerifiedIdentity(value: unknown): value is VerifiedIdentity // true only for an object returned by authenticate
 ```
 
 Rules (parity with Silex `functions/_lib/access.ts` JWT verification, plus surfaces):
@@ -173,7 +184,9 @@ Rules (parity with Silex `functions/_lib/access.ts` JWT verification, plus surfa
 - `exp` required; `exp` and `nbf` checked with ±30 s skew; `iss` must equal `https://<teamDomain>` (a trailing slash is accepted); `aud` (string or array) must intersect `verifier.audiences`.
 - Manage surface: `sub` must be a non-empty string, else `null`. Read surface: `sub` may be empty.
 - `accessJwksSource` caches key material per isolate for one hour. A fetch or parse failure returns no keys, so verification fails closed. The cache holds keys only, never decisions.
-- The read Worker builds its verifier with `readAudiences` only; the manage Worker with `manageAudiences` only. A management identity is not proof of the read audience and never makes someone a team reader. A read identity never authorizes a mutation (§8 verdict `forbidden`).
+- Verifiers are built only inside Catalogue: `resolveRead` uses `readAudiences`, and `authenticateManage` (§9.1) uses `manageAudiences`. No adapter builds an `AccessVerifier` or chooses a surface.
+- `authenticate` returns a frozen identity registered in a module-private `WeakSet`, and `isVerifiedIdentity` is true only for such an object. `decideRead` grants the team basis only to an identity that is registered, read-surface, unexpired, and whose audience is a configured read audience (§12.1). A structurally identical object grants nothing. This is an API boundary against adapter forgery, not a defence against hostile code running in the same isolate.
+- A management identity is not proof of the read audience and never makes someone a team reader. A read identity never authorizes a mutation: it yields no `ManageActor` (§9.1), and the guard's surface rule (§8.1) stays as defence in depth.
 - Principals are keyed by `(issuer, subject)`. Whether Access issues the same `sub` across browser sessions and Managed OAuth is measured by F06; roles attach only to manage-surface principals, so a read/manage `sub` difference does not affect reads.
 
 ## 6. Roles, scopes and actions
@@ -182,7 +195,7 @@ Owner-approved (plan §2.5): team readers read and never mutate; publishing and 
 
 | Action | Who may | Target must | Versions asserted |
 |---|---|---|---|
-| `create_page` | admin · publisher@installation | page ID unused; new revision's paths unclaimed by other artefacts | actor authority |
+| `create_page` | admin · publisher@installation | page ID unused; revision belongs to artefact; new revision's paths unclaimed by other artefacts | actor authority |
 | `stage` (F04: begin/upload/seal) | admin · publisher@installation · publisher@page (page given) | page live if given; none → installation scope only | actor authority |
 | `publish` | admin · publisher@installation · publisher@page | page live in artefact; revision belongs to artefact; paths unclaimed by other artefacts | actor authority · page policy epoch · artefact content version |
 | `unpublish` | same as `publish` | page live | actor authority · policy epoch · content version |
@@ -197,237 +210,34 @@ Owner-approved (plan §2.5): team readers read and never mutate; publishing and 
 
 - `publisher@page` = role `publisher`, scope `page`, on that page. A multi-page artefact needs one guard row per page, so a page-scoped publisher cannot publish an artefact containing pages outside its scope.
 - `restore_page` uses `create_page` authority: the page's route was released at unpublish, and reclaiming an address is an installation-level act *(contract decision)*.
-- Every action requires an active principal on the manage surface.
+- Every action requires an active principal on the manage surface, presented as a `ManageActor` minted by `authenticateManage` (§9.1). No API accepts a principal ID, surface or epoch for the acting principal.
+- The action list is closed: the guard refuses any other action as `forbidden` (deny by default). Adding an action requires three changes together: a Catalogue-owned migration of the `mutation_events.action` CHECK, the guard's action list, and the new action's authority rule.
+- Ownership edges (§3) are written in a guarded batch of their revision (§8.3, §9). An edge whose provider is another artefact is admitted only in two cases: the actor is an administrator or installation publisher, or an identical edge (owner page, path, provider) is already in the owner page's current active revision.
 - First administrator per instance: inserted by the F11 bootstrap runbook (`origin = 'bootstrap'`), after that person has signed in once on the management origin. Who it is belongs to G4 (§17).
 
 ## 7. D1 schema (S2)
 
 File `migrations/0001_catalogue.sql`, wrangler D1 migration format, raw SQL, no ORM *(contract decision: the guard must be literal, reviewable SQL)*. D1 enforces foreign keys. F04 adds `0002_*` for publication sessions, uploads and idempotency; it may add columns to `revisions`, never redefine the tables below.
 
-```sql
--- Forge catalogue contract v1. docs/forge-core-contract.md §7. ADR 0002.
+Required content, table by table (the migration is the normative SQL):
 
-CREATE TABLE instance_meta (
-  singleton        INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1),
-  instance_id      TEXT    NOT NULL CHECK (
-                     length(instance_id) BETWEEN 2 AND 40
-                     AND instance_id NOT GLOB '*[^a-z0-9-]*'
-                     AND substr(instance_id, 1, 1) BETWEEN 'a' AND 'z'),
-  contract_version INTEGER NOT NULL CHECK (contract_version = 1),
-  created_at       INTEGER NOT NULL
-);
+| Table | Rules |
+|---|---|
+| `instance_meta` | one row (`singleton = 1`); `instance_id` follows the §4 grammar; `contract_version = 1` |
+| `principals` | `pr_` ID; `(issuer, subject)` unique; `issuer` an `https://` URL of at most 255 characters; `subject` 1–255 characters; `status` `active` or `disabled`, with `disabled_at` set exactly when disabled; `authority_epoch ≥ 0` |
+| `artifacts` | `ar_` ID; `origin` `published` or `imported`; `active_revision_id` nullable, and when set a revision of the same artefact (composite foreign key); `content_version ≥ 0` |
+| `pages` | `pg_` ID; one artefact; `visibility` `private`, `shared` or `public`, default `private`; `policy_epoch ≥ 0`; tombstone time and author; `(page_id, artifact_id)` unique |
+| `role_grants` | `rg_` ID; `role` `publisher` or `admin`; scope `installation` or `page`, with `scope_page_id` set exactly for `page`; `admin` only at installation scope; `origin = 'bootstrap'` exactly when `granted_by` is null; revocation time and author set together; at most one active grant per (principal, role, scope) |
+| `revisions` | `rv_` ID; one artefact, `(artifact_id, revision_id)` unique; manifest SHA-256 (64 lowercase hex) and object key |
+| `revision_resources` | primary key (revision, path); `(revision, path, kind)` unique. Path: absolute, 2–1024 characters, without a `//`, a `.` or `..` segment, a trailing `/` or a backslash, and outside `/s`, `/_revisions`, `/api`, `/registry/*`, `/manifest.json` and `/asset-owners.json`. Kind: `document`, `subdocument`, `fragment` or `asset`; an `.html` path is never an `asset`. Also SHA-256, size ≥ 0 and content type |
+| `revision_pages` | primary key (revision, page); one page per document path in a revision; `(revision, document_path, 'document')` references `revision_resources`; `metadata_json` valid JSON of at most 8192 characters. That page and revision share an artefact is a Publication invariant, not a schema rule. An inconsistent row stays inert, because every read joins revision and page through the page's artefact (§12) and every guard and ownership admission asserts it (§8.1, §9) |
+| `mounts` | primary key `path` (one artefact per path); `(artifact, revision)` references `revisions`; `(revision, path, kind)` references `revision_resources`; `(path, artifact, kind)` unique |
+| `routes` | Primary key (kind, key). Kinds `subtree`, `tree_page`, `redirect_exact`, `redirect_prefix`; page kinds carry page, artefact and document and no redirect field, redirect kinds the reverse.<br>`subtree`: key in the slug grammar (§11.3), document `/a/<key>/index.html`.<br>`tree_page`: key `?*.html`, relative, characters `[A-Za-z0-9._/-]`, no `//`, no `..`, never under `a/`, document `/<key>`.<br>Redirect kinds: key and target are same-origin paths of visible ASCII (`!`–`~`). They start with `/` but not `//`, and contain no backslash, `?`, `#` or control character, and no percent-encoded `/`, `.`, `\`, `%`, control or DEL. The key has no `..`; a prefix key ends with `/`. Status 301, 302, 307 or 308.<br>At most one primary route per page; `(page, artifact)` references `pages`; `(document_path, artifact, 'document')` references `mounts` (laundering refused) |
+| `resource_owners` | primary key (owner revision, owner page, path); `(owner revision, owner page)` references `revision_pages`; path absolute, at most 1024 characters; `provider_artifact_id` (not null) references `artifacts`; `admission` is `local`, `global` or `preserved`, and the value `forbidden` violates the named CHECK `guard_forbidden` (§9, ownership admission) |
+| `share_grants` | `gr_` ID; key verifier `(key_kid, key_hmac)` (§10); `mode` `follow_active` or `pinned`, with `pinned_revision_id` set exactly when pinned; `origin` `minted` or `imported`; sealed copy and seal `kid` set together and erased on revocation; revocation time and reason (`revoked`, `rotated`, `visibility`, `unpublished`) set together; at most one active grant per page |
+| `mutation_events` | `ev_` ID; `action` among the 15 guard actions (§8.2); request digest of 64 lowercase hex; no foreign key; `verdict` in the guard domain, with one named CHECK per refusal: `guard_instance_mismatch`, `guard_unauthenticated`, `guard_forbidden`, `guard_not_found`, `guard_conflict`, `guard_invalid_state`, `guard_last_admin` |
 
-CREATE TABLE principals (
-  principal_id    TEXT NOT NULL PRIMARY KEY CHECK (length(principal_id) = 29 AND substr(principal_id, 1, 3) = 'pr_' AND substr(principal_id, 4) NOT GLOB '*[^a-z2-7]*'),
-  issuer          TEXT NOT NULL CHECK (substr(issuer, 1, 8) = 'https://' AND length(issuer) <= 255),
-  subject         TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 255),
-  status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
-  authority_epoch INTEGER NOT NULL DEFAULT 0 CHECK (authority_epoch >= 0),
-  email_hint      TEXT CHECK (email_hint IS NULL OR length(email_hint) <= 320),
-  created_at      INTEGER NOT NULL,
-  disabled_at     INTEGER,
-  UNIQUE (issuer, subject),
-  CHECK ((status = 'disabled') = (disabled_at IS NOT NULL))
-);
-
-CREATE TABLE artifacts (
-  artifact_id        TEXT NOT NULL PRIMARY KEY CHECK (length(artifact_id) = 29 AND substr(artifact_id, 1, 3) = 'ar_' AND substr(artifact_id, 4) NOT GLOB '*[^a-z2-7]*'),
-  origin             TEXT NOT NULL CHECK (origin IN ('published', 'imported')),
-  active_revision_id TEXT,
-  content_version    INTEGER NOT NULL DEFAULT 0 CHECK (content_version >= 0),
-  created_at         INTEGER NOT NULL,
-  created_by         TEXT REFERENCES principals (principal_id),
-  FOREIGN KEY (artifact_id, active_revision_id) REFERENCES revisions (artifact_id, revision_id)
-);
-
-CREATE TABLE pages (
-  page_id       TEXT NOT NULL PRIMARY KEY CHECK (length(page_id) = 29 AND substr(page_id, 1, 3) = 'pg_' AND substr(page_id, 4) NOT GLOB '*[^a-z2-7]*'),
-  artifact_id   TEXT NOT NULL REFERENCES artifacts (artifact_id),
-  visibility    TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private', 'shared', 'public')),
-  policy_epoch  INTEGER NOT NULL DEFAULT 0 CHECK (policy_epoch >= 0),
-  created_at    INTEGER NOT NULL,
-  created_by    TEXT REFERENCES principals (principal_id),
-  tombstoned_at INTEGER,
-  tombstoned_by TEXT REFERENCES principals (principal_id),
-  UNIQUE (page_id, artifact_id)
-);
-CREATE INDEX pages_by_artifact ON pages (artifact_id);
-
-CREATE TABLE role_grants (
-  role_grant_id TEXT NOT NULL PRIMARY KEY CHECK (length(role_grant_id) = 29 AND substr(role_grant_id, 1, 3) = 'rg_' AND substr(role_grant_id, 4) NOT GLOB '*[^a-z2-7]*'),
-  principal_id  TEXT NOT NULL REFERENCES principals (principal_id),
-  role          TEXT NOT NULL CHECK (role IN ('publisher', 'admin')),
-  scope_kind    TEXT NOT NULL CHECK (scope_kind IN ('installation', 'page')),
-  scope_page_id TEXT REFERENCES pages (page_id),
-  origin        TEXT NOT NULL CHECK (origin IN ('bootstrap', 'granted')),
-  granted_at    INTEGER NOT NULL,
-  granted_by    TEXT REFERENCES principals (principal_id),
-  revoked_at    INTEGER,
-  revoked_by    TEXT REFERENCES principals (principal_id),
-  CHECK ((scope_kind = 'page') = (scope_page_id IS NOT NULL)),
-  CHECK (role = 'publisher' OR scope_kind = 'installation'),
-  CHECK ((origin = 'bootstrap') = (granted_by IS NULL)),
-  CHECK ((revoked_at IS NULL) = (revoked_by IS NULL))
-);
-CREATE UNIQUE INDEX role_grants_one_active
-  ON role_grants (principal_id, role, scope_kind, coalesce(scope_page_id, ''))
-  WHERE revoked_at IS NULL;
-
-CREATE TABLE revisions (
-  revision_id         TEXT NOT NULL PRIMARY KEY CHECK (length(revision_id) = 29 AND substr(revision_id, 1, 3) = 'rv_' AND substr(revision_id, 4) NOT GLOB '*[^a-z2-7]*'),
-  artifact_id         TEXT NOT NULL REFERENCES artifacts (artifact_id),
-  origin              TEXT NOT NULL CHECK (origin IN ('published', 'imported')),
-  manifest_sha256     TEXT NOT NULL CHECK (length(manifest_sha256) = 64 AND manifest_sha256 NOT GLOB '*[^0-9a-f]*'),
-  manifest_object_key TEXT NOT NULL CHECK (length(manifest_object_key) BETWEEN 1 AND 512),
-  sealed_at           INTEGER NOT NULL,
-  sealed_by           TEXT REFERENCES principals (principal_id),
-  UNIQUE (artifact_id, revision_id)
-);
-
-CREATE TABLE revision_resources (
-  revision_id  TEXT NOT NULL REFERENCES revisions (revision_id),
-  path         TEXT NOT NULL CHECK (
-                 length(path) BETWEEN 2 AND 1024
-                 AND substr(path, 1, 1) = '/'
-                 AND path NOT GLOB '*//*' AND path NOT GLOB '*/./*' AND path NOT GLOB '*/../*'
-                 AND path NOT GLOB '*/.' AND path NOT GLOB '*/..' AND path NOT GLOB '*/'
-                 AND path NOT GLOB '*\*'
-                 AND path NOT GLOB '/s/*' AND path NOT GLOB '/_revisions/*' AND path NOT GLOB '/api/*'
-                 AND path NOT GLOB '/registry/*'
-                 AND path NOT IN ('/s', '/_revisions', '/api', '/manifest.json', '/asset-owners.json')),
-  kind         TEXT NOT NULL CHECK (kind IN ('document', 'subdocument', 'fragment', 'asset')),
-  object_key   TEXT NOT NULL CHECK (length(object_key) BETWEEN 1 AND 512),
-  sha256       TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
-  size         INTEGER NOT NULL CHECK (size >= 0),
-  content_type TEXT NOT NULL CHECK (length(content_type) BETWEEN 1 AND 255),
-  PRIMARY KEY (revision_id, path),
-  UNIQUE (revision_id, path, kind),
-  CHECK (kind IN ('fragment', 'document', 'subdocument') OR path NOT GLOB '*.html')
-);
-
-CREATE TABLE revision_pages (
-  revision_id   TEXT NOT NULL REFERENCES revisions (revision_id),
-  page_id       TEXT NOT NULL REFERENCES pages (page_id),
-  document_path TEXT NOT NULL,
-  document_kind TEXT NOT NULL DEFAULT 'document' CHECK (document_kind = 'document'),
-  metadata_json TEXT NOT NULL CHECK (json_valid(metadata_json) AND length(metadata_json) <= 8192),
-  PRIMARY KEY (revision_id, page_id),
-  UNIQUE (revision_id, document_path),
-  FOREIGN KEY (revision_id, document_path, document_kind) REFERENCES revision_resources (revision_id, path, kind)
-);
-
-CREATE TABLE mounts (
-  path        TEXT NOT NULL PRIMARY KEY,
-  artifact_id TEXT NOT NULL,
-  revision_id TEXT NOT NULL,
-  kind        TEXT NOT NULL CHECK (kind IN ('document', 'subdocument', 'fragment', 'asset')),
-  UNIQUE (path, artifact_id, kind),
-  FOREIGN KEY (artifact_id, revision_id) REFERENCES revisions (artifact_id, revision_id),
-  FOREIGN KEY (revision_id, path, kind) REFERENCES revision_resources (revision_id, path, kind)
-);
-CREATE INDEX mounts_by_artifact ON mounts (artifact_id);
-
-CREATE TABLE routes (
-  kind            TEXT NOT NULL CHECK (kind IN ('subtree', 'tree_page', 'redirect_exact', 'redirect_prefix')),
-  route_key       TEXT NOT NULL,
-  page_id         TEXT,
-  artifact_id     TEXT,
-  document_path   TEXT,
-  document_kind   TEXT CHECK (document_kind IS NULL OR document_kind = 'document'),
-  redirect_to     TEXT,
-  redirect_status INTEGER CHECK (redirect_status IS NULL OR redirect_status IN (301, 302, 307, 308)),
-  target_page_id  TEXT REFERENCES pages (page_id),
-  created_at      INTEGER NOT NULL,
-  PRIMARY KEY (kind, route_key),
-  CHECK ((kind IN ('subtree', 'tree_page')) = (page_id IS NOT NULL AND artifact_id IS NOT NULL
-         AND document_path IS NOT NULL AND document_kind IS NOT NULL
-         AND redirect_to IS NULL AND redirect_status IS NULL AND target_page_id IS NULL)),
-  CHECK ((kind IN ('redirect_exact', 'redirect_prefix')) = (redirect_to IS NOT NULL AND redirect_status IS NOT NULL
-         AND page_id IS NULL AND artifact_id IS NULL AND document_path IS NULL)),
-  CHECK (kind <> 'subtree' OR (
-         length(route_key) BETWEEN 1 AND 200 AND route_key NOT GLOB '*[^a-z0-9-]*'
-         AND route_key NOT GLOB '-*' AND route_key NOT GLOB '*-' AND route_key NOT GLOB '*--*'
-         AND document_path = '/a/' || route_key || '/index.html')),
-  CHECK (kind <> 'tree_page' OR (
-         route_key GLOB '?*.html' AND substr(route_key, 1, 1) <> '/' AND route_key NOT GLOB '*//*'
-         AND route_key NOT GLOB 'a/*'
-         AND route_key NOT GLOB '*..*' AND route_key NOT GLOB '*[^A-Za-z0-9._/-]*'
-         AND document_path = '/' || route_key)),
-  CHECK (kind NOT IN ('redirect_exact', 'redirect_prefix') OR (
-         substr(route_key, 1, 1) = '/' AND substr(redirect_to, 1, 1) = '/'
-         AND substr(redirect_to, 1, 2) <> '//' AND route_key NOT GLOB '*..*')),
-  CHECK (kind <> 'redirect_prefix' OR route_key GLOB '*/'),
-  FOREIGN KEY (page_id, artifact_id) REFERENCES pages (page_id, artifact_id),
-  FOREIGN KEY (document_path, artifact_id, document_kind) REFERENCES mounts (path, artifact_id, kind)
-);
-CREATE UNIQUE INDEX routes_one_primary_per_page ON routes (page_id) WHERE page_id IS NOT NULL;
-
-CREATE TABLE resource_owners (
-  owner_revision_id TEXT NOT NULL,
-  owner_page_id     TEXT NOT NULL,
-  path              TEXT NOT NULL CHECK (substr(path, 1, 1) = '/' AND length(path) <= 1024),
-  PRIMARY KEY (owner_revision_id, owner_page_id, path),
-  FOREIGN KEY (owner_revision_id, owner_page_id) REFERENCES revision_pages (revision_id, page_id)
-);
-CREATE INDEX resource_owners_by_path ON resource_owners (path);
-
-CREATE TABLE share_grants (
-  grant_id           TEXT NOT NULL PRIMARY KEY CHECK (length(grant_id) = 29 AND substr(grant_id, 1, 3) = 'gr_' AND substr(grant_id, 4) NOT GLOB '*[^a-z2-7]*'),
-  page_id            TEXT NOT NULL REFERENCES pages (page_id),
-  key_kid            TEXT NOT NULL CHECK (length(key_kid) BETWEEN 1 AND 16 AND key_kid NOT GLOB '*[^a-z0-9]*'),
-  key_hmac           TEXT NOT NULL CHECK (length(key_hmac) = 64 AND key_hmac NOT GLOB '*[^0-9a-f]*'),
-  mode               TEXT NOT NULL CHECK (mode IN ('follow_active', 'pinned')),
-  pinned_revision_id TEXT REFERENCES revisions (revision_id),
-  origin             TEXT NOT NULL CHECK (origin IN ('minted', 'imported')),
-  sealed_key         TEXT CHECK (sealed_key IS NULL OR length(sealed_key) BETWEEN 16 AND 512),
-  seal_kid           TEXT,
-  created_at         INTEGER NOT NULL,
-  created_by         TEXT REFERENCES principals (principal_id),
-  revoked_at         INTEGER,
-  revoked_by         TEXT REFERENCES principals (principal_id),
-  revoked_reason     TEXT CHECK (revoked_reason IS NULL OR revoked_reason IN ('revoked', 'rotated', 'visibility', 'unpublished')),
-  CHECK ((mode = 'pinned') = (pinned_revision_id IS NOT NULL)),
-  CHECK ((sealed_key IS NULL) = (seal_kid IS NULL)),
-  CHECK ((revoked_at IS NULL) = (revoked_reason IS NULL)),
-  CHECK (revoked_at IS NULL OR sealed_key IS NULL)
-);
-CREATE UNIQUE INDEX share_grants_one_active_per_page ON share_grants (page_id) WHERE revoked_at IS NULL;
-CREATE INDEX share_grants_lookup ON share_grants (page_id, key_kid, key_hmac) WHERE revoked_at IS NULL;
-
-CREATE TABLE mutation_events (
-  event_id                        TEXT NOT NULL PRIMARY KEY CHECK (length(event_id) = 29 AND substr(event_id, 1, 3) = 'ev_' AND substr(event_id, 4) NOT GLOB '*[^a-z2-7]*'),
-  instance_id                     TEXT NOT NULL,
-  action                          TEXT NOT NULL CHECK (action IN (
-                                    'create_page', 'stage', 'publish', 'restore_page', 'unpublish', 'set_visibility', 'share',
-                                    'rotate_share', 'revoke_share', 'reveal_share', 'import_share', 'set_alias',
-                                    'assign_role', 'revoke_role', 'disable_principal')),
-  actor_principal_id              TEXT NOT NULL,
-  actor_surface                   TEXT NOT NULL,
-  page_id                         TEXT,
-  artifact_id                     TEXT,
-  grant_id                        TEXT,
-  target_principal_id             TEXT,
-  role_grant_id                   TEXT,
-  expected_authority_epoch        INTEGER,
-  expected_policy_epoch           INTEGER,
-  expected_content_version        INTEGER,
-  expected_target_authority_epoch INTEGER,
-  request_digest                  TEXT NOT NULL CHECK (length(request_digest) = 64 AND request_digest NOT GLOB '*[^0-9a-f]*'),
-  occurred_at                     INTEGER NOT NULL,
-  revision_id                     TEXT,
-  verdict                         TEXT NOT NULL,
-  CONSTRAINT guard_verdict_domain CHECK (verdict IN ('ok', 'instance_mismatch', 'unauthenticated', 'forbidden',
-                                                     'not_found', 'conflict', 'invalid_state', 'last_admin')),
-  CONSTRAINT guard_instance_mismatch CHECK (verdict <> 'instance_mismatch'),
-  CONSTRAINT guard_unauthenticated   CHECK (verdict <> 'unauthenticated'),
-  CONSTRAINT guard_forbidden         CHECK (verdict <> 'forbidden'),
-  CONSTRAINT guard_not_found         CHECK (verdict <> 'not_found'),
-  CONSTRAINT guard_conflict          CHECK (verdict <> 'conflict'),
-  CONSTRAINT guard_invalid_state     CHECK (verdict <> 'invalid_state'),
-  CONSTRAINT guard_last_admin        CHECK (verdict <> 'last_admin')
-);
-CREATE INDEX mutation_events_by_page ON mutation_events (page_id, occurred_at);
-```
+Indexes: pages by artefact, mounts by artefact, ownership edges by path, active grants by `(page, key_kid, key_hmac)`, events by page and time.
 
 Notes:
 
@@ -444,7 +254,8 @@ Write authority (statement builders are the only writers):
 |---|---|---|
 | `instance_meta` | F11 bootstrap runbook | — |
 | `principals`, `role_grants` | Catalogue & Policy | guarded role and principal commands; principal self-registration (§9.1, unguarded exception, new `principals` rows only); F11 bootstrap for the first admin (unguarded operator exception) |
-| `pages` (insert, policy fields, tombstone), `routes`, `share_grants`, `resource_owners` | Catalogue & Policy | Catalogue commands; Publication's seal, commit and restore batches (F04); import (F10) |
+| `pages` (insert, policy fields, tombstone), `routes`, `share_grants` | Catalogue & Policy | Catalogue commands; Publication's seal, commit and restore batches (F04); import (F10) |
+| `resource_owners` | Catalogue & Policy (`executeGuarded` ownership admission) | Publication's seal or commit batch that first writes the revision's edges (F04); import (F10) |
 | `artifacts`, `revisions`, `revision_resources`, `revision_pages`, `mounts` | Publication (F04) | Publication; import (F10) through Publication |
 | `mutation_events` | Catalogue & Policy (guard) | every guarded batch |
 
@@ -456,111 +267,37 @@ Contract decision: a guard is an `INSERT … SELECT` into `mutation_events` whos
 
 ### 8.1 Statement
 
-```sql
-INSERT INTO mutation_events (
-  event_id, instance_id, action, actor_principal_id, actor_surface,
-  page_id, artifact_id, grant_id, target_principal_id, role_grant_id,
-  expected_authority_epoch, expected_policy_epoch, expected_content_version,
-  expected_target_authority_epoch, request_digest, occurred_at, revision_id, verdict)
-SELECT
-  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-  CASE
-    WHEN NOT EXISTS (SELECT 1 FROM instance_meta WHERE singleton = 1 AND instance_id = ?2)
-      THEN 'instance_mismatch'
-    WHEN ?5 IS NOT 'manage'
-      THEN 'forbidden'
-    WHEN NOT EXISTS (SELECT 1 FROM principals WHERE principal_id = ?4 AND status = 'active')
-      THEN 'unauthenticated'
-    WHEN (SELECT authority_epoch FROM principals WHERE principal_id = ?4) IS NOT ?11
-      THEN 'conflict'
-    -- authority
-    WHEN ?3 IN ('import_share', 'set_alias', 'assign_role', 'revoke_role', 'disable_principal')
-     AND NOT EXISTS (SELECT 1 FROM role_grants
-                     WHERE principal_id = ?4 AND revoked_at IS NULL AND role = 'admin')
-      THEN 'forbidden'
-    WHEN ?3 IN ('create_page', 'restore_page')
-     AND NOT EXISTS (SELECT 1 FROM role_grants
-                     WHERE principal_id = ?4 AND revoked_at IS NULL
-                       AND (role = 'admin' OR (role = 'publisher' AND scope_kind = 'installation')))
-      THEN 'forbidden'
-    WHEN ?3 IN ('stage', 'publish', 'unpublish', 'set_visibility', 'share', 'rotate_share', 'revoke_share', 'reveal_share')
-     AND NOT EXISTS (SELECT 1 FROM role_grants
-                     WHERE principal_id = ?4 AND revoked_at IS NULL
-                       AND (role = 'admin'
-                            OR (role = 'publisher' AND scope_kind = 'installation')
-                            OR (role = 'publisher' AND scope_kind = 'page' AND scope_page_id = ?6)))
-      THEN 'forbidden'
-    -- targets
-    WHEN ?3 = 'create_page' AND EXISTS (SELECT 1 FROM pages WHERE page_id = ?6)
-      THEN 'conflict'
-    WHEN ?3 IN ('publish', 'unpublish', 'set_visibility', 'share', 'rotate_share', 'revoke_share', 'reveal_share', 'import_share')
-     AND NOT EXISTS (SELECT 1 FROM pages WHERE page_id = ?6 AND artifact_id = ?7 AND tombstoned_at IS NULL)
-      THEN 'not_found'
-    WHEN ?3 = 'stage' AND ?6 IS NOT NULL
-     AND NOT EXISTS (SELECT 1 FROM pages WHERE page_id = ?6 AND artifact_id = ?7 AND tombstoned_at IS NULL)
-      THEN 'not_found'
-    WHEN ?3 IN ('publish', 'restore_page')
-     AND NOT EXISTS (SELECT 1 FROM revisions WHERE revision_id = ?17 AND artifact_id = ?7)
-      THEN 'not_found'
-    WHEN ?3 = 'restore_page'
-     AND NOT EXISTS (SELECT 1 FROM pages WHERE page_id = ?6 AND artifact_id = ?7)
-      THEN 'not_found'
-    WHEN ?3 = 'restore_page'
-     AND NOT EXISTS (SELECT 1 FROM revision_pages WHERE revision_id = ?17 AND page_id = ?6)
-      THEN 'not_found'
-    WHEN ?3 = 'set_alias' AND ?6 IS NOT NULL
-     AND NOT EXISTS (SELECT 1 FROM pages WHERE page_id = ?6 AND tombstoned_at IS NULL)
-      THEN 'not_found'
-    WHEN ?3 IN ('rotate_share', 'revoke_share', 'reveal_share')
-     AND NOT EXISTS (SELECT 1 FROM share_grants WHERE grant_id = ?8 AND page_id = ?6 AND revoked_at IS NULL)
-      THEN 'not_found'
-    WHEN ?3 IN ('assign_role', 'revoke_role', 'disable_principal')
-     AND NOT EXISTS (SELECT 1 FROM principals WHERE principal_id = ?9)
-      THEN 'not_found'
-    WHEN ?3 = 'revoke_role'
-     AND NOT EXISTS (SELECT 1 FROM role_grants WHERE role_grant_id = ?10 AND principal_id = ?9 AND revoked_at IS NULL)
-      THEN 'not_found'
-    -- concurrency
-    WHEN ?3 = 'restore_page'
-     AND EXISTS (SELECT 1 FROM pages WHERE page_id = ?6 AND tombstoned_at IS NULL)
-      THEN 'conflict'
-    WHEN ?3 IN ('publish', 'unpublish', 'set_visibility', 'share', 'rotate_share', 'revoke_share', 'reveal_share', 'import_share')
-     AND (SELECT policy_epoch FROM pages WHERE page_id = ?6) IS NOT ?12
-      THEN 'conflict'
-    WHEN ?3 IN ('publish', 'unpublish', 'restore_page')
-     AND (SELECT content_version FROM artifacts WHERE artifact_id = ?7) IS NOT ?13
-      THEN 'conflict'
-    WHEN ?3 IN ('assign_role', 'revoke_role', 'disable_principal')
-     AND (SELECT authority_epoch FROM principals WHERE principal_id = ?9) IS NOT ?14
-      THEN 'conflict'
-    WHEN ?3 IN ('create_page', 'publish', 'restore_page') AND ?17 IS NOT NULL
-     AND EXISTS (SELECT 1 FROM revision_resources rr JOIN mounts m ON m.path = rr.path
-                 WHERE rr.revision_id = ?17 AND m.artifact_id IS NOT ?7)
-      THEN 'conflict'
-    -- state
-    WHEN ?3 IN ('share', 'rotate_share') AND ?17 IS NOT NULL
-     AND NOT EXISTS (SELECT 1 FROM revisions WHERE revision_id = ?17 AND artifact_id = ?7)
-      THEN 'invalid_state'
-    WHEN ?3 = 'reveal_share'
-     AND (SELECT sealed_key FROM share_grants WHERE grant_id = ?8) IS NULL
-      THEN 'invalid_state'
-    WHEN ?3 = 'revoke_role'
-     AND (SELECT role FROM role_grants WHERE role_grant_id = ?10) = 'admin'
-     AND NOT EXISTS (SELECT 1 FROM role_grants g JOIN principals p ON p.principal_id = g.principal_id
-                     WHERE g.role = 'admin' AND g.revoked_at IS NULL AND p.status = 'active'
-                       AND g.role_grant_id <> ?10)
-      THEN 'last_admin'
-    WHEN ?3 = 'disable_principal'
-     AND EXISTS (SELECT 1 FROM role_grants WHERE principal_id = ?9 AND role = 'admin' AND revoked_at IS NULL)
-     AND NOT EXISTS (SELECT 1 FROM role_grants g JOIN principals p ON p.principal_id = g.principal_id
-                     WHERE g.role = 'admin' AND g.revoked_at IS NULL AND p.status = 'active'
-                       AND g.principal_id <> ?9)
-      THEN 'last_admin'
-    ELSE 'ok'
-  END
-```
+Normative SQL: `GUARD_SQL` in [`domains/catalogue/guard.ts`](../domains/catalogue/guard.ts), bound only by `executeGuarded`. The verdict is the first rule that matches, in this order:
 
-Parameters: `?1` event ID · `?2` configured instance ID · `?3` action · `?4` actor principal · `?5` actor surface · `?6` page · `?7` artefact · `?8` share grant · `?9` target principal · `?10` role grant · `?11` expected actor authority epoch · `?12` expected policy epoch · `?13` expected content version · `?14` expected target authority epoch · `?15` request digest (SHA-256 hex of the canonical command without secrets) · `?16` time (epoch ms) · `?17` revision being committed (`create_page`, `publish`; required for `restore_page`), or the pinned revision requested by `share` / `rotate_share` (NULL for `follow_active`). For `rotate_share` without a new mode, bind the existing pinned revision when the existing grant is pinned. A pinned revision missing from this artefact is therefore refused atomically as `invalid_state`. Unused parameters are bound to `NULL`; every comparison is null-safe (`IS NOT`), so a missing expected value is a `conflict`, never a pass.
+1. **Instance.** No `instance_meta` row carries `?2` → `instance_mismatch`.
+2. **Surface.** `?5` is not `manage` → `forbidden`.
+3. **Actor.** `?4` is not an active principal → `unauthenticated`; its `authority_epoch` differs from `?11` → `conflict`.
+4. **Authority** (`forbidden` when it fails):
+   - `?3` is not one of the 15 actions → refused (deny by default, §6);
+   - `import_share`, `set_alias`, `assign_role`, `revoke_role`, `disable_principal`: an active `admin` grant;
+   - `create_page`, `restore_page`: an active `admin` or installation `publisher` grant;
+   - `stage`, `publish`, `unpublish`, `set_visibility`, `share`, `rotate_share`, `revoke_share`, `reveal_share`: an active `admin` grant, installation `publisher` grant, or `publisher` grant scoped to page `?6`.
+5. **Target** (`not_found` unless stated):
+   - `create_page`: page `?6` already exists → `conflict`;
+   - `publish`, `unpublish`, `set_visibility`, `share`, `rotate_share`, `revoke_share`, `reveal_share`, `import_share`, and `stage` with a page: page `?6` is live in artefact `?7`;
+   - `create_page`, `publish`, `restore_page`: revision `?17` is given and belongs to artefact `?7`;
+   - `restore_page`: page `?6` belongs to `?7`, and `revision_pages(?17, ?6)` exists;
+   - `set_alias` with a target page: that page is live;
+   - `rotate_share`, `revoke_share`, `reveal_share`: grant `?8` is active on page `?6`;
+   - `assign_role`, `revoke_role`, `disable_principal`: principal `?9` exists. Also, `assign_role` with a page scope needs page `?6` to exist, and `revoke_role` needs role grant `?10` active for `?9`.
+6. **Concurrency** (`conflict` unless stated):
+   - `restore_page`: page `?6` is live;
+   - the page policy actions of rule 5 (`stage` excluded): `policy_epoch` differs from `?12`;
+   - `publish`, `unpublish`, `restore_page`: `content_version` differs from `?13`;
+   - `assign_role`, `revoke_role`, `disable_principal`: the target's `authority_epoch` differs from `?14`. Disabling an already disabled principal → `invalid_state`;
+   - path claims, for `create_page`, `publish` and `restore_page` with `?17`: a resource path of `?17` is mounted by another artefact, or lies under `/a/<key>/` for a subtree route `<key>` of another artefact.
+7. **State:**
+   - `share`, `rotate_share` with `?17`: the revision does not belong to `?7` → `invalid_state`;
+   - `reveal_share`: the grant has no sealed copy → `invalid_state`;
+   - `revoke_role` of an `admin` grant, or `disable_principal` of a principal holding one, would leave no other active administrator held by an active principal → `last_admin`.
+8. Otherwise `ok`.
+
+Parameters: `?1` event ID · `?2` configured instance ID · `?3` action · `?4` actor principal · `?5` actor surface (always `manage`; `?4` and `?11` come from the `ManageActor`, never from a caller field) · `?6` page · `?7` artefact · `?8` share grant · `?9` target principal · `?10` role grant · `?11` expected actor authority epoch · `?12` expected policy epoch · `?13` expected content version · `?14` expected target authority epoch · `?15` request digest (SHA-256 hex of the canonical command without secrets) · `?16` time (epoch ms) · `?17` revision being committed (required for `create_page`, `publish` and `restore_page`), or the pinned revision requested by `share` / `rotate_share` (NULL for `follow_active`). For `rotate_share` without a new mode, bind the existing pinned revision when the existing grant is pinned. A pinned revision missing from this artefact is therefore refused atomically as `invalid_state`. Unused parameters are bound to `NULL`; every comparison is null-safe (`IS NOT`), so a missing expected value is a `conflict`, never a pass.
 
 `restore_page` neither binds nor asserts `?12`: the tombstone is its page precondition, no other action can change a tombstoned page, and every unpublish or restore also moves the artefact `content_version` asserted through `?13`.
 
@@ -574,9 +311,8 @@ export type GuardAction =
   | "create_page" | "stage" | "publish" | "restore_page" | "unpublish" | "set_visibility" | "share"
   | "rotate_share" | "revoke_share" | "reveal_share" | "import_share" | "set_alias"
   | "assign_role" | "revoke_role" | "disable_principal"
-export interface GuardInput {
+export interface GuardRequest { // what a command asserts; the acting principal comes only from the ManageActor
   readonly action: GuardAction
-  readonly actor: { readonly principalId: string; readonly surface: "read" | "manage"; readonly expectedAuthorityEpoch: number }
   readonly pageId?: string
   readonly artifactId?: string
   readonly grantId?: string
@@ -589,6 +325,7 @@ export interface GuardInput {
   readonly requestDigest: string
   readonly occurredAt: number
 }
+export interface OwnershipEdge { readonly ownerPageId: string; readonly path: string; readonly providerArtifactId: string }
 export type PolicyErrorCode =
   | "instance_mismatch" | "unauthenticated" | "forbidden" | "not_found" | "conflict"
   | "invalid_state" | "last_admin" | "invariant_violation" | "unavailable"
@@ -596,20 +333,29 @@ export class PolicyError extends Error {
   readonly code: PolicyErrorCode
   readonly detail: string | null // e.g. "routes.route_key" for a unique conflict
 }
-export function guardStatement(db: D1Database, instanceId: string, input: GuardInput): D1PreparedStatement
+export function mapPolicyError(error: unknown): PolicyError
 export function executeGuarded(
-  db: D1Database, instanceId: string,
-  guards: readonly GuardInput[], effects: readonly D1PreparedStatement[],
+  deps: ManageDeps, actor: ManageActor,
+  guards: readonly GuardRequest[], effects: readonly D1PreparedStatement[],
+  ownership?: { readonly revisionId: string; readonly edges: readonly OwnershipEdge[] },
+  finalEffects?: readonly D1PreparedStatement[],
 ): Promise<readonly D1Result[]> // throws PolicyError
 ```
 
+The guard statement builder and the ownership admission builder are module-internal. `executeGuarded` proceeds in this order:
+
+1. It validates the handle (`requireManageActor`, §9.1) and the batch shape (§8.3 rule 2) before any D1 call.
+2. It binds `?2` from `deps.config.instanceId`, `?4` and `?11` from the handle, and `?5 = 'manage'`.
+3. It runs one batch: `[...guards, ...effects, ...ownership admissions, ...finalEffects]`.
+
 ### 8.3 Composition rules (normative for every lot)
 
-1. Every D1 write to a table in §7's write-authority list goes through `executeGuarded`, with at least one guard. The batch is `[...guards, ...effects]`. There are exactly two unguarded writes, and no policy effect may use either:
+1. Every D1 write to a table in §7's write-authority list goes through `executeGuarded`, with at least one guard. The batch is `[...guards, ...effects, ...ownership admissions, ...finalEffects]`. When ownership edges are present, every statement that changes an artefact's `active_revision_id` belongs in `finalEffects`, so admissions compare against the previous active revision. There are exactly two unguarded writes, and no policy effect may use either:
    - **Principal self-registration** (§9.1): inserts a new `principals` row for a verified manage-surface identity, keyed by `(issuer, subject)`, conditioned on `instance_meta`. It never writes a role and never changes an existing principal (no reactivation, no field update).
    - **Operator bootstrap** (F11 runbook): the `instance_meta` row and the first administrator's `role_grants` row (`origin = 'bootstrap'`), run once per instance by the operator with deploy credentials.
-2. One guard row per targeted page (multi-page publish: one per page) or per targeted principal. `executeGuarded` refuses structurally, with `PolicyError("invalid_state")` and no D1 call, when:
+2. One guard row per targeted page (multi-page publish: one per page) or per targeted principal. `executeGuarded` first refuses an invalid handle (`unauthenticated`, §9.1). It then refuses structurally, with `PolicyError("invalid_state")` and no D1 call, when:
    - the guard list is empty;
+   - an ownership edge has no guard that names the edge's owner page, uses an action among `stage`, `create_page` and `publish`, and has a `revisionId` strictly equal to the ownership revision;
    - it contains `assign_role`, `revoke_role` or `disable_principal` together with any other guard. Role and principal changes are one guard per batch: every guard runs before any effect, so two administrator removals in one batch would each still see the other administrator and remove both. Separate batches are separate transactions on the primary, so the second removal sees the first and gets `last_admin`;
    - two guards target the same page, or the same target principal (`targetPrincipalId`, not the common actor).
 
@@ -624,7 +370,7 @@ export function executeGuarded(
 |---|---|---|
 | `CHECK constraint failed: guard_instance_mismatch` | `instance_mismatch` | 503 |
 | `CHECK constraint failed: guard_unauthenticated` | `unauthenticated` | 401 |
-| `CHECK constraint failed: guard_forbidden` | `forbidden` | 403 |
+| `CHECK constraint failed: guard_forbidden` (guard row or ownership admission) | `forbidden` | 403 |
 | `CHECK constraint failed: guard_not_found` | `not_found` | 404 |
 | `CHECK constraint failed: guard_conflict` | `conflict` | 409 |
 | `CHECK constraint failed: guard_invalid_state` | `invalid_state` | 409 |
@@ -645,11 +391,18 @@ export interface ActorView {
   readonly authorityEpoch: number
   readonly roles: readonly { readonly roleGrantId: string; readonly role: "publisher" | "admin"; readonly scope: { readonly kind: "installation" } | { readonly kind: "page"; readonly pageId: string } }[]
 }
-export function resolveActor(deps: ManageDeps, identity: VerifiedIdentity): Promise<ActorView | null>
+export interface ManageActor extends ActorView { // opaque handle: frozen, minted only by authenticateManage
+  readonly instanceId: string
+  readonly audience: string                        // the manage audience that matched
+  readonly issuer: string
+  readonly subject: string
+  readonly expiresAt: number                       // verified JWT exp, epoch seconds
+}
+export function authenticateManage(request: Request, deps: ManageDeps): Promise<ManageActor | null>
+export function requireManageActor(actor: unknown, deps: ManageDeps): asserts actor is ManageActor // PolicyError("unauthenticated"), no D1 call
 
 // domains/catalogue/commands.ts (S2)
-export interface ManageDeps { readonly db: D1Database; readonly config: ManageInstanceConfig; readonly now: () => number }
-export interface Actor { readonly principalId: string; readonly authorityEpoch: number; readonly surface: "read" | "manage" }
+export interface ManageDeps { readonly db: D1Database; readonly config: ManageInstanceConfig; readonly jwks: JwksSource; readonly now: () => number } // now: epoch ms
 export interface PageTarget { readonly pageId: string; readonly artifactId: string; readonly expectedPolicyEpoch: number }
 export type GrantMode = { readonly mode: "follow_active" } | { readonly mode: "pinned"; readonly revisionId: string }
 export interface ShareResult { readonly grantId: string; readonly key: string | null; readonly mode: "follow_active" | "pinned"; readonly revealable: boolean; readonly policyEpoch: number }
@@ -659,25 +412,31 @@ export interface PagePolicyView {
   readonly grant: { readonly grantId: string; readonly mode: "follow_active" | "pinned"; readonly revisionId: string | null; readonly revealable: boolean } | null
 }
 
-export function readPagePolicy(deps: ManageDeps, actor: Actor, pageId: string): Promise<PagePolicyView | null>
-export function setVisibility(deps: ManageDeps, actor: Actor, cmd: PageTarget & { readonly visibility: "private" | "public" }): Promise<{ readonly policyEpoch: number }>
-export function share(deps: ManageDeps, actor: Actor, cmd: PageTarget & GrantMode): Promise<ShareResult>
-export function rotateShare(deps: ManageDeps, actor: Actor, cmd: PageTarget & { readonly grantId: string; readonly next?: GrantMode }): Promise<ShareResult>
-export function revokeShare(deps: ManageDeps, actor: Actor, cmd: PageTarget & { readonly grantId: string }): Promise<{ readonly policyEpoch: number }>
-export function revealShare(deps: ManageDeps, actor: Actor, cmd: PageTarget & { readonly grantId: string }): Promise<{ readonly key: string }>
-export function importShare(deps: ManageDeps, actor: Actor, cmd: PageTarget & { readonly key: string; readonly mode: "follow_active" }): Promise<{ readonly grantId: string; readonly policyEpoch: number }>
-export function setAlias(deps: ManageDeps, actor: Actor, cmd:
+export function readPagePolicy(deps: ManageDeps, actor: ManageActor, pageId: string): Promise<PagePolicyView | null>
+export function setVisibility(deps: ManageDeps, actor: ManageActor, cmd: PageTarget & { readonly visibility: "private" | "public" }): Promise<{ readonly policyEpoch: number }>
+export function share(deps: ManageDeps, actor: ManageActor, cmd: PageTarget & GrantMode): Promise<ShareResult>
+export function rotateShare(deps: ManageDeps, actor: ManageActor, cmd: PageTarget & { readonly grantId: string; readonly next?: GrantMode }): Promise<ShareResult>
+export function revokeShare(deps: ManageDeps, actor: ManageActor, cmd: PageTarget & { readonly grantId: string }): Promise<{ readonly policyEpoch: number }>
+export function revealShare(deps: ManageDeps, actor: ManageActor, cmd: PageTarget & { readonly grantId: string }): Promise<{ readonly key: string }>
+export function importShare(deps: ManageDeps, actor: ManageActor, cmd: PageTarget & { readonly key: string; readonly mode: "follow_active" }): Promise<{ readonly grantId: string; readonly policyEpoch: number }>
+export function setAlias(deps: ManageDeps, actor: ManageActor, cmd:
   | { readonly op: "put"; readonly kind: "redirect_exact" | "redirect_prefix"; readonly key: string; readonly to: string; readonly status: 301 | 302 | 307 | 308; readonly targetPageId: string | null }
   | { readonly op: "remove"; readonly kind: "redirect_exact" | "redirect_prefix"; readonly key: string }): Promise<void>
-export function assignRole(deps: ManageDeps, actor: Actor, cmd: { readonly targetPrincipalId: string; readonly expectedTargetAuthorityEpoch: number; readonly role: "publisher" | "admin"; readonly scope: { readonly kind: "installation" } | { readonly kind: "page"; readonly pageId: string } }): Promise<{ readonly roleGrantId: string }>
-export function revokeRole(deps: ManageDeps, actor: Actor, cmd: { readonly targetPrincipalId: string; readonly expectedTargetAuthorityEpoch: number; readonly roleGrantId: string }): Promise<void>
-export function disablePrincipal(deps: ManageDeps, actor: Actor, cmd: { readonly targetPrincipalId: string; readonly expectedTargetAuthorityEpoch: number }): Promise<void>
+export function assignRole(deps: ManageDeps, actor: ManageActor, cmd: { readonly targetPrincipalId: string; readonly expectedTargetAuthorityEpoch: number; readonly role: "publisher" | "admin"; readonly scope: { readonly kind: "installation" } | { readonly kind: "page"; readonly pageId: string } }): Promise<{ readonly roleGrantId: string }>
+export function revokeRole(deps: ManageDeps, actor: ManageActor, cmd: { readonly targetPrincipalId: string; readonly expectedTargetAuthorityEpoch: number; readonly roleGrantId: string }): Promise<void>
+export function disablePrincipal(deps: ManageDeps, actor: ManageActor, cmd: { readonly targetPrincipalId: string; readonly expectedTargetAuthorityEpoch: number }): Promise<void>
 
-// builders composed by Publication (F04) and import (F10)
+// builders composed by Publication (F04) and import (F10) as executeGuarded effects
 export function claimPageStatements(db: D1Database, p: { readonly pageId: string; readonly artifactId: string; readonly route: { readonly kind: "subtree"; readonly slug: string } | { readonly kind: "tree_page"; readonly pageRef: string }; readonly actorPrincipalId: string | null; readonly at: number }): readonly D1PreparedStatement[]
 export function retirePageStatements(db: D1Database, p: { readonly pageId: string; readonly actorPrincipalId: string; readonly at: number }): readonly D1PreparedStatement[]
 export function restorePageStatements(db: D1Database, p: { readonly pageId: string; readonly revisionId: string; readonly at: number }): readonly D1PreparedStatement[]
-export function ownershipStatements(db: D1Database, revisionId: string, edges: readonly { readonly ownerPageId: string; readonly path: string }[]): readonly D1PreparedStatement[]
+
+// domains/catalogue/revision-paths.ts (S2)
+export interface RevisionPathConflict { readonly path: string; readonly reason: "reserved" | "shell" | "foreign_subtree" }
+export function validateRevisionPaths(
+  deps: { readonly db: D1Database; readonly config: ReadInstanceConfig | ManageInstanceConfig },
+  input: { readonly artifactId: string | null; readonly paths: readonly string[]; readonly newSubtreeSlugs: readonly string[] },
+): Promise<readonly RevisionPathConflict[]>
 ```
 
 Behaviour (legacy transitions kept; Silex `functions/api/visibility.ts`, `functions/api/share.ts`; R `functions/api/visibility.ts`):
@@ -691,38 +450,32 @@ Behaviour (legacy transitions kept; Silex `functions/api/visibility.ts`, `functi
 | `revokeShare` | revoke the grant (`revoked`), `visibility = 'private'`, `policy_epoch + 1` (legacy `DELETE /api/share`) |
 | `revealShare` | batch `[guard, SELECT sealed_key, seal_kid …]`; unseal outside the batch; return the key |
 | `importShare` | admin only; `visibility = 'shared'`, `policy_epoch + 1`, insert grant `origin = 'imported'`, mode `follow_active`, HMAC of the exact legacy key, sealed copy if a seal key is configured |
-| `setAlias` | insert or delete one redirect route; a key collision is a `conflict` |
+| `setAlias` | Before any D1 call, the command checks four things, else `invalid_state`: `op` and `kind` are known values; `key` and `to` satisfy the redirect-route rules of §7 (same-origin visible-ASCII paths, checked by `isValidAliasPath` and `isValidAliasDestination`); a prefix key ends with `/`; the status is 301, 302, 307 or 308. It then inserts one redirect route (a key collision is a `conflict`) or deletes one. Deletion removes only redirect kinds, never a primary route |
 | `assignRole` / `revokeRole` | insert or revoke a role grant; target `authority_epoch + 1` |
 | `disablePrincipal` | `status = 'disabled'`, `disabled_at`, `authority_epoch + 1`; role rows kept but inert |
 | `claimPageStatements` | insert page (`private`, epoch 0) then primary route; the document mount must already be in the batch |
 | `retirePageStatements` | tombstone page, `policy_epoch + 1`, revoke its grant (`unpublished`), delete its primary route; aliases stay and stop resolving to a readable page |
 | `restorePageStatements` | for a page proved tombstoned by its `restore_page` guard (same revision as `?17`): clear the tombstone, `visibility = 'private'`, `policy_epoch + 1`; insert its primary route derived from `revision_pages.document_path` (§9.4, plain `INSERT`); touches no grant, role, ownership edge or alias; the document mount must already be in the batch |
-| `ownershipStatements` | multi-row inserts into `resource_owners`, chunked under D1's bound-parameter limit |
+| ownership admission (`executeGuarded`'s `ownership`) | Multi-row `INSERT … SELECT` into `resource_owners`, at most 24 edges per statement, with the actor bound from the handle. Each edge's `admission` is computed in the same transaction, first match wins:<br>1. `forbidden` when the owner page and the revision belong to different artefacts.<br>2. `local` when the provider is that artefact.<br>3. `global` when the actor holds an active `admin` or installation `publisher` grant.<br>4. `preserved` when an identical edge (owner page, path, provider) is in the owner page artefact's current active revision, other than this one.<br>5. Otherwise `forbidden`.<br>The named CHECK `guard_forbidden` refuses `forbidden` and aborts the batch. A page publisher therefore keeps an existing cross-artefact edge but never adds or retargets one. Edges are written once per revision (primary key) and never updated |
+| `validateRevisionPaths` | One primary read batch (instance marker, subtree routes). For each path:<br>- `/a/<slug>/…` is allowed only when `<slug>` is a subtree route of `artifactId` or in `newSubtreeSlugs`; a slug routed by another artefact → `foreign_subtree`, an unrouted slug → `reserved`;<br>- any other `isReservedShellPath` path → `reserved`;<br>- a configured shell path → `shell`.<br>Instance mismatch → `instance_mismatch`; D1 error → `unavailable`. F04 and F10 use it for manifest diagnostics (422); the guard's path claims stay authoritative |
 
 Invariants kept by the commands and checked by tests: an active grant implies `visibility = 'shared'`; a pinned grant's revision belongs to the page's artefact.
 
-### 9.1 Principal self-registration (unguarded exception)
+### 9.1 Manage authentication and self-registration
 
-`resolveActor(deps, identity)` returns `null` without any D1 call unless `identity.surface === "manage"` and `identity.subject` is non-empty. Otherwise it runs one batch on the primary, in this order:
+`authenticateManage(request, deps)` is the only way to obtain a `ManageActor`:
 
-```sql
--- A0 instance
-SELECT instance_id FROM instance_meta WHERE singleton = 1;
+1. It builds the manage verifier itself from `deps.config.accessTeamDomain` and `deps.config.manageAudiences` (surface `manage`) and calls `authenticate` with `deps.jwks` and `deps.now()` in seconds. No verified identity, or an empty `sub`, returns `null` with no D1 call.
+2. It resolves the principal in one primary batch (self-registration, below). No principal returns `null`.
+3. It returns a frozen handle, registered in a module-private `WeakSet`. The handle carries the principal's view, the instance ID, the matched manage audience, the issuer, the subject and the JWT expiry.
 
--- A1 register when new: ?1 new principal ID ?2 issuer ?3 subject ?4 email hint ?5 time ?6 configured instance ID
-INSERT INTO principals (principal_id, issuer, subject, status, authority_epoch, email_hint, created_at)
-SELECT ?1, ?2, ?3, 'active', 0, ?4, ?5
-WHERE EXISTS (SELECT 1 FROM instance_meta WHERE singleton = 1 AND instance_id = ?6)
-ON CONFLICT (issuer, subject) DO NOTHING;
+`requireManageActor(actor, deps)` accepts only a registered handle whose instance is `deps.config.instanceId`, whose issuer and audience are the configured ones, and that has not expired (`deps.now() < expiresAt × 1000`). Otherwise it throws `PolicyError("unauthenticated")` with no D1 call. Every command, `readPagePolicy` and `executeGuarded` calls it first, and a structurally identical object grants nothing. Role, status and epochs are still asserted on the primary by the guard or the policy read: the handle proves who signed in, not what they may do now. This is an API boundary against adapter forgery, not a defence against hostile code in the same isolate.
 
--- A2 principal: ?1 issuer ?2 subject
-SELECT principal_id, status, authority_epoch FROM principals WHERE issuer = ?1 AND subject = ?2;
+Self-registration (unguarded exception, §8.3) is one batch on the primary; the normative SQL is in [`principals.ts`](../domains/catalogue/principals.ts):
 
--- A3 active roles: ?1 issuer ?2 subject
-SELECT g.role_grant_id, g.role, g.scope_kind, g.scope_page_id
-FROM role_grants g JOIN principals p ON p.principal_id = g.principal_id
-WHERE p.issuer = ?1 AND p.subject = ?2 AND g.revoked_at IS NULL;
-```
+- `A0` reads the instance marker.
+- `A1` inserts a new `active` principal with epoch 0 for `(issuer, subject)`, only when the marker equals the configured instance. It does nothing when the pair already exists (`ON CONFLICT (issuer, subject) DO NOTHING`).
+- `A2` reads the principal for `(issuer, subject)`, and `A3` its active role grants.
 
 - The instance verdict comes from `A0`: a mismatch throws `PolicyError("instance_mismatch")`. It is never inferred from `A1`'s `changes()`.
 - `A2` and `A3` come from the same transaction. An existing principal is returned exactly as stored, including `status = 'disabled'`; it is never reactivated or modified. `DO NOTHING` is acceptable here only because no refusal is derived from it.
@@ -730,30 +483,12 @@ WHERE p.issuer = ?1 AND p.subject = ?2 AND g.revoked_at IS NULL;
 
 ### 9.2 Policy reads
 
-`readPagePolicy(deps, actor, pageId)` is authorized inside Catalogue & Policy, never by an adapter. One batch on the primary:
+`readPagePolicy(deps, actor, pageId)` is authorized inside Catalogue & Policy, never by an adapter. It first calls `requireManageActor` (no D1 call on failure), then runs one batch on the primary; the normative SQL is in [`read.ts`](../domains/catalogue/read.ts):
 
-```sql
--- B0 instance
-SELECT instance_id FROM instance_meta WHERE singleton = 1;
+- `B0` reads the instance marker.
+- `B1` reads the actor's status and authority epoch, and whether it holds an active `admin`, installation `publisher` or page `publisher` grant for the page. It also reads the live page with its artefact's `content_version` and active grant (mode, pinned revision, whether a sealed copy exists).
 
--- B1 actor and page: ?1 actor principal ?2 page
-SELECT
-  (SELECT status FROM principals WHERE principal_id = ?1) AS actor_status,
-  (SELECT authority_epoch FROM principals WHERE principal_id = ?1) AS actor_epoch,
-  EXISTS (SELECT 1 FROM role_grants
-          WHERE principal_id = ?1 AND revoked_at IS NULL
-            AND (role = 'admin'
-                 OR (role = 'publisher' AND scope_kind = 'installation')
-                 OR (role = 'publisher' AND scope_kind = 'page' AND scope_page_id = ?2))) AS authorized,
-  p.page_id, p.artifact_id, p.visibility, p.policy_epoch, a.content_version,
-  g.grant_id, g.mode, g.pinned_revision_id, (g.sealed_key IS NOT NULL) AS revealable
-FROM (SELECT 1) AS one
-LEFT JOIN pages p ON p.page_id = ?2 AND p.tombstoned_at IS NULL
-LEFT JOIN artifacts a ON a.artifact_id = p.artifact_id
-LEFT JOIN share_grants g ON g.page_id = p.page_id AND g.revoked_at IS NULL;
-```
-
-Decision order mirrors the guard: instance from `B0` (`instance_mismatch`) → `actor.surface === "manage"` (`forbidden`) → actor active (`unauthenticated`) → `actor_epoch = actor.authorityEpoch` (`conflict`) → `authorized` (`forbidden`) → page live (`not_found`). An unauthorized caller learns nothing about the page. Commands use an internal, unexported snapshot helper for their prepare step (§8.3 rule 3); adapters never get an unauthorized policy read.
+Decision order mirrors the guard: instance from `B0` (`instance_mismatch`) → actor active (`unauthenticated`) → actor epoch equals the handle's (`conflict`) → authorized (`forbidden`) → page live (`not_found`). An unauthorized caller learns nothing about the page. Commands use an internal, unexported snapshot helper for their prepare step (§8.3 rule 3); adapters never get an unauthorized policy read.
 
 ### 9.3 Publication commit composition
 
@@ -772,45 +507,47 @@ effects, in order:
     SELECT path, :a, revision_id, kind FROM revision_resources WHERE revision_id = :r
     ON CONFLICT (path) DO UPDATE SET revision_id = excluded.revision_id, kind = excluded.kind
   claimPageStatements for new pages
+  revision_pages rows of new pages (F04)
   restorePageStatements for pages guarded by restore_page
+ownership (executeGuarded argument): edges of new pages, each covered by its create_page guard
+finalEffects, in order:
   UPDATE artifacts SET active_revision_id = :r, content_version = content_version + 1 WHERE artifact_id = :a
   Publication receipt (F04 table)
 ```
 
-The upsert is unconditional because the guard already refused any path mounted by another artefact; a kind change on a routed document fails the route foreign key (`invariant_violation`, after F04's manifest validation should have refused it as 422).
+The upsert is unconditional because the guard already refused any path mounted by another artefact or lying under another artefact's subtree; a kind change on a routed document fails the route foreign key (`invariant_violation`, after F04's manifest validation should have refused it as 422).
+
+Sealing precedes the commit. The commit's guards read `:r` and its resources (`?17` path claims), so those rows must already exist. The work splits as follows:
+
+- **Seal batch.** It carries `stage` guards, one per already existing page, bound to `:r`. Its effects write `revisions`, `revision_resources`, and the `revision_pages` rows of already existing pages.
+- **Commit batch, effects.** The `revision_pages` rows of pages new in `:r` go here, after `claimPageStatements`, because a `revision_pages` row needs its page to exist.
+- **Ownership edges.** The edges of `:r` are written once, as `executeGuarded`'s `ownership` argument, in the batch that writes their page's `revision_pages` row (seal or commit). They follow those effects and precede `finalEffects`, which hold the `active_revision_id` update and the receipt. Each edge needs that batch's guard for its owner page bound to `:r` (§8.3 rule 2), and its admission is decided in the same transaction (§9). A restore writes none.
+
+A `stage` guard does not assert `:r`: the commit's `create_page`, `publish` or `restore_page` guard proves that `:r` belongs to the artefact, and each admission proves that page and revision share an artefact.
 
 ### 9.4 Restore composition
 
 Restore (plan §3: a new promotion of a retained revision that reactivates no former share or revoked right) is a §9.3 commit whose `:r` is an existing revision of the artefact. Normative for F04:
 
 - **Prepare (Publication).** Publication reads its own `artifacts.content_version` and the pages of `:r` from `revision_pages`, and proves through the Revision Store that the bytes of `:r` are still retained before building the batch. For each page of `:r`, `readPagePolicy` returning a view means live (`publish`, with that view's epochs); returning `null` means tombstoned, because `revision_pages` only references existing pages (`restore_page`). Live pages of the current active revision, if any, that `:r` does not contain get `unpublish`.
-- **Batch.** The §9.3 order is unchanged: guards (exactly one per page), retire dropped pages, replace the artefact's mounts with the resources of `:r`, `restorePageStatements` for every `restore_page`, set `active_revision_id = :r` with `content_version + 1`, receipt. This covers both a rollback of a live artefact whose `:r` contains pages dropped since, and the restore of a fully unpublished artefact, whatever its unpublish did with mounts or the active revision: the commit statements remount `:r` and make it active.
-- **Identity.** Page IDs are those of `revision_pages`, never new ones; `create_page` stays refused (`conflict`) for a known ID. Ownership edges of `:r` already exist (immutable, keyed by revision), so a restore composes no `ownershipStatements`.
+- **Batch.** The §9.3 order is unchanged: guards (exactly one per page), retire dropped pages, replace the artefact's mounts with the resources of `:r`, `restorePageStatements` for every `restore_page`, then `finalEffects` setting `active_revision_id = :r` with `content_version + 1`, and the receipt. This covers both a rollback of a live artefact whose `:r` contains pages dropped since, and the restore of a fully unpublished artefact, whatever its unpublish did with mounts or the active revision: the commit statements remount `:r` and make it active.
+- **Identity.** Page IDs are those of `revision_pages`, never new ones; `create_page` stays refused (`conflict`) for a known ID. Ownership edges of `:r` already exist (immutable, keyed by revision), so a restore passes no `ownership` argument.
 - **No reactivation.** A restored page comes back `private`, with no active grant, under a new policy epoch. Grants revoked at unpublish stay revoked with their reason, so former share links, share cookies and pinned proofs keep failing. Exposure returns only through an explicit guarded `setVisibility`, `share` (new key) or administrator `importShare`. `role_grants` are not touched: revoked roles stay revoked; an unrevoked page-scoped role keeps naming the same page ID.
 - **Address.** The primary route is derived from `:r` (§7 note) and inserted plainly: if another page claimed it meanwhile, the whole batch fails as `conflict` (`routes` primary key) and nothing changes. A path mounted meanwhile by another artefact is refused by the guard's `?17` path-claim check. Aliases naming the page lead to it again for team readers once it is live (§12.5).
 - **Authority and scope.** `restore_page` requires an administrator or an installation publisher: reclaiming a released address is an installation-level act, like `create_page` *(contract decision)*. With one guard per page, a page-scoped publisher can neither restore a revision that brings back a tombstoned page, even its own, nor drop pages outside its scope. Role commands and last-administrator protection are unchanged.
 
-```sql
--- restorePageStatements: ?1 page ?2 restored revision (the guard's ?17) ?3 time (epoch ms)
-UPDATE pages
-   SET tombstoned_at = NULL, tombstoned_by = NULL, visibility = 'private', policy_epoch = policy_epoch + 1
- WHERE page_id = ?1;
+`restorePageStatements` is two statements; the normative SQL is in [`commands.ts`](../domains/catalogue/commands.ts):
 
-INSERT INTO routes (kind, route_key, page_id, artifact_id, document_path, document_kind, created_at)
-SELECT CASE WHEN rp.document_path GLOB '/a/*' THEN 'subtree' ELSE 'tree_page' END,
-       CASE WHEN rp.document_path GLOB '/a/*' THEN substr(rp.document_path, 4, length(rp.document_path) - 14)
-            ELSE substr(rp.document_path, 2) END,
-       p.page_id, p.artifact_id, rp.document_path, 'document', ?3
-FROM revision_pages rp JOIN pages p ON p.page_id = rp.page_id
-WHERE rp.revision_id = ?2 AND rp.page_id = ?1;
-```
+1. An update of the page that clears the tombstone, sets `visibility = 'private'` and increments `policy_epoch`.
+2. A plain `INSERT … SELECT` of its primary route from `revision_pages(?17, page)`. When the document path starts with `/a/`, the route has kind `subtree` with the slug of `/a/<slug>/index.html`; otherwise it has kind `tree_page` with the document path without its leading slash.
 
-The `restore_page` guard proved, in the same transaction, that the page is tombstoned in this artefact and that `revision_pages(?2, ?1)` exists, so the `INSERT … SELECT` inserts exactly one row; no refusal is derived from a row count. The route's own CHECK and its foreign key to the document mount reject any inconsistent derivation as `invariant_violation`.
+The `restore_page` guard proved, in the same transaction, that the page is tombstoned in this artefact and that `revision_pages` contains the page for that revision, so the `INSERT … SELECT` inserts exactly one row; no refusal is derived from a row count. The route's own CHECK and its foreign key to the document mount reject any inconsistent derivation as `invariant_violation`.
 
 ## 10. Share secrets (S2)
 
 - Key grammar (both legacies): `^[A-Za-z0-9_-]{8,128}$`. New keys: 18 random bytes, base64url without padding (24 characters) *(contract decision; matches the Silex CLI length)*.
 - Stored verifier: `key_hmac = hex(HMAC-SHA-256(verifierKey[kid], "forge.share.v1" ‖ 0x00 ‖ instanceId ‖ 0x00 ‖ key))`, with `key_kid`. Reads compute the HMAC under every configured verifier key and match `(kid, hmac)` pairs, so a verifier key can be rotated by adding a new current key while the previous one still verifies. Exact legacy keys are imported unchanged (`importShare`), so every historical URL keeps working.
+- The same verifier keys also derive, under a distinct label, the key that signs pinned-read tokens (§12.6). They have no other use.
 - Sealed copy: `base64url(iv ‖ AES-256-GCM(sealKey, key, aad))` with a 12-byte random IV and `aad = "forge.share.seal.v1" ‖ 0x00 ‖ instanceId ‖ 0x00 ‖ pageId ‖ 0x00 ‖ grantId`; stored only for active grants and erased on revocation (schema CHECK). The seal key exists only in the manage Worker; without it, minting and verification work and `revealShare` answers `invalid_state`.
 - No column, log line, event, error or response other than the mint/rotate/reveal result contains a key. Tests assert it by scanning every table after each command.
 - Share cookie (R, `shareCookie: true`): `forge_share=<encodeURIComponent(pageRef + "|" + key)>; HttpOnly; Secure; SameSite=Lax; Path=/`, no expiry (R `functions/s/[[path]].ts`). Parsing: regex `(?:^|;\s*)forge_share=([^;]+)`, URI-decode, split at the last `|`; the page part must be a valid tree route key ending in `.html` without `..`, the key must match the key grammar, otherwise the cookie is ignored. The cookie is revalidated against the current grant on every request; it never outlives a revocation, rotation, visibility change or unpublish. F05 emits it.
@@ -856,6 +593,7 @@ export function canonicalUrl(route: SubtreeOrTree): string         // "/a/<slug>
 export function shareUrl(config: InstanceBase, route: SubtreeOrTree, key: string): string
 export function isReservedShellPath(path: string): boolean        // fixed namespaces only; independent of configured shellPaths
 export function isReservedPath(path: string, config: InstanceBase & { readonly shellPaths?: readonly string[] }): boolean
+export function subtreeSlugOf(path: string): string | null       // "/a/<slug>" or "/a/<slug>/…" with a valid slug, else null
 
 // domains/catalogue/routing/outcome.ts (S3)
 export type RouteOutcome =
@@ -871,7 +609,7 @@ export type RouteOutcome =
 export function toOutcome(parsed: ParsedRequest, decision: ReadDecision, identity: VerifiedIdentity | null, config: ReadInstanceConfig): RouteOutcome
 
 // domains/catalogue/resolve.ts (S3)
-export interface ReadDeps { readonly db: D1Database; readonly config: ReadInstanceConfig; readonly jwks: JwksSource; readonly nowSeconds: () => number; readonly pinnedProof?: PinnedReadProof | null }
+export interface ReadDeps { readonly db: D1Database; readonly config: ReadInstanceConfig; readonly jwks: JwksSource; readonly nowSeconds: () => number; readonly pinnedProof?: string | null }
 export function resolveRead(request: Request, deps: ReadDeps): Promise<RouteOutcome>
 ```
 
@@ -879,7 +617,7 @@ export function resolveRead(request: Request, deps: ReadDeps): Promise<RouteOutc
 
 `ParsedRequest.subtree.path` and `.tree.path` carry the normalized requested pathname so canonicalization occurs only after authorization, against the selected resource. `shell.login.host` carries the already-allowed request host, including an alias; it is passed to `accessLoginLocation` so login returns to that same host.
 
-`ReadDeps.pinnedProof` is an optional, **already verified** F05 proof, defaulting to `null`. It is supplied by trusted in-process composition only, never deserialized or trusted from a raw request, header, cookie or query by F03. Catalogue still rechecks the current policy epoch and access basis; a proof alone grants nothing.
+`ReadDeps.pinnedProof` is the opaque pinned-read token F05 carries; its transport is F05's. It defaults to `null`. `resolveRead` forwards it unparsed, with the same `nowSeconds` it used for `authenticate`. Only `decideRead` verifies it (§12.6); Routing and Delivery decide nothing about its validity.
 
 ### 11.2 Order and normalisation
 
@@ -897,7 +635,7 @@ export function resolveRead(request: Request, deps: ReadDeps): Promise<RouteOutc
 
 `isReservedShellPath(path)` is exported by S3 for S1 configuration validation. It recognizes the fixed content/API namespaces below, including `/a` and `/a/*`, but does not consult a configured shell list. Root, login, icons and configured `/_shared/*` files are therefore not rejected merely for being shell paths. `isReservedPath` is the separate content predicate: fixed namespaces plus configured shell paths.
 
-Reserved namespaces for content paths (`isReservedPath`, used by F04 manifest validation and F10 import): `/s`, `/s/*`, `/a/*` outside the artefact's own subtree, `/_revisions*`, `/api*`, `/registry/*`, `/manifest.json`, `/asset-owners.json`, `/cdn-cgi/*`, and the instance's shell paths. The schema refuses the instance-independent ones (§7).
+Reserved namespaces for content paths (`isReservedPath`; F04 and F10 validate revision paths through Catalogue's `validateRevisionPaths`, §9, which adds the artefact's own-subtree exception with `subtreeSlugOf`): `/s`, `/s/*`, `/a/*` outside the artefact's own subtree, `/_revisions*`, `/api*`, `/registry/*`, `/manifest.json`, `/asset-owners.json`, `/cdn-cgi/*`, and the instance's shell paths. The schema refuses the instance-independent ones (§7).
 
 `safeNext` is the union of both legacies: `raw` must start with `/` and contain no `..` (R); it is resolved with the URL parser against the origin; the origin must match; the resolved pathname must not start with `//`; it must not be `/login` or `/login.html` (Silex); the result is `pathname + search + hash`. `loginLocation(next)` returns `/login` when `next === "/"`, else `/login?next=<encodeURIComponent(next)>`. The value passed as `next` for protected pages is `pathname + search` (Silex; R dropped the query string; declared change §17).
 
@@ -972,15 +710,12 @@ export type ReadSubject =
   | { readonly kind: "share"; readonly route: SubtreeOrTree; readonly candidates: readonly string[] }
   | { readonly kind: "card"; readonly targets: readonly { readonly route: SubtreeOrTree; readonly path: string }[] }
   | { readonly kind: "pinned"; readonly pageId: string; readonly revisionId: string; readonly path: string }
-export interface PinnedReadProof { // verified by F05 before it reaches this module
-  readonly instanceId: string; readonly pageId: string; readonly revisionId: string; readonly policyEpoch: number
-  readonly basis: { readonly kind: "public" } | { readonly kind: "team" } | { readonly kind: "grant"; readonly grantId: string }
-}
 export interface ReadCredentials {
-  readonly team: VerifiedIdentity | null       // surface "read" only
+  readonly team: VerifiedIdentity | null       // counts only if registered, read surface, read audience, unexpired (§12.1)
   readonly shareKey: string | null             // from a share grammar
   readonly shareCookie: { readonly pageRef: string; readonly key: string } | null
-  readonly pinnedProof: PinnedReadProof | null
+  readonly pinnedProof: string | null          // opaque token, verified here (§12.6)
+  readonly nowSeconds: number
 }
 export interface ReadPlan {
   readonly instanceId: string
@@ -989,6 +724,7 @@ export interface ReadPlan {
   readonly resource: { readonly path: string; readonly kind: "document" | "subdocument" | "fragment" | "asset"; readonly objectKey: string; readonly sha256: string; readonly size: number; readonly contentType: string }
   readonly requestedPath: string | null        // candidate that matched; null when exact
   readonly authority: { readonly basis: "team" | "public" | "public_owner" | "share_key" | "share_cookie" | "pinned"; readonly pageId: string | null; readonly grantId: string | null; readonly policyEpoch: number | null }
+  readonly pinnedProof: string | null          // minted here after an allow (§12.6)
   readonly cache: "no-store"
 }
 export type ReadDecision =
@@ -1000,7 +736,7 @@ export function checkReadInstance(db: D1Database, config: ReadInstanceConfig): P
 
 // domains/catalogue/catalogue-list.ts (S2)
 export interface CatalogueEntry { readonly pageId: string; readonly url: string; readonly visibility: "private" | "shared" | "public" | null; readonly metadata: unknown }
-export function listCatalogue(db: D1Database, config: ReadInstanceConfig, viewer: "anonymous" | "team", page: { readonly after: string | null; readonly limit: number }): Promise<readonly CatalogueEntry[]>
+export function listCatalogue(db: D1Database, config: ReadInstanceConfig, viewer: "anonymous" | "team", page: { readonly after: string | null; readonly limit?: number }): Promise<readonly CatalogueEntry[]>
 ```
 
 ### 12.1 Execution rules
@@ -1008,125 +744,31 @@ export function listCatalogue(db: D1Database, config: ReadInstanceConfig, viewer
 - One `db.batch([...])` per request: `R0` plus the statements the subject needs. Shell/catalogue route outcomes use `checkReadInstance` (R0-only batch, `null` on match, deny on mismatch or D1 error) rather than skipping the marker check. A batch is one transaction, so every fact comes from one snapshot of the primary. No `withSession()`, no KV, no cache.
 - Any D1 error → `unavailable` (503, no-store). `R0` mismatch → `instance_mismatch` (503). No fallback.
 - Share keys and cookie keys are turned into `(kid, hmac)` pairs before the batch; unused pairs are bound to `NULL`.
+- A team identity counts only when `isVerifiedIdentity(team)` holds (§5), its surface is `read`, its audience is in `readAudiences`, and `nowSeconds < expiresAt`. Otherwise the request is decided as having no team identity. A pinned token is verified before the batch (§12.6); an invalid one is no proof.
 - The decision completes before any byte, `HEAD`, `Range` or conditional answer is produced (F05).
 
-```sql
--- R0 instance
-SELECT instance_id FROM instance_meta WHERE singleton = 1;
+Statements; the normative SQL is in [`read.ts`](../domains/catalogue/read.ts) and [`catalogue-list.ts`](../domains/catalogue/catalogue-list.ts):
 
--- R1 page by route: ?1 kind ?2 key ?3/?4 ?5/?6 share-key (kid,hmac) pairs ?7 cookie page ref ?8/?9 ?10/?11 cookie pairs ?12..?14 candidates
-SELECT p.page_id, p.artifact_id, p.visibility, p.policy_epoch, a.active_revision_id,
-       gk.grant_id AS key_grant_id, gk.mode AS key_grant_mode, gk.pinned_revision_id AS key_grant_revision_id,
-       gc.grant_id AS cookie_grant_id,
-       rr.revision_id AS resource_revision_id, rr.path, rr.kind, rr.object_key, rr.sha256, rr.size, rr.content_type
-FROM routes r
-JOIN pages p ON p.page_id = r.page_id AND p.tombstoned_at IS NULL
-JOIN artifacts a ON a.artifact_id = p.artifact_id AND a.active_revision_id IS NOT NULL
-LEFT JOIN share_grants gk ON gk.page_id = p.page_id AND gk.revoked_at IS NULL
-     AND ((gk.key_kid = ?3 AND gk.key_hmac = ?4) OR (gk.key_kid = ?5 AND gk.key_hmac = ?6))
-LEFT JOIN share_grants gc ON gc.page_id = p.page_id AND gc.revoked_at IS NULL AND gc.mode = 'follow_active'
-     AND r.kind = 'tree_page' AND r.route_key = ?7
-     AND ((gc.key_kid = ?8 AND gc.key_hmac = ?9) OR (gc.key_kid = ?10 AND gc.key_hmac = ?11))
-LEFT JOIN revision_resources rr ON rr.revision_id IN (a.active_revision_id, gk.pinned_revision_id)
-     AND rr.path IN (?12, ?13, ?14)
-     AND (
-       (r.kind = 'subtree'
-        AND substr(rr.path, 1, length('/a/' || r.route_key || '/')) = '/a/' || r.route_key || '/'
-        AND ((rr.kind = 'document' AND rr.path = r.document_path)
-             OR rr.kind IN ('subdocument', 'fragment', 'asset')))
-       OR
-       (r.kind = 'tree_page'
-        AND ((rr.kind = 'document' AND rr.path = r.document_path)
-             OR (rr.kind IN ('fragment', 'asset')
-                 AND EXISTS (SELECT 1 FROM resource_owners o
-                             WHERE o.owner_revision_id = rr.revision_id AND o.owner_page_id = p.page_id AND o.path = rr.path))))
-     )
-WHERE r.kind = ?1 AND r.route_key = ?2;
-
--- R2 fragment or asset by mount: ?1 path ?2 cookie page ref ?3/?4 ?5/?6 cookie pairs
-SELECT m.path, m.kind, m.artifact_id, m.revision_id,
-       rr.object_key, rr.sha256, rr.size, rr.content_type,
-       (SELECT o.owner_page_id FROM resource_owners o
-          JOIN pages op ON op.page_id = o.owner_page_id AND op.tombstoned_at IS NULL AND op.visibility = 'public'
-          JOIN artifacts oa ON oa.artifact_id = op.artifact_id AND oa.active_revision_id = o.owner_revision_id
-         WHERE o.path = m.path LIMIT 1) AS public_owner_page_id,
-       (SELECT g.grant_id FROM resource_owners o
-          JOIN pages op ON op.page_id = o.owner_page_id AND op.tombstoned_at IS NULL AND op.visibility = 'shared'
-          JOIN artifacts oa ON oa.artifact_id = op.artifact_id AND oa.active_revision_id = o.owner_revision_id
-          JOIN routes cr ON cr.page_id = op.page_id AND cr.kind = 'tree_page' AND cr.route_key = ?2
-          JOIN share_grants g ON g.page_id = op.page_id AND g.revoked_at IS NULL AND g.mode = 'follow_active'
-               AND ((g.key_kid = ?3 AND g.key_hmac = ?4) OR (g.key_kid = ?5 AND g.key_hmac = ?6))
-         WHERE o.path = m.path LIMIT 1) AS cookie_grant_id
-FROM mounts m
-JOIN artifacts a ON a.artifact_id = m.artifact_id AND a.active_revision_id = m.revision_id
-JOIN revision_resources rr ON rr.revision_id = m.revision_id AND rr.path = m.path AND rr.kind = m.kind
-WHERE m.path = ?1 AND m.kind IN ('fragment', 'asset');
-
--- R3 alias: ?1 path
-SELECT r.kind, r.route_key, r.redirect_to, r.redirect_status, r.target_page_id,
-       (tp.page_id IS NOT NULL AND tp.tombstoned_at IS NULL) AS target_live
-FROM routes r LEFT JOIN pages tp ON tp.page_id = r.target_page_id
-WHERE (r.kind = 'redirect_exact' AND r.route_key = ?1)
-   OR (r.kind = 'redirect_prefix' AND substr(?1, 1, length(r.route_key)) = r.route_key)
-ORDER BY (r.kind = 'redirect_exact') DESC, length(r.route_key) DESC
-LIMIT 1;
-
--- R4 pinned: ?1 page ?2 owner-page revision ?3 path ?4 proof grant
-SELECT p.page_id, p.artifact_id, p.visibility, p.policy_epoch, a.active_revision_id,
-       r.kind AS route_kind, r.route_key,
-       1 AS page_in_revision,
-       EXISTS (SELECT 1 FROM resource_owners o WHERE o.owner_revision_id = rv.revision_id AND o.owner_page_id = p.page_id AND o.path = ?3) AS owned,
-       bytes_revision.artifact_id AS resource_artifact_id, rr.revision_id AS resource_revision_id,
-       rr.path, rr.kind, rr.object_key, rr.sha256, rr.size, rr.content_type,
-       g.grant_id, g.mode, g.pinned_revision_id
-FROM pages p
-JOIN artifacts a ON a.artifact_id = p.artifact_id
-JOIN routes r ON r.page_id = p.page_id AND r.kind IN ('subtree', 'tree_page')
-JOIN revisions rv ON rv.revision_id = ?2 AND rv.artifact_id = p.artifact_id
-JOIN revision_pages rp ON rp.revision_id = rv.revision_id AND rp.page_id = p.page_id
-LEFT JOIN revision_resources rr ON rr.path = ?3 AND (
-  -- Local bytes remain pinned to the requested owner-page revision.
-  (rr.revision_id = rv.revision_id AND (
-    (rr.kind = 'document' AND rr.path = rp.document_path)
-    OR (r.kind = 'subtree' AND rr.kind IN ('subdocument', 'fragment', 'asset')
-        AND substr(rr.path, 1, length('/a/' || r.route_key || '/')) = '/a/' || r.route_key || '/')
-    OR (r.kind = 'tree_page' AND rr.kind IN ('fragment', 'asset')
-        AND EXISTS (SELECT 1 FROM resource_owners o
-                    WHERE o.owner_revision_id = rv.revision_id AND o.owner_page_id = p.page_id AND o.path = rr.path))
-  ))
-  OR
-  -- An explicitly owned external fragment/asset follows its mounting artefact's active revision.
-  (rr.kind IN ('fragment', 'asset')
-   AND EXISTS (SELECT 1 FROM resource_owners o
-               WHERE o.owner_revision_id = rv.revision_id AND o.owner_page_id = p.page_id AND o.path = rr.path)
-   AND NOT EXISTS (SELECT 1 FROM revision_resources local
-                   WHERE local.revision_id = rv.revision_id AND local.path = rr.path)
-   AND EXISTS (SELECT 1 FROM mounts m
-               JOIN artifacts ma ON ma.artifact_id = m.artifact_id AND ma.active_revision_id = m.revision_id
-               WHERE m.path = rr.path AND m.kind = rr.kind AND m.revision_id = rr.revision_id
-                 AND m.artifact_id <> p.artifact_id))
-)
-LEFT JOIN revisions bytes_revision ON bytes_revision.revision_id = rr.revision_id
-LEFT JOIN share_grants g ON g.grant_id = ?4 AND g.page_id = p.page_id AND g.revoked_at IS NULL
-WHERE p.page_id = ?1 AND p.tombstoned_at IS NULL;
-
--- R5 catalogue: ?1 include non-public (1 = team) ?2 after page_id ?3 limit
-SELECT p.page_id, p.visibility, r.kind, r.route_key, rp.metadata_json
-FROM pages p
-JOIN artifacts a ON a.artifact_id = p.artifact_id AND a.active_revision_id IS NOT NULL
-JOIN revision_pages rp ON rp.revision_id = a.active_revision_id AND rp.page_id = p.page_id
-JOIN routes r ON r.page_id = p.page_id AND r.kind IN ('subtree', 'tree_page')
-WHERE p.tombstoned_at IS NULL AND (?1 = 1 OR p.visibility = 'public') AND (?2 IS NULL OR p.page_id > ?2)
-ORDER BY p.page_id
-LIMIT ?3;
-```
+| Statement | Reads |
+|---|---|
+| `R0` | the instance marker |
+| `R1` page by route (page, share and card subjects) | The live page of the route, provided its artefact has an active revision, with its visibility and policy epoch. The active grant matching one of the share-key `(kid, hmac)` pairs. The active `follow_active` grant matching the cookie pairs, when the route is the cookie's tree page. Each candidate resource (at most three) of the active revision or of the key grant's pinned revision that passes the confinement rules below |
+| `R2` fragment or asset by mount | The current mount of the path, of kind `fragment` or `asset`, whose revision is its artefact's active revision, with its bytes. Whether a live public owner page has, in its active revision, an edge to the path whose provider is the mounting artefact. The `follow_active` grant of a live shared owner page that meets the same edge conditions and matches the cookie pairs on the cookie's tree page |
+| `R3` alias | the exact redirect for the path, else the longest matching prefix redirect, with whether its target page is live |
+| `R4` pinned | The live page with its primary route. The requested revision, when it belongs to the page's artefact and contains the page. The active grant named by a verified token. The resource selected by the confinement rules below |
+| `R5` catalogue | Live pages whose artefact has an active revision containing them, with primary route, visibility and the active revision's `metadata_json`. Public pages only for an anonymous viewer. Ordered by page ID after the cursor, limited |
 
 Resource confinement is part of the Catalogue decision, not a promise made by the parser or Delivery:
 
-- **R1:** a document candidate must be this route's own document. Subtree reads are additionally confined to the exact `/a/<slug>/` prefix; a sibling document is excluded even inside that prefix. A tree page's non-document candidate must be a declared fragment or asset owned by this page in the selected revision. Candidate membership alone (`rr.path IN …`) never grants access.
-- **R4:** the requested page must occur in the requested revision. Its own document comes from `revision_pages.document_path`; subtree non-documents require the exact subtree prefix; tree non-documents require ownership and kind `fragment` or `asset`. A purported ownership edge to another page's document or a subdocument never permits that read, including for a team reader or a valid share key.
-- An owned fragment or asset outside the page's artefact resolves through its **current mount**, with matching resource kind and `mounts.revision_id = mounting artifacts.active_revision_id`, in the same primary read batch. It cannot be mistaken for bytes contained in the page's pinned revision. Missing, stale or non-fragment/asset mounts deny. A local revision resource takes precedence; it never silently falls forward to a newer revision of the same artefact.
-- `ReadPlan.artifactId` and `ReadPlan.revisionId` identify the resource bytes selected for Store. For an external resource they therefore identify the mounting artefact and its active revision. The authority remains the requesting page; the proof remains bound to that page, its requested revision and current policy epoch. Do not compare an external resource's revision to the page's proof revision.
+- **Membership.** A resource row is read for a page only from a revision that contains that page (`revision_pages`). This holds for R1 (active revision or pinned key grant) and R4 alike. A resource of the active revision must also be the artefact's current mount of that path and kind.
+- **Local first (R4).** When the requested revision itself holds the path, that row is the only candidate. An external mount is considered only when it does not.
+- **By kind**, for a local resource (R1 and R4):
+  - `document`: only the page's own document (`revision_pages.document_path`; for R1 also the route's document);
+  - `subdocument`: only for a subtree page, under the exact `/a/<slug>/` prefix;
+  - `fragment` or `asset`: for a subtree page, under the exact prefix only (an edge never widens it); for a tree page, only with an ownership edge `(revision, page, path)` whose provider is the page's own artefact.
+- **External (R4 only).** For a tree page, a `fragment` or `asset` that the revision does not hold is read only through an edge `(revision, page, path, provider Y)`, where Y is not the page's artefact. It is read only from Y's current mount of the path, with matching kind and `mounts.revision_id` equal to Y's active revision. A missing or stale mount, or a mount by any artefact other than Y, denies. The resource follows Y's active revision, while local bytes never fall forward to a newer revision of the page's artefact.
+- An ownership edge never opens a `document` or `subdocument`, whoever reads (team, share key or token). Candidate membership (`rr.path IN …`) alone never grants access, and a sibling document inside the subtree prefix is excluded.
+- `ReadPlan.artifactId` and `ReadPlan.revisionId` identify the resource bytes selected for Store; for an external resource, these are the providing artefact and its active revision. The authority remains the requesting page, and the token remains bound to that page, its requested revision and its current policy epoch. An external resource's revision is never compared with the token's revision.
 
 ### 12.2 Page, subtree and tree
 
@@ -1150,8 +792,8 @@ From `R2` (no row → `not_found` for everyone; an asset-shaped path never redir
 | Order | Rule | Result |
 |---|---|---|
 | 1 | team identity | allow |
-| 2 | a shared owner page whose follow-active grant matches the share cookie | allow |
-| 3 | any owner page with visibility public | allow |
+| 2 | a live shared owner page, under the edge conditions of row 3, whose follow-active grant matches the share cookie | allow |
+| 3 | a live public owner page whose active revision has an edge to the path naming the mounting artefact as provider | allow |
 | 4 | otherwise, including orphans (no owner) | `not_found` |
 
 Subtree paths are never decided here: under `/a/<slug>/` the subtree page decides. A document or subdocument is never reachable through this rule (`m.kind IN ('fragment', 'asset')`).
@@ -1160,12 +802,38 @@ Subtree paths are never decided here: under `/a/<slug>/` the subtree page decide
 
 - **Share** (`R1` with the key pairs): allow only if visibility is `shared` and `key_grant_id` is set. A team identity does not bypass a share URL. Revision = the grant's pinned revision when `mode = 'pinned'`, else the active revision. Otherwise `not_found`.
 - **Card**: `R1` per target in the same batch; the first target whose page allows by share key and whose card path exists in the chosen revision with `content_type` starting `image/` wins; else `not_found`.
-- **Pinned** (`R4`): the page must be live and in the revision; the path must pass R4’s resource-kind and ownership predicates above. An ownership edge never opens another page’s document or a subdocument outside this page’s subtree. External owned fragments/assets follow the current mount; local bytes stay pinned. The basis must hold now: team identity; or visibility public; or the proof's grant active, page shared, and (`follow_active` or pinned to this revision). And the revision must be active, or the grant be pinned to it, or the proof name this page, this revision and the current `policy_epoch`. Anything else is `not_found`. Old revisions are not readable merely because they are known or because the page is public now.
+- **Pinned** (`R4`): the page must be live and contained in the requested revision, and the path must pass the confinement rules above. Two conditions must then both hold:
+  - The basis holds now: a team identity (§12.1); or visibility `public`; or the token's grant is active on the page, the page is `shared`, and the grant is `follow_active` or pinned to this revision.
+  - The revision is reachable: it is the active one, or the grant is pinned to it, or a valid token (§12.6) names this page, this revision and the current `policy_epoch`.
+
+  Anything else is `not_found`. Old revisions are not readable merely because they are known or because the page is public now.
 
 ### 12.5 Aliases and catalogue
 
-- `R3` is consulted for paths no grammar claimed (unknown subtree or tree route, unmounted resource). Only a team identity gets the alias redirect, and only when `target_page_id IS NULL OR target_live`: an alias naming a page redirects only while that page is live; an alias naming none (historical `_redirects` entries) always redirects a team identity, as legacy Pages applied `_redirects` to team requests. A redirect grants no authorization: its `Location` is a same-origin path (route CHECK), and the request that follows it is decided on its own. Every other viewer — anonymous or holding a share cookie — gets the outcome the path would have had without the alias, never a redirect. For the historical aliases that outcome is `deny 404` (`Not found`, `text/plain; charset=utf-8`, `no-store`, no `Set-Cookie`, no `Location`), as observed in OS-4. The team redirect is inferred from Pages applying `_redirects` after the middleware passes, not observed.
-- `R5`: anonymous viewers list public pages only; team viewers list all live pages with their visibility. No share key, grant or principal data is listed. `metadata_json` keys are defined by F05 (catalogue) and F04 (publish input).
+- `R3` is consulted for paths no grammar claimed (unknown subtree or tree route, unmounted resource). Only a team identity gets the alias redirect, and only when `target_page_id IS NULL OR target_live`: an alias naming a page redirects only while that page is live; an alias naming none (historical `_redirects` entries) always redirects a team identity, as legacy Pages applied `_redirects` to team requests. A redirect grants no authorization: its `Location` is a same-origin path (route CHECK), and the request that follows it is decided on its own. Every other viewer — anonymous or holding a share cookie — gets the outcome the path would have had without the alias, never a redirect. For the historical aliases that outcome is `deny 404` (`Not found`, `text/plain; charset=utf-8`, `no-store`, no `Set-Cookie`, no `Location`), as observed in OS-4. The 404 comes from the path, not from the alias. Every historical alias key is a path that no page grammar claims: none is under `/a/`, and Silex has no tree grammar. R2 therefore finds no row (§12.3). An alias never changes a non-team outcome. An alias key that is also route-shaped, such as an unknown subtree or tree route, keeps that route's outcome, `login_required` included (§12.2). The team redirect is inferred from Pages applying `_redirects` after the middleware passes, not observed.
+- `R5`: anonymous viewers list public pages only; team viewers list all live pages with their visibility. No share key, grant or principal data is listed. `limit` defaults to 50; an integer is clamped to 1–100; a non-integer is `PolicyError("invalid_state")` with no D1 call. An instance mismatch throws `PolicyError("instance_mismatch")` and a D1 error `PolicyError("unavailable")`, both 503 `no-store`. There is no partial or fallback list. `metadata_json` keys are defined by F05 (catalogue) and F04 (publish input).
+
+### 12.6 Pinned-read token
+
+Plan §2.3: a pinned read gets a short proof bound to its page, revision and read right, with no publishing power. ACL, revocation and expiry are rechecked on every request.
+
+- **Minting.** Only `decideRead`, on the same code path and right after an allow, sets `ReadPlan.pinnedProof`. It does so for a `document` or `subdocument` whose authority has a page and a policy epoch and whose basis is `public`, `team`, `share_key` or `share_cookie`; share bases become basis `grant` with the grant ID. Basis `pinned` and every other plan carry `null`, and Delivery keeps the token it was given. No exported function mints a token, signs a payload or exposes the derived key, so a fabricated `ReadPlan` mints nothing.
+- **Format** *(contract decision)*: `v1.<kid>.<payload>.<mac>`, at most 1024 characters, base64url without padding.
+  - The payload is UTF-8 JSON with keys in this order: `v` (1), `i` instance, `p` page, `r` revision, `e` policy epoch, `b` basis (`public`, `team`, `grant`), `g` grant ID or `null`, `x` expiry (`nowSeconds + 900`, epoch seconds).
+  - `mac = HMAC-SHA-256(Kp, "forge.pinned.v1" ‖ 0x00 ‖ payload)`, with `Kp = HMAC-SHA-256(verifierKey[kid], "forge.pinned.key.v1")`. This is a domain-separated derivation from the share verifier keys (§10), not a new secret.
+  - Minting uses the first configured key. Verification accepts any configured `kid`, so removing a key invalidates its tokens.
+- **Verification** happens in `decideRead`, before the batch:
+  - strict parse, known `kid`, and a constant-time MAC check (`crypto.subtle.verify`);
+  - `nowSeconds < x`;
+  - instance equal to the configuration; page and revision equal to the `/_revisions/` route.
+
+  Then, on the primary: `e` equals the page's current `policy_epoch`, the revision contains the page, and the basis holds now (§12.4). Any failure means no token, never an error.
+- **No right of its own.** A token only makes its revision reachable for the page (§12.4). It never replaces the basis, which is rechecked on every request:
+  - `team` requires a valid verified read identity on that very request, so a team token presented without one, or after the read JWT expired, reads nothing;
+  - `grant` requires the grant to be active and to match, and the current policy epoch;
+  - `public` requires the page to be public now.
+- **Lifetime** *(contract decision)*: `x` bounds revision reachability to 900 s and extends no right beyond its basis. Every visibility, grant, unpublish or restore change moves the policy epoch, which invalidates earlier tokens at once.
+- Delivery only transports the token and rewrites `/_revisions/` URLs (F05). A token never authorizes a mutation, and a token for one page never opens another page.
 
 ## 13. Empirical parity observations
 
@@ -1199,12 +867,12 @@ One worktree, one branch `feat/F03-core-contract`, one PR. Each file has one own
 | `.github/workflows/ci.yml` | S1 | only if the workers pool needs a Node or runtime adjustment in the existing `test` job; release and activation gates untouched |
 | `domains/catalogue/instance-config.ts` | S1 | §4 |
 | `domains/catalogue/identity.ts` | S4 | §5 |
-| `migrations/0001_catalogue.sql` | S2 | §7 verbatim |
+| `migrations/0001_catalogue.sql` | S2 | §7 rules (normative SQL) |
 | `domains/catalogue/ids.ts` | S2 | ID mint and validation (§3) |
 | `domains/catalogue/guard.ts` | S2 | §8 |
-| `domains/catalogue/principals.ts`, `domains/catalogue/commands.ts` | S2 | §9 |
+| `domains/catalogue/principals.ts`, `domains/catalogue/commands.ts`, `domains/catalogue/alias-validation.ts`, `domains/catalogue/revision-paths.ts` | S2 | §9 |
 | `domains/catalogue/share-secrets.ts` | S2 | §10 |
-| `domains/catalogue/read.ts`, `domains/catalogue/catalogue-list.ts` | S2 | §12 |
+| `domains/catalogue/read.ts`, `domains/catalogue/catalogue-list.ts`, and any key-free pinned-token helper | S2 | §12 |
 | `domains/catalogue/routing/grammar.ts`, `domains/catalogue/routing/outcome.ts`, `domains/catalogue/resolve.ts` | S3 | §11 |
 | `LICENSE` | S3 | add the Roxabi copyright line (§16) |
 | `tests/engine/**/*.test.ts`, `tests/engine/fixtures/**` | R-tester | behavioural tests below |
@@ -1212,23 +880,23 @@ One worktree, one branch `feat/F03-core-contract`, one PR. Each file has one own
 
 Interface coordination: S2 uses S1 config types and S4's `VerifiedIdentity`; S3 composes those interfaces. S1 also imports S3's pure `isReservedShellPath`, so slice numbers are not an acyclic import ordering. That shared predicate does not parse configuration or inspect the configured shell list; routing consumes configuration types without calling the configuration parser. S3 owns the predicate, S1 reuses it instead of duplicating it. Legacy `functions/`, `site/`, `plugins/`, root `wrangler.toml` and the existing `tests/*.test.ts` files are untouched; the legacy suite must stay green under the upgraded Vitest.
 
-Test rules (R-tester): real D1 through the workers pool with migrations applied, no fake D1, no mocked guard. JWTs are signed in-test with WebCrypto-generated RSA keys and served through an injected `JwksSource`. Fixtures create pages and routes through `claimPageStatements` and write F04-owned rows (`artifacts`, `revisions`, `revision_resources`, `revision_pages`, `mounts`) with plain SQL until F04 exists. D1 failure is exercised with a real binding whose schema is absent (D1 raises a genuine error).
+Test rules (R-tester): real D1 through the workers pool with migrations applied, no fake D1, no mocked guard. JWTs are signed in-test with WebCrypto-generated RSA keys and served through an injected `JwksSource`. Fixtures create pages and routes through `claimPageStatements` and write F04-owned rows (`artifacts`, `revisions`, `revision_resources`, `revision_pages`, `mounts`) with plain SQL until F04 exists. Ownership edges are written only through `executeGuarded`'s `ownership` argument, with a real `ManageActor` from `authenticateManage`, never by plain SQL into `resource_owners`. Pinned tokens come from a real `decideRead` allow. D1 failure is exercised with a real binding whose schema is absent (D1 raises a genuine error).
 
 | # | Behaviour |
 |---|---|
 | T1 | Instance: missing or different `instance_meta` → every read `instance_mismatch`, every guard `instance_mismatch`. |
 | T2 | Subtree parity (Silex): anonymous public serve; private and unknown → `/login?next=` with path and query; shared → 404; team reads all; team unknown → 404; tombstoned behaves as unknown. |
 | T3 | Tree parity (R): only the canonical equivalents of one identity reach that page (§11.3). `x/y.html` ← `/x/y.html` (308 → `/x/y` once authorized) and `/x/y`; `x/y/index.html` ← `/x/y/`, `/x/y/index.html` and `/x/y/index` (308 → `/x/y/` once authorized). Trailing-slash or index forms and non-index forms are never merged: `/x/y/` never reaches `x/y.html`, and `/d` names `d.html`, never `d/index.html`. For each identity: anonymous viewers get public pages served, while private pages and shared pages without a cookie → login; a cookie grant serves; a revoked, rotated, visibility-changed or unpublished cookie → denied on the next request; team reads all. |
-| T4 | Fragments and assets: public owner opens; cookie owner opens; closed → 404 never login; orphan → 404; ownership across artefacts; a page document mounted as fragment is refused by the schema. Direct `decideRead` calls with a public or share-authorized page and a sibling document in `candidates` must deny: candidate membership, a team identity, or a forged ownership edge cannot widen the authorized page. Subtree resources must remain inside the exact subtree prefix. |
+| T4 | Fragments and assets: public owner opens; cookie owner opens; closed → 404 never login; orphan → 404; ownership across artefacts; a page document mounted as fragment is refused by the schema. Direct `decideRead` calls with a public or share-authorized page and a sibling document in `candidates` must deny: candidate membership, a team identity, or a forged ownership edge cannot widen the authorized page. Subtree resources must remain inside the exact subtree prefix. An edge is bound to its provider. A public owner page's edge to a path provided by artefact Y opens Y's current mount. After Y drops the path and artefact Z mounts it, the same edge opens nothing for anonymous and cookie viewers. A forged edge to a sibling document never opens it. |
 | T5 | Slug share: path and query forms, explicit index; wrong key, other page's key, non-shared page, revoked key → 404; team identity gets no bypass on `/s/`; still-visible malformed encodings/separators → 404; paths already normalized by a real Request are tested for effective route confinement, not recovery of their lost wire spelling; `rest` confined to the slug's subtree. OS-2 one-level vectors: `<child>.html` → 200; `<child>`, `<child>/`, `<child>/index.html` → 404, `no-store`, no cookie, no redirect. Deep (depth ≥ 2) share candidates on real D1 stay inside `/a/<slug>/` and never reach a sibling slug or another page's document. |
 | T6 | Page-key and card shares: no fallthrough after a claimed miss; card only for image content; browser flag. |
-| T7 | Pinned grants serve their revision after a later publish; follow-active grants follow; `/_revisions/` refuses an old revision without proof, a stale epoch, a revoked grant, and paths the page does not own in that revision. R4 refuses sibling documents/subdocuments even if an ownership edge names them. An owned external fragment or asset resolves through the mounting artefact's current active revision and carries that resource artefact/revision in the `ReadPlan`, while the proof stays bound to the owner page revision; absent or stale mounts deny. A local pinned resource never falls forward to a newer local revision. Resolver forwards only a pre-verified F05 `ReadDeps.pinnedProof`; no raw request credential is treated as that proof. |
-| T8 | Guard: every verdict reachable; read-surface identity with a publisher role → `forbidden`; page-scoped publisher cannot create pages or touch other pages; installation publisher can; role revoked or principal disabled between prepare and execute → refused; stale epoch → `conflict` with no effect row and no state change; last admin protected; D1 message format pinned. Structural refusals with no D1 call: empty guard list, two role or principal guards in one batch (two administrators removed together), two guards on one page or one principal. Two administrators removing each other in concurrent separate batches leave at least one active administrator (the second is refused with the first failing verdict in §8.1 priority: `unauthenticated` when the first batch disabled its actor, `conflict` when the first batch moved its actor's authority epoch, `forbidden` if its actor no longer holds an admin role at a matching epoch, otherwise `last_admin`). Multi-page publication guards on distinct pages pass. Pinned `share` and `rotate_share` with a missing or foreign-artefact revision fail as `invalid_state` in the same guarded transaction, leaving page, grant and audit state unchanged. `restore_page`: page-scoped publisher, even on its own page → `forbidden`; installation publisher and administrator pass; live page → `conflict`; unknown page or page of another artefact → `not_found`; revision of another artefact or not containing the page → `not_found`; path mounted by another artefact → `conflict`; stale content version → `conflict`; `mutation_events.action` accepts `restore_page`. |
-| T9 | Commands: every transition of §9; keys absent from every table and event; HMAC verification for minted and imported exact keys; reveal with and without seal key; sealed copy erased on revoke; at most one active grant per page. Self-registration: a new manage identity gets a principal with no role; an existing or disabled principal is returned unchanged; instance mismatch → no row and `instance_mismatch` from `A0`; a read-surface identity or an empty `sub` → `null` with no D1 call. `readPagePolicy` refuses read surface, inactive actor, stale actor epoch and out-of-scope publisher before revealing whether the page exists. Restore (§9.4) on real D1: a page dropped by a later revision and a fully unpublished artefact both return under their original page IDs, `private`, policy epoch + 1, with no active grant; former grants stay revoked with their reason, and the former key, cookie and pinned proof are refused by `decideRead`; subtree and tree routes are re-derived; a route claimed meanwhile → `conflict` with no state change; a tree route key under `a/` is refused by the schema. |
-| T10 | Aliases: exact and prefix; a team identity gets the redirect while the target is live; anonymous and share-cookie viewers get the unaliased outcome, never a redirect (404 `Not found`, `no-store`, no cookie for unclaimed paths, OS-4); tombstoned target. An alias with no target page redirects a team identity and never an anonymous or share-cookie viewer. |
+| T7 | Pinned grants serve their revision after a later publish; follow-active grants follow; `/_revisions/` refuses an old revision without proof, a stale epoch, a revoked grant, and paths the page does not own in that revision. R4 refuses sibling documents/subdocuments even if an ownership edge names them. An owned external fragment or asset resolves through the mounting artefact's current active revision and carries that resource artefact/revision in the `ReadPlan`, while the proof stays bound to the owner page revision; absent or stale mounts deny. A local pinned resource never falls forward to a newer local revision. A resource held locally by the pinned revision is served from it even when another artefact now mounts the same path. An external resource is read only through its edge's provider; a remount by another artefact, an absent mount or a stale mount → `not_found`. A revision of the artefact that does not contain the page → `not_found`, for both the R1 pinned key grant and R4. A token taken from a real `decideRead` allow reads its revision under `/_revisions/`. Each of the following gives no proof: an altered byte; an unknown `kid`; another instance, page or revision; an expired `x`; a stale policy epoch; a revoked or rotated grant; a visibility change; a well-formed token whose MAC Catalogue did not produce. A fabricated `ReadPlan` cannot obtain a token (no API). A token with basis `team`, presented by an anonymous request or with an expired read identity → `not_found`. With a valid token, revocation and epoch changes still deny exactly as without one. `resolveRead` forwards `ReadDeps.pinnedProof` unparsed; no other request credential is treated as a token. |
+| T8 | Guard: every verdict reachable; a read-audience identity of a principal holding a publisher role obtains no `ManageActor` and so no mutation; page-scoped publisher cannot create pages or touch other pages; installation publisher can; role revoked or principal disabled between prepare and execute → refused; stale epoch → `conflict` with no effect row and no state change; last admin protected; D1 message format pinned. Structural refusals with no D1 call: empty guard list, two role or principal guards in one batch (two administrators removed together), two guards on one page or one principal. Two administrators removing each other in concurrent separate batches leave at least one active administrator (the second is refused with the first failing verdict in §8.1 priority: `unauthenticated` when the first batch disabled its actor, `conflict` when the first batch moved its actor's authority epoch, `forbidden` if its actor no longer holds an admin role at a matching epoch, otherwise `last_admin`). Multi-page publication guards on distinct pages pass. Pinned `share` and `rotate_share` with a missing or foreign-artefact revision fail as `invalid_state` in the same guarded transaction, leaving page, grant and audit state unchanged. `restore_page`: page-scoped publisher, even on its own page → `forbidden`; installation publisher and administrator pass; live page → `conflict`; unknown page or page of another artefact → `not_found`; revision of another artefact or not containing the page → `not_found`; path mounted by another artefact → `conflict`; stale content version → `conflict`; `mutation_events.action` accepts `restore_page`. An unknown action → `forbidden`. A revision claiming a path under another artefact's `/a/<slug>/` → `conflict`. Ownership admission:<br>- a page-scoped publisher adding or retargeting a cross-artefact edge → `forbidden`, with nothing written;<br>- the same publisher keeping an identical edge of the page's current active revision → `preserved`;<br>- an administrator or installation publisher → `global`; a same-artefact edge → `local`;<br>- an edge whose owner page belongs to another artefact than the revision → `forbidden`;<br>- a new page and its edges in one commit (`create_page`, claim and `revision_pages` in effects, admissions, activation in `finalEffects`) → admitted;<br>- activation placed before the admissions → a preserved edge is refused (fail closed).<br>Structural, `invalid_state` with no D1 call: an edge without a `stage`, `create_page` or `publish` guard on its owner page bound to the same revision, including a publisher of page A guarding A while sending an edge for page B. `executeGuarded` with a handle not minted by `authenticateManage` → `unauthenticated`, with no D1 call. |
+| T9 | Commands: every transition of §9; keys absent from every table and event; HMAC verification for minted and imported exact keys; reveal with and without seal key; sealed copy erased on revoke; at most one active grant per page. Self-registration: a new manage identity gets a principal with no role; an existing or disabled principal is returned unchanged; instance mismatch → no row and `instance_mismatch` from `A0`; a read-surface identity or an empty `sub` → `null` with no D1 call. `readPagePolicy` refuses an unminted, expired or other-instance handle, inactive actor, stale actor epoch and out-of-scope publisher before revealing whether the page exists. Restore (§9.4) on real D1: a page dropped by a later revision and a fully unpublished artefact both return under their original page IDs, `private`, policy epoch + 1, with no active grant; former grants stay revoked with their reason, and the former key, cookie and pinned proof are refused by `decideRead`; subtree and tree routes are re-derived; a route claimed meanwhile → `conflict` with no state change; a tree route key under `a/` is refused by the schema. `authenticateManage`: a read-audience token, an empty `sub` or an invalid JWT → `null`, with no D1 call. Commands and `readPagePolicy` refuse an expired handle, a handle of another instance, and a structurally identical unminted object as `unauthenticated`, with no D1 call. |
+| T10 | Aliases: exact and prefix; a team identity gets the redirect while the target is live; anonymous and share-cookie viewers get the unaliased outcome, never a redirect (404 `Not found`, `no-store`, no cookie for unclaimed paths, OS-4); tombstoned target. An alias with no target page redirects a team identity and never an anonymous or share-cookie viewer. `setAlias` refuses before any D1 call, as `invalid_state`: an unknown `op` or `kind`; a key or target such as `//evil.com`, `/\evil.com` or `/%5cevil.com`; a tab or other control character; `?` or `#`. The migration CHECK refuses the same rows written directly. `remove` with a primary-route kind is refused and never deletes a page route. |
 | T11 | Catalogue: anonymous lists public only; team lists all with visibility; no key or principal data. |
-| T12 | Config: every validation rule, seal key bound to read → error, no host fallback; both parsers reject a manage host equal to a read host or alias, and overlapping read/manage audiences, even when the dangerous field is not exposed by their typed result. |
-| T13 | Identity: algorithm, signature, `exp`/`nbf` skew, issuer with and without slash, audience per surface, manage requires `sub`, JWKS failure → null, header before cookie. |
+| T12 | Config: every validation rule, seal key bound to read → error, no host fallback; both parsers reject a manage host equal to a read host or alias, and overlapping read/manage audiences, even when the dangerous field is not exposed by their typed result. An unknown field in `FORGE_INSTANCE` is an error. The manage parser requires and exposes `shellPaths`. |
+| T13 | Identity: algorithm, signature, `exp`/`nbf` skew, issuer with and without slash, audience per surface, manage requires `sub`, JWKS failure → null, header before cookie. The returned identity is frozen and registered. `isVerifiedIdentity` is false for a structurally identical object, which `decideRead` treats as no team identity. |
 | T14 | Hosts and methods: unknown host 403, non-GET/HEAD 405, internal paths 404, shell and login behaviour for both login modes, `safeNext` attack vectors from both legacies. Alias-host login uses the validated alias for both login path and return URL. Tests use real `Request` / `URL` objects: when those normalize dot-segment spellings away, assert normalized confinement rather than an impossible raw-spelling denial. A fabricated Request or overridden `url` is not ingress evidence. |
 | T15 | Canonical forms: subtree slug-root forms from OS-3 now, including `/a/<slug>/index` → 308 `/a/<slug>/` and `no-store` without `Set-Cookie`; nested subtree forms per the Pages rule (§11.3 †); tree forms under the OR-1 evidence amendment, as source-derived vectors on real D1: `.html` and extensionless forms; explicit index, `index` and directory forms; the distinct `x/y/index.html` and `d.html` identities with no fallback. Each is asserted for public, private, shared and revoked-grant pages, with canonical redirects only after authorization. The missing-path counterexample is a separate vector: with no route, the `.html`, extensionless and trailing-slash forms give anonymous → login and team → `not_found`. The legacy 404 HTML for a public ref without bytes is recorded as the open F05/F10/F13 gap, not asserted; one-level shared child forms from OS-2 now; deep and asset share forms by real HTTP before F14 (†). |
 
@@ -1238,13 +906,13 @@ Header and body bytes (`cache-control`, `content-type`, `Set-Cookie`, the `Not f
 
 | Lot | Takes from F03 | Owns |
 |---|---|---|
-| F04 Publication + Revision Store | guard (`stage`, `create_page`, `publish`, `restore_page`, `unpublish`), `claimPageStatements`, `retirePageStatements`, `restorePageStatements`, `ownershipStatements`, `isReservedPath` | migration `0002_*` (sessions, uploads, idempotency receipts, publication assertions), R2 adapter (create-once, checksum, instance-prefixed keys), manifest validation (paths, kinds, ownership, reserved namespaces), seal, set-based commit (§9), restore by the §9.4 composition (no grant, visibility or role reactivation), retention and GC that keeps pinned revisions, manage-Worker publication endpoints |
-| F05 Delivery + read Worker | `resolveRead`, `RouteOutcome`, `ReadPlan`, `PinnedReadProof` | read Worker entry and wrangler configuration, serving through the Store, canonical redirects, share-cookie emission, pinned proof format and `/_revisions/` rewriting, shell bytes, headers, Range/HEAD/304 after decision, `/api/catalogue` and web catalogue, management link replacing the share bar, removal of legacy mutation endpoints from the read origin, real-HTTP re-assertion of the §11.3 tree expectations (source-derived under OR-1), and an explicit answer, resolved or accepted, for the legacy 404 HTML given to a public ref without bytes (§13 OR-1), never a silent normalization |
-| F06 Auth spike | `VerifiedIdentity`, manage verifier | Managed OAuth mode, manage audiences, `sub` stability measurement, management-origin naming (G2) |
-| F07 Remote MCP | policy commands, `resolveActor`, `readPagePolicy`, F04 publication interface | MCP tools as thin adapters, no authorization of its own |
+| F04 Publication + Revision Store | `authenticateManage`; `executeGuarded` with its `ownership` and `finalEffects` arguments (`stage`, `create_page`, `publish`, `restore_page`, `unpublish` guards); `claimPageStatements`, `retirePageStatements`, `restorePageStatements`; `validateRevisionPaths` | migration `0002_*` (sessions, uploads, idempotency receipts, publication assertions), R2 adapter (create-once, checksum, instance-prefixed keys), manifest validation (paths, kinds, ownership, reserved namespaces), seal, set-based commit (§9), restore by the §9.4 composition (no grant, visibility or role reactivation), retention and GC that keeps pinned revisions, manage-Worker publication endpoints |
+| F05 Delivery + read Worker | `resolveRead`, `RouteOutcome`, `ReadPlan` (with its opaque `pinnedProof`), `listCatalogue` | read Worker entry and wrangler configuration, serving through the Store, emitting the redirect and login outcomes F03 computes (no canonicalization or policy in Delivery), share-cookie emission, transport of the opaque pinned-read token and `/_revisions/` rewriting, shell bytes, headers, Range/HEAD/304 after decision, `/api/catalogue` and web catalogue, management link replacing the share bar, removal of legacy mutation endpoints from the read origin, real-HTTP re-assertion of the §11.3 tree expectations (source-derived under OR-1), and an explicit answer, resolved or accepted, for the legacy 404 HTML given to a public ref without bytes (§13 OR-1), never a silent normalization |
+| F06 Auth spike | `VerifiedIdentity`, `authenticateManage` | Managed OAuth mode, manage audiences, `sub` stability measurement, management-origin naming (G2) |
+| F07 Remote MCP | `authenticateManage`, policy commands, `readPagePolicy`, F04 publication interface | MCP tools as thin adapters, no authorization of its own |
 | F08 stdio | — (calls F07/F04 over the network) | local client; no business logic |
 | F09 OG and cards | `share_unfurl`, `share_card` outcomes, card candidates | crawler HTML, card serving, Shlink links |
-| F10 Import | `claimPageStatements`, `importShare`, `setAlias`, `ownershipStatements`, schema checks | pages, routes, aliases from `site/_redirects`, revisions from the corpus, exact keys for pages whose legacy visibility is `shared` (a key without `vis:shared` is reported, not imported), visibility unknown → private with report, explicit fragment/asset typing and ownership (G1b), reserved-path collisions reported, public or shared visibility records without bytes reported (OR-1 counterexample) rather than dropped or turned into pages, historical tree URL and access fidelity acceptance before F13 |
+| F10 Import | `claimPageStatements`, `importShare`, `setAlias`, `executeGuarded` ownership admission, `validateRevisionPaths`, schema checks | pages, routes, aliases from `site/_redirects`, revisions from the corpus, exact keys for pages whose legacy visibility is `shared` (a key without `vis:shared` is reported, not imported), visibility unknown → private with report, explicit fragment/asset typing and ownership (G1b), reserved-path collisions reported, public or shared visibility records without bytes reported (OR-1 counterexample) rather than dropped or turned into pages, historical tree URL and access fidelity acceptance before F13 |
 | F11 Release operations | migration, config schema, error codes | per-instance Worker configurations, secrets (verifier keys, seal key), `instance_meta` and first-admin bootstrap, staging confirmation of the guard message format, backups including the verifier key, alias-host edge rule |
 
 ## 16. Provenance and licenses
@@ -1280,7 +948,8 @@ Residual risks:
 - D1 error text in production may differ from local workerd; mitigated by pinning tests and the F11 staging check.
 - Access `sub` stability for Managed OAuth is unknown until F06.
 - The Vitest major upgrade can affect legacy tests; S1 keeps them green or reports the exact failure.
-- Resources owned across artefacts follow the mounting artefact's active revision (ADR 0002 expected debt).
+- Resources owned across artefacts follow the providing artefact's active revision (ADR 0002 expected debt).
+- The read Worker holds the share verifier keys and a read-write D1 binding (§4). Its compromise could create share verifiers or pinned-read tokens, or write the catalogue. This is accepted as ADR 0002 expected debt; no third Worker or read-only binding is assumed.
 
 ## 18. Sources
 

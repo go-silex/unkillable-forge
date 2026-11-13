@@ -147,8 +147,23 @@ CREATE TABLE routes (
          AND route_key NOT GLOB 'a/*'
          AND document_path = '/' || route_key)),
   CHECK (kind NOT IN ('redirect_exact', 'redirect_prefix') OR (
-         substr(route_key, 1, 1) = '/' AND substr(redirect_to, 1, 1) = '/'
-         AND substr(redirect_to, 1, 2) <> '//' AND route_key NOT GLOB '*..*')),
+         substr(route_key, 1, 1) = '/' AND substr(route_key, 1, 2) <> '//'
+         AND substr(redirect_to, 1, 1) = '/' AND substr(redirect_to, 1, 2) <> '//'
+         AND route_key NOT GLOB '*..*'
+         AND route_key NOT GLOB '*[^!-~]*' AND redirect_to NOT GLOB '*[^!-~]*'
+         AND instr(route_key, char(0)) = 0 AND instr(redirect_to, char(0)) = 0
+         AND instr(route_key, char(92)) = 0 AND instr(redirect_to, char(92)) = 0
+         AND route_key NOT GLOB ('*[' || char(1) || '-' || char(31) || char(127) || ']*')
+         AND redirect_to NOT GLOB ('*[' || char(1) || '-' || char(31) || char(127) || ']*')
+         AND lower(route_key) NOT GLOB '*%2f*' AND lower(redirect_to) NOT GLOB '*%2f*'
+         AND lower(route_key) NOT GLOB '*%2e*' AND lower(redirect_to) NOT GLOB '*%2e*'
+         AND lower(route_key) NOT GLOB '*%5c*' AND lower(redirect_to) NOT GLOB '*%5c*'
+         AND lower(route_key) NOT GLOB '*%0[0-9a-f]*' AND lower(redirect_to) NOT GLOB '*%0[0-9a-f]*'
+         AND lower(route_key) NOT GLOB '*%1[0-9a-f]*' AND lower(redirect_to) NOT GLOB '*%1[0-9a-f]*'
+         AND lower(route_key) NOT GLOB '*%25*' AND lower(redirect_to) NOT GLOB '*%25*'
+         AND instr(route_key, '?') = 0 AND instr(redirect_to, '?') = 0
+         AND instr(route_key, '#') = 0 AND instr(redirect_to, '#') = 0
+         AND lower(route_key) NOT GLOB '*%7f*' AND lower(redirect_to) NOT GLOB '*%7f*')),
   CHECK (kind <> 'redirect_prefix' OR route_key GLOB '*/'),
   FOREIGN KEY (page_id, artifact_id) REFERENCES pages (page_id, artifact_id),
   FOREIGN KEY (document_path, artifact_id, document_kind) REFERENCES mounts (path, artifact_id, kind)
@@ -159,6 +174,9 @@ CREATE TABLE resource_owners (
   owner_revision_id TEXT NOT NULL,
   owner_page_id     TEXT NOT NULL,
   path              TEXT NOT NULL CHECK (substr(path, 1, 1) = '/' AND length(path) <= 1024),
+  provider_artifact_id TEXT NOT NULL REFERENCES artifacts (artifact_id),
+  admission TEXT NOT NULL CHECK (admission IN ('local', 'global', 'preserved', 'forbidden')),
+  CONSTRAINT guard_forbidden CHECK (admission <> 'forbidden'),
   PRIMARY KEY (owner_revision_id, owner_page_id, path),
   FOREIGN KEY (owner_revision_id, owner_page_id) REFERENCES revision_pages (revision_id, page_id)
 );

@@ -1,32 +1,42 @@
 import { env } from "cloudflare:workers"
 import { beforeEach, describe, expect, it } from "vitest"
-import { disablePrincipal } from "../../domains/catalogue/commands"
-import { resolveActor } from "../../domains/catalogue/principals"
-import type { VerifiedIdentity } from "../../domains/catalogue/identity"
-import { actor, bootstrap, configs } from "./fixtures/catalogue"
+import { disablePrincipal, readPagePolicy, setVisibility } from "../../domains/catalogue/commands"
+import { authenticateManage } from "../../domains/catalogue/principals"
+import { actor, artifactId, bootstrap, configs, jwks, manageRequest, pageFixture, pageId } from "./fixtures/catalogue"
 
-const identity: VerifiedIdentity = { issuer: "https://team.cloudflareaccess.com", subject: "new-person", email: "person@example.test", audience: "manager", surface: "manage", expiresAt: 2_000_000_000 }
 beforeEach(async () => { await bootstrap() })
 
-describe("management principal registration", () => {
-  it("registers once without roles and does not reactivate disabled principals", async () => {
-    const deps = { db: env.DB, config: (await configs()).manage, now: () => 10 }
-    const first = await resolveActor(deps, identity)
+describe("management principal authentication", () => {
+  it("registers a signed manage identity once without roles and does not reactivate it", async () => {
+    const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
+    const first = await authenticateManage(await manageRequest("new-person"), deps)
     expect(first).toMatchObject({ status: "active", authorityEpoch: 0, roles: [] })
-    expect(await resolveActor(deps, { ...identity, email: "changed@example.test" })).toMatchObject({ principalId: first!.principalId, authorityEpoch: 0, roles: [] })
-    expect(await env.DB.prepare("SELECT count(*) AS n FROM principals WHERE issuer = ? AND subject = ?").bind(identity.issuer, identity.subject).first()).toEqual({ n: 1 })
+    expect(await authenticateManage(await manageRequest("new-person"), deps)).toMatchObject({ principalId: first!.principalId, authorityEpoch: 0, roles: [] })
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM principals WHERE subject = 'new-person'").first()).toEqual({ n: 1 })
     await disablePrincipal(deps, actor, { targetPrincipalId: first!.principalId, expectedTargetAuthorityEpoch: 0 })
-    expect(await resolveActor(deps, identity)).toMatchObject({ principalId: first!.principalId, status: "disabled", authorityEpoch: 1, roles: [] })
+    expect(await authenticateManage(await manageRequest("new-person"), deps)).toMatchObject({ principalId: first!.principalId, status: "disabled", authorityEpoch: 1, roles: [] })
   })
-  it("never registers read identities or identities without a subject", async () => {
-    const deps = { db: env.DB, config: (await configs()).manage, now: () => 10 }
-    expect(await resolveActor(deps, { ...identity, surface: "read" })).toBeNull()
-    expect(await resolveActor(deps, { ...identity, subject: null })).toBeNull()
+  it("does not upgrade a signed read-audience JWT or register an empty subject", async () => {
+    const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
+    expect(await authenticateManage(await manageRequest("new-person", "reader"), deps)).toBeNull()
+    expect(await authenticateManage(await manageRequest("", "manager"), deps)).toBeNull()
+    expect(await authenticateManage(new Request("https://manage.example.test/", { headers: { "Cf-Access-Jwt-Assertion": "invalid" } }), deps)).toBeNull()
     expect(await env.DB.prepare("SELECT count(*) AS n FROM principals WHERE subject = 'new-person'").first()).toEqual({ n: 0 })
   })
   it("refuses a different instance without registering a principal", async () => {
     const config = { ...(await configs()).manage, instanceId: "other-instance" }
-    await expect(resolveActor({ db: env.DB, config, now: () => 10 }, identity)).rejects.toMatchObject({ code: "instance_mismatch" })
+    await expect(authenticateManage(await manageRequest("new-person"), { db: env.DB, config, jwks, now: () => 10 })).rejects.toMatchObject({ code: "instance_mismatch" })
     expect(await env.DB.prepare("SELECT count(*) AS n FROM principals WHERE subject = 'new-person'").first()).toEqual({ n: 0 })
+  })
+  it("rejects expired and cloned handles before any policy access", async () => {
+    await pageFixture()
+    const config = (await configs()).manage
+    const expired = { db: env.DB, config, jwks, now: () => actor.expiresAt * 1000 }
+    await expect(readPagePolicy(expired, actor, pageId)).rejects.toMatchObject({ code: "unauthenticated" })
+    await expect(setVisibility(expired, actor, { pageId, artifactId, expectedPolicyEpoch: 0, visibility: "public" })).rejects.toMatchObject({ code: "unauthenticated" })
+    await expect(readPagePolicy({ ...expired, db: env.EMPTY_DB, now: () => 10 }, { ...actor }, pageId)).rejects.toMatchObject({ code: "unauthenticated" })
+    await expect(readPagePolicy({ ...expired, db: env.EMPTY_DB }, actor, pageId)).rejects.toMatchObject({ code: "unauthenticated" })
+    await expect(readPagePolicy({ db: env.EMPTY_DB, config: { ...config, instanceId: "other-instance" }, jwks, now: () => 10 }, actor, pageId)).rejects.toMatchObject({ code: "unauthenticated" })
+    expect(await env.DB.prepare("SELECT visibility FROM pages WHERE page_id = ?").bind(pageId).first()).toEqual({ visibility: "private" })
   })
 })

@@ -15,6 +15,12 @@ export interface AccessVerifier {
 
 export type JwksSource = (teamDomain: string) => Promise<readonly JsonWebKey[]>
 
+const verifiedIdentities = new WeakSet<object>()
+
+export function isVerifiedIdentity(value: unknown): value is VerifiedIdentity {
+  return value !== null && typeof value === "object" && verifiedIdentities.has(value)
+}
+
 const TEAM_DOMAIN = /^[a-z0-9-]+\.cloudflareaccess\.com$/
 const JWKS_TTL_MS = 60 * 60 * 1000
 const CLOCK_SKEW_SECONDS = 30
@@ -111,10 +117,12 @@ export async function authenticate(
           { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"],
         )
         if (await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, signature as BufferSource, data as BufferSource)) {
-          return {
+          const identity: VerifiedIdentity = Object.freeze({
             issuer, subject, email: typeof payload.email === "string" ? payload.email : null,
             audience, surface: verifier.surface, expiresAt: payload.exp,
-          }
+          })
+          verifiedIdentities.add(identity)
+          return identity
         }
       } catch {
         // One malformed key must not prevent trying the other matching keys.

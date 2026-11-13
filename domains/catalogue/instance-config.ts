@@ -26,6 +26,7 @@ export interface ManageInstanceConfig extends InstanceBase {
   readonly surface: "manage"
   readonly manageHost: string
   readonly manageAudiences: readonly string[]
+  readonly shellPaths: readonly string[]
   readonly shareSealKey: ShareSealKey | null
 }
 export type ConfigResult<T> =
@@ -36,6 +37,12 @@ type ObjectValue = Record<string, unknown>
 
 function object(value: unknown): value is ObjectValue {
   return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+function rejectUnknownFields(value: ObjectValue, allowed: readonly string[], name: string, errors: string[]): void {
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) errors.push(`${name} contains unknown field ${key}`)
+  }
 }
 
 function json(value: unknown, name: string, errors: string[]): unknown {
@@ -77,6 +84,7 @@ function keyBytes(value: unknown): Uint8Array<ArrayBuffer> | null {
 }
 
 async function importKey(value: unknown, kind: "verifier" | "seal", errors: string[]): Promise<ShareVerifierKey | ShareSealKey | null> {
+  if (object(value)) rejectUnknownFields(value, ["kid", "key"], `${kind} key`, errors)
   if (!object(value) || typeof value.kid !== "string" || !/^[a-z0-9]{1,16}$/.test(value.kid)) {
     errors.push(`${kind} key has an invalid kid`)
     return null
@@ -104,6 +112,11 @@ async function parse(env: Readonly<Record<string, unknown>>, surface: "read" | "
   const parsed = json(env.FORGE_INSTANCE, "FORGE_INSTANCE", errors)
   if (!object(parsed)) errors.push("FORGE_INSTANCE must be an object")
   const data = object(parsed) ? parsed : {}
+  if (object(parsed)) rejectUnknownFields(parsed, [
+    "instanceId", "canonicalHost", "aliasHosts", "accessTeamDomain",
+    "readAudiences", "login", "routeGrammars", "shareGrammars",
+    "shareCookie", "shellPaths", "manageHost", "manageAudiences",
+  ], "FORGE_INSTANCE", errors)
   const instanceId = data.instanceId
   if (typeof instanceId !== "string" || !/^[a-z][a-z0-9-]{1,39}$/.test(instanceId)) errors.push("instanceId is invalid")
   const canonicalHost = data.canonicalHost
@@ -162,7 +175,7 @@ async function parse(env: Readonly<Record<string, unknown>>, surface: "read" | "
   }
   if (errors.length) return { ok: false, errors }
   if (surface === "read") return { ok: true, config: { ...base, surface, readAudiences, login: data.login as LoginMode, shareCookie: data.shareCookie as boolean, shellPaths } }
-  return { ok: true, config: { ...base, surface, manageHost: manageHost as string, manageAudiences, shareSealKey: sealKey } }
+  return { ok: true, config: { ...base, surface, manageHost: manageHost as string, manageAudiences, shellPaths, shareSealKey: sealKey } }
 }
 
 export async function parseReadConfig(env: Readonly<Record<string, unknown>>): Promise<ConfigResult<ReadInstanceConfig>> {

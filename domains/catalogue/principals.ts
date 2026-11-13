@@ -1,5 +1,5 @@
 import type { ManageDeps } from "./commands"
-import type { VerifiedIdentity } from "./identity"
+import { authenticate, type VerifiedIdentity } from "./identity"
 import { newId } from "./ids"
 import { mapPolicyError, PolicyError } from "./guard"
 
@@ -14,11 +14,63 @@ export interface ActorView {
   }[]
 }
 
+declare const manageActorBrand: unique symbol
+export interface ManageActor extends ActorView {
+  readonly instanceId: string
+  readonly audience: string
+  readonly issuer: string
+  readonly subject: string
+  readonly expiresAt: number
+  readonly [manageActorBrand]: true
+}
+
+const manageActors = new WeakSet<object>()
+
+/** Catalogue-internal check: only unexpired handles minted here carry authority. */
+export function requireManageActor(actor: unknown, deps: ManageDeps): asserts actor is ManageActor {
+  const nowMs = deps.now()
+  if (typeof actor !== "object" || actor === null || !manageActors.has(actor) ||
+      !Number.isFinite(nowMs) || nowMs >= (actor as ManageActor).expiresAt * 1000 ||
+      (actor as ManageActor).instanceId !== deps.config.instanceId ||
+      (actor as ManageActor).issuer !== `https://${deps.config.accessTeamDomain}` ||
+      !deps.config.manageAudiences.includes((actor as ManageActor).audience)) {
+    throw new PolicyError("unauthenticated")
+  }
+}
+
+export async function authenticateManage(request: Request, deps: ManageDeps): Promise<ManageActor | null> {
+  const now = deps.now() / 1000
+  const instanceId = deps.config.instanceId
+  const teamDomain = deps.config.accessTeamDomain
+  const audiences = [...deps.config.manageAudiences]
+  const identity = await authenticate(request, {
+    teamDomain,
+    audiences,
+    surface: "manage",
+  }, deps.jwks, now)
+  if (!identity || identity.expiresAt <= now || instanceId !== deps.config.instanceId ||
+      teamDomain !== deps.config.accessTeamDomain || !deps.config.manageAudiences.includes(identity.audience)) return null
+  const view = await resolveActor(deps, identity)
+  if (!view) return null
+  const roles = Object.freeze(view.roles.map(role => Object.freeze({
+    ...role, scope: Object.freeze(role.scope),
+  })))
+  const actor = Object.freeze({ ...view, roles, instanceId, audience: identity.audience, issuer: identity.issuer, subject: identity.subject!, expiresAt: identity.expiresAt }) as ManageActor
+  manageActors.add(actor)
+  requireManageActor(actor, deps)
+  return actor
+}
+
 type PrincipalRow = { principal_id: string; status: "active" | "disabled"; authority_epoch: number }
 type RoleRow = { role_grant_id: string; role: "publisher" | "admin"; scope_kind: "installation" | "page"; scope_page_id: string | null }
 
-export async function resolveActor(deps: ManageDeps, identity: VerifiedIdentity): Promise<ActorView | null> {
+async function resolveActor(deps: ManageDeps, identity: VerifiedIdentity): Promise<ActorView | null> {
   if (identity.surface !== "manage" || !identity.subject) return null
+  if (!identity.issuer.startsWith("https://") || [...identity.issuer].length > 255 ||
+      [...identity.subject].length > 255 || (identity.email !== null && [...identity.email].length > 320) ||
+      [identity.issuer, identity.subject, identity.email].some(value => value?.includes("\0"))) {
+    throw new PolicyError("invalid_state")
+  }
   try {
     const [instance, , principal, roles] = await deps.db.batch([
       deps.db.prepare("SELECT instance_id FROM instance_meta WHERE singleton = 1 AND instance_id = ?").bind(deps.config.instanceId),

@@ -34,7 +34,10 @@ export function toOutcome(parsed: ParsedRequest, decision: ReadDecision, identit
   if (parsed.kind === "share") {
     if (parsed.grammar === "slug") return { kind: "serve", plan }
     if (parsed.route.kind !== "tree_page") return { kind: "deny", status: 404, reason: "not_found" }
-    if (parsed.browser) return { kind: "share_exchange", plan, cookie: { pageRef: parsed.route.pageRef, key: parsed.key }, location: canonicalUrl(parsed.route) }
+    if (parsed.browser) {
+      if (!config.shareCookie) return { kind: "serve", plan }
+      return { kind: "share_exchange", plan, cookie: { pageRef: parsed.route.pageRef, key: parsed.key }, location: canonicalUrl(parsed.route) }
+    }
     return { kind: "share_unfurl", plan, pageRef: parsed.route.pageRef, key: parsed.key }
   }
   if (parsed.kind === "card") return { kind: "share_card", plan }
