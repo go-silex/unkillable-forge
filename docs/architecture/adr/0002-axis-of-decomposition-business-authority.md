@@ -73,7 +73,7 @@ Until F15 removes them, `plugins/silex-forge/scripts/` and `functions/` keep 000
 A reviewer flags any of these:
 
 - An adapter that reads `role_grants`, `share_grants`, `pages.visibility`, `routes` or `artifacts.active_revision_id`, or issues a D1 write, instead of calling the owning module.
-- An adapter or lot that implements its own verifier/authority logic or invents an actor, guard row or pinned-read token instead of using Catalogue-owned factories and interfaces, or writes ownership edges outside `executeGuarded`. Wiring a Catalogue-owned verifier or a Revision Store from validated bindings is composition, not a second decider.
+- An adapter or lot that implements its own verifier/authority logic or invents an actor, guard row or pinned-read token instead of using Catalogue-owned factories and interfaces, or writes ownership edges except through `executeGuarded`'s `ownership` argument. Wiring a Catalogue-owned verifier or a Revision Store from validated bindings is composition, not a second decider.
 - A D1 batch that writes a policy or active-state table without the guard (other than the bounded operator bootstrap), a self-registration batch that grants a role or modifies an existing principal, or a second guard written for one action.
 - A refusal derived from a zero-row update, `changes()`, an `ON CONFLICT … WHERE` that silently skips, or a read followed by a separate write. Self-registration may use `ON CONFLICT (issuer, subject) DO NOTHING`, but its instance verdict comes from the same batch’s explicit instance read, never from affected-row counts.
 - An authorization input taken from KV, a cache, isolate memory, `withSession()` or a stale JWT claim beyond its own expiry.
@@ -101,7 +101,7 @@ F04 remains pending acceptance. This dated amendment clarifies technical interfa
 ## Expected debt
 
 - Policy partly lives in SQL (guard verdicts, read joins). It is reviewed as SQL; tests are the safety net.
-- The guard is a wide statement (17 parameters). Callers use one builder, never hand-written SQL.
+- The guard is a wide statement. Callers use one builder, never hand-written SQL.
 - A page read crosses Catalogue & Policy, Delivery and Revision Store: more indirection than one handler.
 - Keeping the seal key and management endpoints off the read origin means two Workers per instance (read, manage) and two deploy configurations.
 - The read Worker still holds the share verifier keys and a read-write D1 binding. A compromised read Worker could create share verifiers or pinned-read tokens, or write the catalogue. No third Worker or read-only binding is assumed.

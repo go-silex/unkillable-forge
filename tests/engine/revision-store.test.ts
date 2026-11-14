@@ -88,6 +88,44 @@ describe("Revision Store with local R2", () => {
     }
   }, 30_000)
 
+  it("rejects an observed overrun before reading an unending producer again", async () => {
+    const store = new RevisionStore(env.REVISION_BYTES, "store-overrun")
+    const rev = revision()
+    for (const data of [new Uint8Array(), bytes("declared bytes")]) {
+      const ref = resource(rev, `/overrun/${data.byteLength}`)
+      const metadata = await expected(data)
+      const abort = new AbortController()
+      let pulls = 0
+      let signalCancel!: () => void
+      const cancelled = new Promise<void>(resolve => { signalCancel = resolve })
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls++
+          if (pulls === 1) {
+            const excess = new Uint8Array(data.byteLength + 1)
+            excess.set(data)
+            controller.enqueue(excess)
+          } else {
+            abort.abort(new Error("unexpected second pull"))
+            return new Promise<void>(() => {})
+          }
+        },
+        cancel() { signalCancel(); return new Promise<void>(() => {}) },
+      }, { highWaterMark: 0 })
+      await expect(store.put(ref, metadata, body, abort.signal)).rejects.toMatchObject({ code: "integrity_error" })
+      await cancelled
+      expect(pulls).toBe(1)
+      expect(abort.signal.aborted).toBe(false)
+      expect(await store.head(ref)).toBeNull()
+      expect(await readBytes(store, ref)).toBeNull()
+      const stored = await put(store, ref, data)
+      expect(stored.sha256).toBe(metadata.sha256)
+      expect(stored.version).toBeTruthy()
+      expect(await put(store, ref, data)).toEqual(stored)
+      expect(await readBytes(store, ref)).toEqual(data)
+    }
+  }, 30_000)
+
   it("stores and reconciles a genuinely empty object", async () => {
     const store = new RevisionStore(env.REVISION_BYTES, "store-empty")
     const ref = resource(revision(), "/empty")

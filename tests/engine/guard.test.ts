@@ -168,3 +168,122 @@ describe("transactional policy guard", () => {
     expect(await env.DB.prepare("SELECT count(*) AS n FROM principals p JOIN role_grants g ON g.principal_id = p.principal_id WHERE p.status = 'active' AND g.role = 'admin' AND g.revoked_at IS NULL").first()).toEqual({ n: 1 })
   })
 })
+
+describe("revision-wide namespace guard", () => {
+  const otherArtifact = `ar_${"b".repeat(26)}`, otherRevision = `rv_${"b".repeat(26)}`
+  const otherPage = `pg_${"b".repeat(26)}`, secondPage = `pg_${"c".repeat(26)}`
+  const candidate = `rv_${"c".repeat(26)}`
+  const deps = async () => ({ db: env.DB, config: (await configs()).manage, jwks, now: () => 10 })
+  const request = (action: GuardRequest["action"], page: string, artifact: string, revision: string): GuardRequest =>
+    ({ action, pageId: page, artifactId: artifact, revisionId: revision, expectedPolicyEpoch: 0, expectedContentVersion: 0, requestDigest: digest, occurredAt: 10 })
+  async function seedOther() {
+    await pageFixture({ artifact: otherArtifact, revision: otherRevision, page: otherPage, route: { kind: "tree_page", pageRef: "other/page.html" } })
+    const d = await deps()
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?,'/other/second.html','document','second',?,1,'text/html')").bind(otherRevision, digest),
+      env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES ('/other/second.html',?,?,'document')").bind(otherArtifact, otherRevision),
+      ...claimPageStatements(d, actor, { pageId: secondPage, artifactId: otherArtifact, route: { kind: "tree_page", pageRef: "other/second.html" }, at: 1 }),
+      env.DB.prepare("INSERT INTO revision_pages (revision_id,page_id,document_path,metadata_json) VALUES (?,?,'/other/second.html','{}')").bind(otherRevision, secondPage),
+      env.DB.prepare("INSERT INTO revisions (revision_id,artifact_id,origin,manifest_sha256,manifest_object_key,sealed_at) VALUES (?,?,'published',?,'candidate',2)").bind(candidate, otherArtifact, digest),
+    ])
+  }
+  async function resource(revision: string, path: string, kind: "asset" | "document" = "asset") {
+    await env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?,?,?,?,?,1,?)").bind(revision, path, kind, path, digest, kind === "document" ? "text/html" : "application/javascript").run()
+  }
+  async function mount(path: string, artifact: string, revision: string) {
+    await resource(revision, path)
+    await env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES (?,?,?,'asset')").bind(path, artifact, revision).run()
+  }
+  it.each(["stage", "unpublish", "share"] as const)("checks the first claim after a %s guard, with atomic rollback", async action => {
+    await seedOther()
+    await mount("/public/collision.js", artifactId, revisionId)
+    await resource(candidate, "/public/collision.js")
+    const d = await deps()
+    const first = request(action, otherPage, otherArtifact, candidate)
+    const claim = request("publish", secondPage, otherArtifact, candidate)
+    await expect(executeGuarded(d, actor, [first, claim], [effect()])).rejects.toMatchObject({ code: "conflict" })
+    expect(await env.DB.prepare("SELECT visibility FROM pages WHERE page_id = ?").bind(pageId).first()).toEqual({ visibility: "private" })
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM mutation_events").first()).toEqual({ n: 0 })
+  })
+  it("checks a foreign subtree claim after an unpublish row", async () => {
+    await seedOther()
+    await resource(candidate, "/a/sample/unmounted.js")
+    await expect(executeGuarded(await deps(), actor, [request("unpublish", otherPage, otherArtifact, candidate), request("publish", secondPage, otherArtifact, candidate)], [effect()])).rejects.toMatchObject({ code: "conflict" })
+    expect(await env.DB.prepare("SELECT visibility FROM pages WHERE page_id = ?").bind(pageId).first()).toEqual({ visibility: "private" })
+  })
+  it("refuses a late reverse claim against an injected legacy orphan mount atomically", async () => {
+    await seedOther()
+    await resource(candidate, "/a/new/index.html", "document")
+    expect(await validateRevisionPaths(await deps(), { artifactId: otherArtifact, paths: ["/a/new/index.html"], resultingSubtreeSlugs: ["new"] })).toEqual([])
+    // Fault injection: a normal publisher cannot mount a resource under an unrouted reserved subtree.
+    await mount("/a/new/orphan.js", artifactId, revisionId)
+    await expect(executeGuarded(await deps(), actor, [request("unpublish", otherPage, otherArtifact, candidate), request("publish", secondPage, otherArtifact, candidate)], [effect()])).rejects.toMatchObject({ code: "conflict" })
+    expect(await env.DB.prepare("SELECT visibility FROM pages WHERE page_id = ?").bind(pageId).first()).toEqual({ visibility: "private" })
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM mutation_events").first()).toEqual({ n: 0 })
+  })
+  it.each(["restore-first", "all-drop-first"] as const)("checks a %s restore claim", async order => {
+    await seedOther()
+    await resource(candidate, "/other/restored.html", "document")
+    await env.DB.prepare("INSERT INTO revision_pages (revision_id,page_id,document_path,metadata_json) VALUES (?,?,?,'{}')").bind(candidate, otherPage, "/other/restored.html").run()
+    await env.DB.batch([...retirePageStatements(await deps(), actor, { pageId: otherPage, at: 5 })])
+    await resource(candidate, "/a/sample/unmounted.js")
+    const restore = request("restore_page", otherPage, otherArtifact, candidate)
+    const drop = request("unpublish", secondPage, otherArtifact, candidate)
+    await expect(executeGuarded(await deps(), actor, order === "restore-first" ? [restore, drop] : [drop, restore], [effect()])).rejects.toMatchObject({ code: "conflict" })
+    expect(await env.DB.prepare("SELECT visibility FROM pages WHERE page_id = ?").bind(pageId).first()).toEqual({ visibility: "private" })
+  })
+  it("admits resources beneath its own subtree and its own reverse-claim mount", async () => {
+    await seedOther()
+    await resource(revisionId, "/a/sample/own.js")
+    await executeGuarded(await deps(), actor, [request("publish", pageId, artifactId, revisionId)], [])
+    await resource(candidate, "/a/own/index.html", "document")
+    await mount("/a/own/asset.js", otherArtifact, otherRevision)
+    await executeGuarded(await deps(), actor, [request("publish", otherPage, otherArtifact, candidate)], [])
+  })
+  it("rechecks a different artefact and revision after a successful first claim", async () => {
+    await seedOther()
+    await resource(candidate, "/a/sample/unmounted.js")
+    await expect(executeGuarded(await deps(), actor, [request("publish", pageId, artifactId, revisionId), request("publish", otherPage, otherArtifact, candidate)], [effect()])).rejects.toMatchObject({ code: "conflict" })
+    expect(await env.DB.prepare("SELECT visibility FROM pages WHERE page_id = ?").bind(pageId).first()).toEqual({ visibility: "private" })
+  })
+  it("retains page verdict precedence and per-page audit", async () => {
+    await seedOther()
+    await resource(candidate, "/a/sample/unmounted.js")
+    await expect(executeGuarded(await deps(), actor, [request("publish", `pg_${"z".repeat(26)}`, otherArtifact, candidate)], [])).rejects.toMatchObject({ code: "not_found" })
+    await executeGuarded(await deps(), actor, [request("publish", otherPage, otherArtifact, otherRevision), request("publish", secondPage, otherArtifact, otherRevision)], [])
+    const events = await env.DB.prepare("SELECT action,page_id,artifact_id,revision_id,verdict FROM mutation_events ORDER BY page_id").all()
+    expect(events.results).toEqual([
+      { action: "publish", page_id: otherPage, artifact_id: otherArtifact, revision_id: otherRevision, verdict: "ok" },
+      { action: "publish", page_id: secondPage, artifact_id: otherArtifact, revision_id: otherRevision, verdict: "ok" },
+    ])
+  })
+  it.each([
+    ["/a/sample/x.css", true], ["/a/sample", false], ["/a/sample-x/y", false],
+    ["/a/sample.x/y", false], ["/a/sample0/y", false], ["/a/samplez/y", false],
+    ["/a/Sample/y", false], ["/a/sample/é", true], ["/a/sampleį/x", false],
+  ])("preserves foreign subtree prefix boundary %s", async (path, conflict) => {
+    await seedOther()
+    await resource(candidate, path)
+    const call = executeGuarded(await deps(), actor, [request("publish", otherPage, otherArtifact, candidate)], [])
+    if (conflict) await expect(call).rejects.toMatchObject({ code: "conflict" })
+    else await expect(call).resolves.toBeDefined()
+  })
+  it.each([
+    ["/a/k/index.html", "/a/k/z.png", true],
+    ["/a/k/index.html", "/a/k", false],
+    ["/a/k/index.html", "/a/k-2/x", false],
+    ["/a/k/sub/index.html", "/a/k/sub/x", false],
+    ["/a/%41/index.html", "/a/A/x", false],
+    ["/a/_/index.html", "/a/b/x", false],
+    ["/a/*/index.html", "/a/x/y", false],
+    ["/a/*/index.html", "/a/*/q", true],
+  ])("preserves reverse-claim boundary %s against %s", async (document, mounted, conflict) => {
+    await seedOther()
+    await resource(candidate, document, "document")
+    // Legacy/corrupt orphan mount; the normal writer rejects unrouted reserved paths.
+    await mount(mounted, artifactId, revisionId)
+    const call = executeGuarded(await deps(), actor, [request("publish", otherPage, otherArtifact, candidate)], [])
+    if (conflict) await expect(call).rejects.toMatchObject({ code: "conflict" })
+    else await expect(call).resolves.toBeDefined()
+  })
+})

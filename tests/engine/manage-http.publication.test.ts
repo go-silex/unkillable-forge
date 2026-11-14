@@ -270,6 +270,31 @@ describe("actual manage Worker publication", () => {
     expect(await storedBytes(store(), { artifactId: first.session.artifactId, revisionId: first.session.revisionId, kind: "resource", path })).toEqual(first.bytes)
   })
 
+  it("refuses unpublish receipt replay after the receipt administrator is revoked", async () => {
+    const first = await publish(await signed())
+    const person = await authenticatedActor("unpublish-receipt-admin")
+    const grant = await assignRole(await deps(), actor, { targetPrincipalId: person.principalId, expectedTargetAuthorityEpoch: 0, role: "admin", scope: { kind: "installation" } })
+    const originalJwt = await signed("unpublish-receipt-admin", { jti: "before-revocation" })
+    const operation = { op: "unpublish", command: { idempotencyKey: "revoked-unpublish-receipt", artifactId: first.session.artifactId, expectedContentVersion: first.result.contentVersion } }
+    const removed = await receipt(await command(originalJwt, operation))
+    expect(removed.artifactId).toBe(first.session.artifactId)
+    expect(removed.contentVersion).toBe(first.result.contentVersion + 1)
+    expect(await receipt(await command(originalJwt, operation))).toEqual(removed)
+
+    await revokeRole(await deps(), actor, { targetPrincipalId: person.principalId, expectedTargetAuthorityEpoch: 1, roleGrantId: grant.roleGrantId })
+    const artifact = () => env.DB.prepare("SELECT active_revision_id, content_version FROM artifacts WHERE artifact_id = ?").bind(first.session.artifactId).first()
+    const page = () => env.DB.prepare("SELECT tombstoned_at, policy_epoch FROM pages WHERE page_id = ?").bind(first.pageId).first()
+    const events = () => env.DB.prepare("SELECT count(*) AS n FROM publication_events").first()
+    const mutations = () => env.DB.prepare("SELECT count(*) AS n FROM mutation_events").first()
+    const before = await Promise.all([artifact(), page(), events(), mutations()])
+    const freshJwt = await signed("unpublish-receipt-admin", { jti: "after-revocation" })
+    const replay = await command(freshJwt, operation)
+    expect(replay.status).toBe(403)
+    expect(await replay.json()).toEqual({ ok: false, error: { code: "forbidden" } })
+    expect(await Promise.all([artifact(), page(), events(), mutations()])).toEqual(before)
+    expect(await storedBytes(store(), { artifactId: first.session.artifactId, revisionId: first.session.revisionId, kind: "resource", path })).toEqual(first.bytes)
+  })
+
   it.each(["not_sealed", "session_closed", "session_expired"] as const)("returns exact %s before revision I/O", async expected => {
     const jwt = await signed()
     const first = await publish(jwt)
@@ -503,6 +528,82 @@ describe("actual manage Worker publication", () => {
     await receipt(await command(jwt, { op: "commit", sessionId: session.sessionId }))
     expect(await selected()).toMatchObject({ kind: "allow", plan: { revisionId: session.revisionId } })
     expect(await storedBytes(store(), { artifactId: session.artifactId, revisionId: session.revisionId, kind: "resource", path })).toEqual(next.bytes)
+  })
+
+  it("restores a tombstoned page at the same path through HTTP without reviving its share", async () => {
+    const jwt = await signed()
+    const first = await publish(jwt)
+    const grant = await share(await deps(), actor, { pageId: first.pageId, artifactId: first.session.artifactId, expectedPolicyEpoch: 0, mode: "follow_active" })
+    const removed = await receipt(await command(jwt, { op: "unpublish", command: { idempotencyKey: "same-path-remove", artifactId: first.session.artifactId, expectedContentVersion: first.result.contentVersion } }))
+    expect(await readPagePolicy(await deps(), actor, first.pageId)).toBeNull()
+    const next = await content("restored through begin")
+    const restore: BeginCommand = {
+      idempotencyKey: "same-path-restore", artifactId: first.session.artifactId, expectedRevisionId: null, expectedContentVersion: removed.contentVersion,
+      files: [{ ...first.command.files[0], sha256: next.sha256, size: next.size }],
+      pages: [{ ...first.command.pages[0], disposition: "restore", expectedPolicyEpoch: 2 }], edges: [],
+    }
+    const session = await status(await command(jwt, { op: "begin", command: restore }))
+    await uploaded(await upload(jwt, session.sessionId, path, next.bytes), session.sessionId, path)
+    expect(await status(await command(jwt, { op: "seal", sessionId: session.sessionId }))).toMatchObject({ state: "sealed" })
+    const restored = await receipt(await command(jwt, { op: "commit", sessionId: session.sessionId }))
+    expect(restored).toMatchObject({ artifactId: first.session.artifactId, revisionId: session.revisionId, contentVersion: removed.contentVersion + 1, pages: [{ pageId: first.pageId, url: "/a/http/" }] })
+    expect(await readPagePolicy(await deps(), actor, first.pageId)).toMatchObject({ visibility: "private", policyEpoch: 3, grant: null, contentVersion: restored.contentVersion })
+    expect(await selected()).toMatchObject({ kind: "allow", plan: { revisionId: session.revisionId, resource: { path } } })
+    expect(await decideRead(env.DB, (await configs()).read, { kind: "share", route: { kind: "subtree", slug: "http" }, candidates: [path] }, { team: null, shareKey: grant.key, shareCookie: null, pinnedProof: null, nowSeconds: 1 }, null)).toEqual({ kind: "deny", reason: "not_found" })
+    expect(await storedBytes(store(), { artifactId: first.session.artifactId, revisionId: session.revisionId, kind: "resource", path })).toEqual(next.bytes)
+    expect(await storedBytes(store(), { artifactId: first.session.artifactId, revisionId: first.session.revisionId, kind: "resource", path })).toEqual(first.bytes)
+  })
+
+  it("rejects restore disposition for a live page and a page-scoped publisher", async () => {
+    const jwt = await signed()
+    const first = await publish(jwt)
+    const person = await authenticatedActor("restore-scoped-publisher")
+    await assignRole(await deps(), actor, { targetPrincipalId: person.principalId, expectedTargetAuthorityEpoch: 0, role: "publisher", scope: { kind: "page", pageId: first.pageId } })
+    const restore: BeginCommand = { ...first.command, idempotencyKey: "live-page-restore", artifactId: first.session.artifactId, expectedRevisionId: first.session.revisionId, expectedContentVersion: first.result.contentVersion, pages: [{ ...first.command.pages[0], disposition: "restore", expectedPolicyEpoch: 0 }] }
+    const scoped = await command(await signed("restore-scoped-publisher"), { op: "begin", command: restore })
+    expect(scoped.status).toBe(403)
+    expect(await scoped.json()).toEqual({ ok: false, error: { code: "forbidden" } })
+    const live = await command(jwt, { op: "begin", command: restore })
+    expect(live.status).toBe(409)
+    expect(await live.json()).toEqual({ ok: false, error: { code: "conflict" } })
+    expect(await selected()).toMatchObject({ kind: "allow", plan: { revisionId: first.session.revisionId } })
+    expect(await storedBytes(store(), { artifactId: first.session.artifactId, revisionId: first.session.revisionId, kind: "resource", path })).toEqual(first.bytes)
+  })
+
+  it("rejects a historical restore that would move a live page through HTTP", async () => {
+    const jwt = await signed()
+    const first = await publish(jwt)
+    const removed = await receipt(await command(jwt, { op: "unpublish", command: { idempotencyKey: "drift-remove", artifactId: first.session.artifactId, expectedContentVersion: first.result.contentVersion } }))
+    const movedPath = "/a/http-moved/index.html"
+    const next = await documentCommand("drift-restore", movedPath, "moved page")
+    const restore: BeginCommand = { ...next.command, artifactId: first.session.artifactId, expectedRevisionId: null, expectedContentVersion: removed.contentVersion, pages: [{ ...next.command.pages[0], pageId: first.pageId, disposition: "restore", expectedPolicyEpoch: 1 }] }
+    const session = await status(await command(jwt, { op: "begin", command: restore }))
+    await uploaded(await upload(jwt, session.sessionId, movedPath, next.bytes), session.sessionId, movedPath)
+    await status(await command(jwt, { op: "seal", sessionId: session.sessionId }))
+    const moved = await receipt(await command(jwt, { op: "commit", sessionId: session.sessionId }))
+    const policy = await readPagePolicy(await deps(), actor, first.pageId)
+    const rejected = await command(jwt, { op: "restore", command: { idempotencyKey: "drift-historical", artifactId: first.session.artifactId, revisionId: first.session.revisionId, expectedContentVersion: moved.contentVersion } })
+    expect(rejected.status).toBe(422)
+    expect(await rejected.json()).toEqual({ ok: false, error: { code: "invalid_state" } })
+    expect(await readPagePolicy(await deps(), actor, first.pageId)).toEqual(policy)
+    expect(await decideRead(env.DB, (await configs()).read, { kind: "page", route: { kind: "subtree", slug: "http-moved" }, candidates: [movedPath], fragmentPath: null }, { team: teamIdentity, shareKey: null, shareCookie: null, pinnedProof: null, nowSeconds: 1 }, null)).toMatchObject({ kind: "allow", plan: { revisionId: session.revisionId, resource: { path: movedPath } } })
+    expect(await storedBytes(store(), { artifactId: first.session.artifactId, revisionId: session.revisionId, kind: "resource", path: movedPath })).toEqual(next.bytes)
+    expect(await storedBytes(store(), { artifactId: first.session.artifactId, revisionId: first.session.revisionId, kind: "resource", path })).toEqual(first.bytes)
+  })
+
+  it("rejects restoring a tombstone after another artefact reclaims its address", async () => {
+    const jwt = await signed()
+    const first = await publish(jwt)
+    const removed = await receipt(await command(jwt, { op: "unpublish", command: { idempotencyKey: "reclaimed-remove", artifactId: first.session.artifactId, expectedContentVersion: first.result.contentVersion } }))
+    const other = await publish(jwt, "reclaimed-other", "new owner")
+    const restore: BeginCommand = { ...first.command, idempotencyKey: "reclaimed-restore", artifactId: first.session.artifactId, expectedRevisionId: null, expectedContentVersion: removed.contentVersion, pages: [{ ...first.command.pages[0], disposition: "restore", expectedPolicyEpoch: 1 }] }
+    const rejected = await command(jwt, { op: "begin", command: restore })
+    expect(rejected.status).toBe(409)
+    expect(await rejected.json()).toEqual({ ok: false, error: { code: "conflict" } })
+    expect(await readPagePolicy(await deps(), actor, first.pageId)).toBeNull()
+    expect(await selected()).toMatchObject({ kind: "allow", plan: { revisionId: other.session.revisionId } })
+    expect(await storedBytes(store(), { artifactId: other.session.artifactId, revisionId: other.session.revisionId, kind: "resource", path })).toEqual(other.bytes)
+    expect(await storedBytes(store(), { artifactId: first.session.artifactId, revisionId: first.session.revisionId, kind: "resource", path })).toEqual(first.bytes)
   })
 
   it("unpublishes and restores retained bytes without resurrecting a share", async () => {

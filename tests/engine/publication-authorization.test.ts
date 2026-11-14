@@ -62,7 +62,7 @@ describe("publication authority freshness", () => {
     expect(await activeRevision()).toMatchObject({ kind: "allow", plan: { revisionId: initial.session.revisionId } })
   })
 
-  it.each(["revoke", "epoch"] as const)("replays scoped unpublish before %s but not after authority changes", async (change) => {
+  it.each([["revoke", "forbidden"], ["epoch", "conflict"]] as const)("replays scoped unpublish before %s and then refuses with %s", async (change, expectedCode) => {
     const { publication, deps } = await setup()
     const first = await documentCommand("receipt-original", path, "private")
     const initial = await publishDocument(publication, actor, first.command, first.bytes)
@@ -75,7 +75,7 @@ describe("publication authority freshness", () => {
     if (change === "revoke") await revokeRole(deps, actor, { targetPrincipalId: person.principalId, expectedTargetAuthorityEpoch: 1, roleGrantId: grant.roleGrantId })
     else await assignRole(deps, actor, { targetPrincipalId: person.principalId, expectedTargetAuthorityEpoch: 1, role: "publisher", scope: { kind: "installation" } })
     const refreshed = await authenticatedActor("scoped-replay")
-    await expect(publication.unpublish(refreshed, command)).rejects.toMatchObject({ code: "conflict" })
+    await expect(publication.unpublish(refreshed, command)).rejects.toMatchObject({ code: expectedCode })
   })
   it("requires a new session and idempotency key after a role grant changes authority epoch", async () => {
     const { publication, deps } = await setup()

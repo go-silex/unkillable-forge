@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers"
 import { beforeEach, describe, expect, it } from "vitest"
 import { assignRole, disablePrincipal, readPagePolicy, revokeRole, revokeShare, setVisibility, share } from "../../domains/catalogue/commands"
+import { PolicyError } from "../../domains/catalogue/guard"
 import { newId } from "../../domains/catalogue/ids"
 import type { ReadInstanceConfig } from "../../domains/catalogue/instance-config"
 import { decideRead, type ReadCredentials } from "../../domains/catalogue/read"
@@ -37,6 +38,63 @@ function collection(deps: PublicationDeps) {
   return { db: deps.db, store: deps.store, now: deps.now, retainMs: deps.publication.retainMs, marginMs: deps.publication.marginMs, maxUploadTimeoutMs: deps.publication.maxUploadTimeoutMs, manageClockSkewMs: deps.publication.manageClockSkewMs, readClockSkewMs: deps.publication.readClockSkewMs }
 }
 
+function controlledGate() {
+  let arrive!: () => void, resume!: () => void
+  const reached = new Promise<void>(resolve => { arrive = resolve })
+  const resumed = new Promise<void>(resolve => { resume = resolve })
+  return { reached, arrive, resumed, resume }
+}
+
+// Forward every native operation; pause only after the collector's revision lookup
+// (its second `first`) has actually completed, immediately before its claim.
+function gateAfterRevisionLookup(db: D1Database) {
+  const gate = controlledGate()
+  let reads = 0
+  let revisionLookup: unknown
+  const wrap = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement, {
+    get(target, property) {
+      if (property === "bind") return (...values: unknown[]) => wrap(target.bind(...values))
+      const value = Reflect.get(target, property, target)
+      if (property === "first") return async (...args: unknown[]) => {
+        const result: unknown = await Reflect.apply(value, target, args)
+        if (++reads === 2) {
+          revisionLookup = result
+          gate.arrive()
+          await gate.resumed
+        }
+        return result
+      }
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  })
+  const observed = new Proxy(db, {
+    get(target, property) {
+      if (property === "prepare") return (query: string) => wrap(target.prepare(query))
+      const value = Reflect.get(target, property, target)
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  })
+  return { db: observed, gate, lookup: () => revisionLookup }
+}
+
+// The actual discard write and read finish before this pass-through reaches
+// the Store; native deletion still runs unchanged after the gate is released.
+function gateBeforeNativeDelete(store: RevisionStore) {
+  const gate = controlledGate()
+  const observed = new Proxy(store, {
+    get(target, property) {
+      if (property === "deleteRevision") return async (ref: Parameters<RevisionStore["deleteRevision"]>[0]) => {
+        gate.arrive()
+        await gate.resumed
+        return target.deleteRevision(ref)
+      }
+      const value = Reflect.get(target, property, target)
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  })
+  return { store: observed, gate }
+}
+
 describe("publication against local D1 and R2", () => {
   it("allows one of two same-base commits and retains the loser's staging bytes", async () => {
     const { publication, store, read } = await setup()
@@ -52,7 +110,8 @@ describe("publication against local D1 and R2", () => {
     await publication.seal(actor, b.sessionId)
     const results = await Promise.allSettled([publication.commit(actor, a.sessionId), publication.commit(actor, b.sessionId)])
     expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1)
-    expect(results.filter(result => result.status === "rejected")).toHaveLength(1)
+    expect(results.filter(result => result.status === "rejected")).toEqual([expect.objectContaining({ status: "rejected", reason: expect.objectContaining({ code: "conflict" }) })])
+    expect(results.find(result => result.status === "rejected")).toMatchObject({ reason: expect.any(PolicyError) })
     const winner = results[0].status === "fulfilled" ? a : b
     const loser = winner === a ? b : a
     expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: winner.revisionId } })
@@ -249,50 +308,95 @@ describe("publication against local D1 and R2", () => {
     expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: initial.receipt.revisionId, artifactId: initial.receipt.artifactId } })
     expect(await storedBytes(store, { artifactId: initial.session.artifactId, revisionId: initial.session.revisionId, kind: "resource", path })).toEqual(first.bytes)
   })
-  it("serializes restore against collection without activating missing bytes", async () => {
+  it.each(["pin", "restore"] as const)("protects a %s that wins after collection's revision lookup but before its claim", async winner => {
     const { publication, deps, store, time, read } = await setup()
-    const first = await documentCommand("race-base", path, "race bytes")
+    const first = await documentCommand(`preclaim-${winner}`, path, "retained old bytes")
     const initial = await publishDocument(publication, actor, first.command, first.bytes)
-    const removed = await publication.unpublish(actor, { idempotencyKey: "race-remove", artifactId: initial.receipt.artifactId, expectedContentVersion: initial.receipt.contentVersion })
+    const next = await update(initial.receipt, first.pageId, `preclaim-next-${winner}`, "current bytes")
+    const active = await publishDocument(publication, actor, next.command, next.bytes)
+    expect(active.receipt.contentVersion).toBe(initial.receipt.contentVersion + 1)
     time.advance(900_001)
     const ref = { artifactId: initial.session.artifactId, revisionId: initial.session.revisionId }
-    const results = await Promise.allSettled([
-      publication.restore(actor, { idempotencyKey: "race-restore", ...ref, expectedContentVersion: removed.contentVersion }),
-      collectRevision(collection(deps), ref),
-    ])
     const resource = { ...ref, kind: "resource" as const, path }
-    if (results[0].status === "fulfilled") {
-      expect(results[1].status).toBe("rejected")
-      expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: ref.revisionId } })
+    let shareKey: string | null = null
+    const observed = gateAfterRevisionLookup(env.DB)
+    const pending = collectRevision({ ...collection(deps), db: observed.db }, ref)
+      .then(value => ({ ok: true as const, value }), error => ({ ok: false as const, error }))
+    let outcome!: Awaited<typeof pending>
+    let failure: unknown
+    try {
+      await Promise.race([observed.gate.reached, pending.then(() => { throw new Error("collector completed before the revision-lookup gate") })])
+      expect(observed.lookup()).toEqual({ artifact_id: ref.artifactId })
+      expect(await env.DB.prepare("SELECT discarded_at FROM revision_discards WHERE revision_id = ?").bind(ref.revisionId).first()).toBeNull()
+      expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: active.session.revisionId } })
+      expect(await readPagePolicy(deps, actor, first.pageId)).toMatchObject({ contentVersion: active.receipt.contentVersion })
       expect(await storedBytes(store, resource)).toEqual(first.bytes)
-    } else {
-      expect(results[1]).toMatchObject({ status: "fulfilled", value: "purged" })
-      expect(await storedBytes(store, resource)).toBeNull()
-      expect(await visible(read)).not.toMatchObject({ kind: "allow" })
+      if (winner === "pin") {
+        const grant = await share(deps, actor, { artifactId: ref.artifactId, pageId: first.pageId, expectedPolicyEpoch: 0, mode: "pinned", revisionId: ref.revisionId })
+        expect(grant.key).toEqual(expect.any(String))
+        shareKey = grant.key
+        expect(await decideRead(env.DB, read, { kind: "share", route, candidates: [path] }, { ...anonymous, shareKey: grant.key }, null)).toMatchObject({ kind: "allow", plan: { revisionId: ref.revisionId } })
+      } else {
+        const restored = await publication.restore(actor, { idempotencyKey: "preclaim-restore-operation", ...ref, expectedContentVersion: active.receipt.contentVersion })
+        expect(restored).toMatchObject({ revisionId: ref.revisionId, contentVersion: active.receipt.contentVersion + 1 })
+        expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: ref.revisionId } })
+      }
+    } catch (error) {
+      failure = error
+    } finally {
+      observed.gate.resume()
+      outcome = await pending
+    }
+    if (failure !== undefined) throw new AggregateError([failure, outcome.ok ? new Error(`collector resolved: ${outcome.value}`) : outcome.error], "Pre-claim race failed; collector outcome attached")
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error(`Expected collector refusal, got ${outcome.value}`)
+    expect(outcome.error).toBeInstanceOf(Error)
+    expect(outcome.error.message).toMatch(winner === "pin" ? /discard_revision_pinned/ : /discard_revision_active/)
+    expect(await env.DB.prepare("SELECT discarded_at FROM revision_discards WHERE revision_id = ?").bind(ref.revisionId).first()).toBeNull()
+    expect(await storedBytes(store, resource)).toEqual(first.bytes)
+    expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: winner === "pin" ? active.session.revisionId : ref.revisionId } })
+    if (winner === "pin") {
+      expect(await decideRead(env.DB, read, { kind: "share", route, candidates: [path] }, { ...anonymous, shareKey }, null)).toMatchObject({ kind: "allow", plan: { revisionId: ref.revisionId } })
     }
   })
-  it("serializes a late pinned grant against collection without granting deleted bytes", async () => {
+
+  it.each(["pin", "restore"] as const)("refuses a late %s after the discard claim and before native deletion", async loser => {
     const { publication, deps, store, time, read } = await setup()
-    const first = await documentCommand("pin-race-base", path, "pin race bytes")
+    const first = await documentCommand(`postclaim-${loser}`, path, "retained old bytes")
     const initial = await publishDocument(publication, actor, first.command, first.bytes)
-    const next = await update(initial.receipt, first.pageId, "pin-race-next", "new active bytes")
+    const next = await update(initial.receipt, first.pageId, `postclaim-next-${loser}`, "current bytes")
     const active = await publishDocument(publication, actor, next.command, next.bytes)
     time.advance(900_001)
     const ref = { artifactId: initial.session.artifactId, revisionId: initial.session.revisionId }
-    const [pin, purge] = await Promise.allSettled([
-      share(deps, actor, { artifactId: ref.artifactId, pageId: first.pageId, expectedPolicyEpoch: 0, mode: "pinned", revisionId: ref.revisionId }),
-      collectRevision(collection(deps), ref),
-    ])
     const resource = { ...ref, kind: "resource" as const, path }
-    if (pin.status === "fulfilled") {
-      expect(purge.status).toBe("rejected")
+    const observed = gateBeforeNativeDelete(store)
+    const pending = collectRevision({ ...collection(deps), store: observed.store }, ref)
+      .then(value => ({ ok: true as const, value }), error => ({ ok: false as const, error }))
+    let outcome!: Awaited<typeof pending>
+    let failure: unknown
+    try {
+      await Promise.race([observed.gate.reached, pending.then(() => { throw new Error("collector completed before the deletion gate") })])
+      expect(await env.DB.prepare("SELECT discarded_at, purged_at FROM revision_discards WHERE revision_id = ?").bind(ref.revisionId).first()).toEqual({ discarded_at: time.now(), purged_at: null })
       expect(await storedBytes(store, resource)).toEqual(first.bytes)
-      expect(await decideRead(env.DB, read, { kind: "share", route, candidates: [path] }, { ...anonymous, shareKey: pin.value.key }, null)).toMatchObject({ kind: "allow", plan: { revisionId: ref.revisionId } })
-    } else {
-      expect(purge).toMatchObject({ status: "fulfilled", value: "purged" })
-      expect(await storedBytes(store, resource)).toBeNull()
-      expect(await readPagePolicy(deps, actor, first.pageId)).toMatchObject({ visibility: "private", grant: null })
+      expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: active.session.revisionId } })
+      const attempt = loser === "pin"
+        ? share(deps, actor, { artifactId: ref.artifactId, pageId: first.pageId, expectedPolicyEpoch: 0, mode: "pinned", revisionId: ref.revisionId })
+        : publication.restore(actor, { idempotencyKey: "postclaim-restore", ...ref, expectedContentVersion: active.receipt.contentVersion })
+      await expect(attempt).rejects.toBeInstanceOf(PolicyError)
+      await expect(attempt).rejects.toMatchObject({ code: loser === "pin" ? "invalid_state" : "not_found" })
+      expect(await readPagePolicy(deps, actor, first.pageId)).toMatchObject({ visibility: "private", grant: null, contentVersion: active.receipt.contentVersion })
+      expect(await storedBytes(store, resource)).toEqual(first.bytes)
+    } catch (error) {
+      failure = error
+    } finally {
+      observed.gate.resume()
+      outcome = await pending
     }
+    if (failure !== undefined) throw new AggregateError([failure, outcome.ok ? new Error(`collector resolved: ${outcome.value}`) : outcome.error], "Post-claim race failed; collector outcome attached")
+    expect(outcome).toEqual({ ok: true, value: "purged" })
+    expect(await storedBytes(store, resource)).toBeNull()
     expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: active.session.revisionId } })
+    expect(await storedBytes(store, { artifactId: active.session.artifactId, revisionId: active.session.revisionId, kind: "resource", path })).toEqual(next.bytes)
+    expect(await readPagePolicy(deps, actor, first.pageId)).toMatchObject({ visibility: "private", grant: null, contentVersion: active.receipt.contentVersion })
   })
 })

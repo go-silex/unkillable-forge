@@ -321,7 +321,6 @@ export async function readPagePolicy(deps: ManageDeps, actor: ManageActor, pageI
 /** Authorize receipt reads on the primary, including pages retired by the original command. */
 export async function assertReplayAuthority(deps: ManageDeps, actor: ManageActor, input: { readonly artifactId: string; readonly pageIds: readonly string[]; readonly expectedActorAuthorityEpoch: number }): Promise<void> {
   requireManageActor(actor, deps)
-  if (input.expectedActorAuthorityEpoch !== actor.authorityEpoch) throw new PolicyError('conflict')
   try {
     const pages = JSON.stringify(input.pageIds)
     const results = await deps.db.batch([
@@ -331,6 +330,7 @@ export async function assertReplayAuthority(deps: ManageDeps, actor: ManageActor
           (SELECT 1 FROM pages WHERE page_id = j.value AND artifact_id = ?1)) AS pages_exist`).bind(input.artifactId, pages),
     ])
     assertPolicyPrincipal(results, deps, actor, input.pageIds.length)
+    if (input.expectedActorAuthorityEpoch !== actor.authorityEpoch) throw new PolicyError('conflict')
     const target = results[2].results[0] as Row | undefined
     if (!target?.pages_exist) throw new PolicyError('not_found')
   } catch (error) { if (error instanceof PolicyError) throw error; throw new PolicyError('unavailable') }

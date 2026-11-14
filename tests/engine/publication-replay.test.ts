@@ -107,7 +107,7 @@ describe("overlapping publication retries", () => {
     expect(one).toMatchObject({ revisionId: initial.session.revisionId, contentVersion: removed.contentVersion + 1 })
     await revokeRole(deps, actor, { targetPrincipalId: person.principalId, expectedTargetAuthorityEpoch: 1, roleGrantId: role.roleGrantId })
     const refreshed = await authenticatedActor("restore-replay-publisher")
-    await expect(publication.restore(refreshed, command)).rejects.toMatchObject({ code: "conflict" })
+    await expect(publication.restore(refreshed, command)).rejects.toMatchObject({ code: "forbidden" })
     expect(await selected(read)).toMatchObject({ kind: "allow", plan: { revisionId: initial.session.revisionId } })
     expect(await storedBytes(store, { artifactId: initial.session.artifactId, revisionId: initial.session.revisionId, kind: "resource", path })).toEqual(input.bytes)
   })

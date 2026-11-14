@@ -93,8 +93,19 @@ function guards(s: Session, pages: PageRow[], now: number): GuardRequest[] {
   if (!existing.length || pages.some(p => p.disposition === 'new')) result.push({ action: 'stage', artifactId: s.artifact_id, requestDigest: s.request_digest, occurredAt: now })
   return result
 }
-function assertion(deps: PublicationDeps, s: Session, now: number, allowSealed = false): D1PreparedStatement {
-  return deps.db.prepare(`INSERT INTO publication_assertions (assertion_id, verdict)
+function transferGuard(s: Session, pages: PageRow[], now: number): GuardRequest {
+  let selected: PageRow | undefined
+  let requiresGlobal = false
+  for (const page of pages) {
+    if (page.disposition === 'new' || page.disposition === 'restore') requiresGlobal = true
+    if (page.disposition !== 'new' && (!selected || page.page_id < selected.page_id)) selected = page
+  }
+  if (requiresGlobal || !selected) return { action: 'stage', artifactId: s.artifact_id, requestDigest: s.request_digest, occurredAt: now }
+  return { action: 'stage', pageId: selected.page_id, artifactId: s.artifact_id, expectedPolicyEpoch: selected.expected_policy_epoch!, revisionId: s.revision_id, requestDigest: s.request_digest, occurredAt: now }
+}
+function assertion(deps: PublicationDeps, s: Session, now: number, allowSealed = false): D1PreparedStatement[] {
+  const assertionId = newId('pe')
+  return [deps.db.prepare(`INSERT INTO publication_assertions (assertion_id, verdict)
     SELECT ?7, CASE
     WHEN NOT EXISTS (SELECT 1 FROM publication_sessions WHERE session_id = ?1 AND instance_id = ?8 AND actor_principal_id = ?3) THEN 'not_found'
     WHEN EXISTS (SELECT 1 FROM publication_sessions WHERE session_id = ?1 AND closed_at IS NOT NULL) THEN 'closed'
@@ -103,11 +114,16 @@ function assertion(deps: PublicationDeps, s: Session, now: number, allowSealed =
       AND (?6 = 1 OR NOT EXISTS (SELECT 1 FROM publication_events WHERE session_id = ?1 AND action = 'seal'))
       AND (s.base_revision_id IS NULL OR NOT EXISTS (SELECT 1 FROM revision_discards WHERE revision_id = s.base_revision_id))
       AND (s.artifact_is_new = 1 OR EXISTS (SELECT 1 FROM artifacts a WHERE a.artifact_id = ?5 AND a.content_version = s.base_content_version AND a.active_revision_id IS s.base_revision_id))) THEN 'conflict'
-    ELSE 'ok' END`).bind(s.session_id, now, s.actor_principal_id, null, s.artifact_id, allowSealed ? 1 : 0, newId('pe'), s.instance_id)
+    ELSE 'ok' END`).bind(s.session_id, now, s.actor_principal_id, null, s.artifact_id, allowSealed ? 1 : 0, assertionId, s.instance_id),
+    deps.db.prepare('DELETE FROM publication_assertions WHERE assertion_id = ?').bind(assertionId)]
 }
 async function guarded(deps: PublicationDeps, actor: ManageActor, s: Session, pages: PageRow[], effects: D1PreparedStatement[], allowSealed = false, ownership?: { revisionId: string; edges: OwnershipEdge[] }): Promise<void> {
   const now = clock(deps)
-  await executeGuarded(deps, actor, guards(s, pages, now), [assertion(deps, s, now, allowSealed), ...effects], ownership)
+  await executeGuarded(deps, actor, guards(s, pages, now), [...assertion(deps, s, now, allowSealed), ...effects], ownership)
+}
+async function transferGuarded(deps: PublicationDeps, actor: ManageActor, s: Session, pages: PageRow[], effects: D1PreparedStatement[]): Promise<void> {
+  const now = clock(deps)
+  await executeGuarded(deps, actor, [transferGuard(s, pages, now)], [...assertion(deps, s, now), ...effects])
 }
 export async function status(deps: PublicationDeps, actor: ManageActor, sessionId: string): Promise<PublicationStatus> {
   const s = await load(deps, actor, sessionId), r = await rows(deps, s)
@@ -152,21 +168,26 @@ export async function begin(deps: PublicationDeps, actor: ManageActor, command: 
     const a = preflight[0].results[0] as {active_revision_id:string|null;content_version:number} | undefined
     if (!a || a.active_revision_id !== command.expectedRevisionId || a.content_version !== command.expectedContentVersion) throw new PolicyError('conflict')
     const pagesById = new Map(command.pages.map(p => [p.pageId,p]))
-    for (const p of livePagesFrom(preflight[1])) {
+    const livePages = livePagesFrom(preflight[1])
+    const liveIds = new Set(livePages.map(p => p.pageId))
+    if (command.pages.some(p => p.disposition === 'keep' && !liveIds.has(p.pageId))) throw new PolicyError('not_found')
+    for (const p of livePages) {
       const requested = pagesById.get(p.pageId)
       if (!requested || !['keep','drop'].includes(requested.disposition) || requested.expectedPolicyEpoch !== p.policyEpoch || (requested.disposition === 'keep' && requested.documentPath !== p.documentPath)) throw new PolicyError('conflict')
     }
   }
   if (preflight.slice(2).some(result => result.results.length > 0)) throw new PolicyError('conflict')
   const db = deps.db
+  const beginAssertionId = newId('pe')
   const effects: D1PreparedStatement[] = [
-    db.prepare(`INSERT INTO publication_assertions (assertion_id, verdict) SELECT ?, CASE WHEN EXISTS (SELECT 1 FROM publication_events WHERE instance_id = ? AND actor_principal_id = ? AND idempotency_key = ?) THEN 'conflict' ELSE 'ok' END`).bind(newId('pe'), s.instance_id, actor.principalId, command.idempotencyKey),
+    db.prepare(`INSERT INTO publication_assertions (assertion_id, verdict) SELECT ?, CASE WHEN EXISTS (SELECT 1 FROM publication_events WHERE instance_id = ? AND actor_principal_id = ? AND idempotency_key = ?) THEN 'conflict' ELSE 'ok' END`).bind(beginAssertionId, s.instance_id, actor.principalId, command.idempotencyKey),
+    db.prepare('DELETE FROM publication_assertions WHERE assertion_id = ?').bind(beginAssertionId),
     db.prepare('INSERT INTO publication_sessions (session_id,instance_id,actor_principal_id,actor_authority_epoch,idempotency_key,request_digest,artifact_id,artifact_is_new,revision_id,base_revision_id,base_content_version,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(sessionId, s.instance_id, actor.principalId, actor.authorityEpoch, command.idempotencyKey, digest, artifactId, s.artifact_is_new, revisionId, s.base_revision_id, s.base_content_version, now, s.expires_at),
   ]
   for (const chunk of chunks(command.files)) effects.push(db.prepare(`INSERT INTO publication_files (session_id,path,kind,sha256,size,content_type,source) SELECT ?1,json_extract(value,'$.path'),json_extract(value,'$.kind'),json_extract(value,'$.sha256'),json_extract(value,'$.size'),json_extract(value,'$.contentType'),json_extract(value,'$.source') FROM json_each(?2)`).bind(sessionId,chunk))
   for (const chunk of chunks(pageRows)) effects.push(db.prepare(`INSERT INTO publication_pages (session_id,page_id,disposition,document_path,metadata_json,expected_policy_epoch) SELECT ?1,json_extract(value,'$.page_id'),json_extract(value,'$.disposition'),json_extract(value,'$.document_path'),json_extract(value,'$.metadata_json'),json_extract(value,'$.expected_policy_epoch') FROM json_each(?2)`).bind(sessionId,chunk))
   for (const chunk of chunks(command.edges.map(e => ({...e,providerArtifactId:e.providerArtifactId ?? artifactId})))) effects.push(db.prepare(`INSERT INTO publication_edges (session_id,owner_page_id,path,provider_artifact_id) SELECT ?1,json_extract(value,'$.ownerPageId'),json_extract(value,'$.path'),json_extract(value,'$.providerArtifactId') FROM json_each(?2)`).bind(sessionId,chunk))
-  effects.push(assertion(deps,s,now))
+  effects.push(...assertion(deps,s,now))
   try {
     await executeGuarded(deps,actor,guards(s,pageRows,now),effects)
   } catch (error) {
@@ -180,7 +201,8 @@ export async function begin(deps: PublicationDeps, actor: ManageActor, command: 
 async function transfer(deps: PublicationDeps, actor: ManageActor, sessionId: string, path: string, source: 'client'|'base', body?: ReadableStream<Uint8Array>): Promise<PublicationUploadStatus> {
   requireManageActor(actor, deps)
   const deadline = performance.now() + deps.publication.maxUploadTimeoutMs
-  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), deps.publication.maxUploadTimeoutMs)
+  const timeout = new PolicyError('unavailable','publication_upload_timeout')
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(timeout), deps.publication.maxUploadTimeoutMs)
   try {
     const s = await load(deps,actor,sessionId)
     const [fileResult, pageResult, eventResult, sessionResult] = await deps.db.batch([
@@ -203,8 +225,8 @@ async function transfer(deps: PublicationDeps, actor: ManageActor, sessionId: st
     if (!f || f.source !== source) throw new PolicyError('not_found')
     if (f.stored_at !== null && f.object_key !== null && f.object_version !== null) return {sessionId,path,stored:true,state}
     if (state !== 'open') throw new PolicyError('conflict')
-    await guarded(deps,actor,s,pages,[])
-    if (controller.signal.aborted || performance.now() >= deadline) throw new PolicyError('unavailable','publication_upload_timeout')
+    await transferGuarded(deps,actor,s,pages,[])
+    if (controller.signal.aborted || performance.now() >= deadline) throw timeout
     if (source === 'base') {
       if (!s.base_revision_id) fail()
       const pending = deps.store.get({ artifactId:s.artifact_id, revisionId:s.base_revision_id!, kind:'resource', path })
@@ -213,18 +235,18 @@ async function transfer(deps: PublicationDeps, actor: ManageActor, sessionId: st
           if (controller.signal.aborted && value && 'body' in value && value.body) void value.body.cancel().catch(() => {})
           return value
         }),
-        new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(new PolicyError('unavailable','publication_upload_timeout')), { once:true })),
+        new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(timeout), { once:true })),
       ])
       if (!obj || !('body' in obj) || !obj.body) throw new PolicyError('not_found')
       body = obj.body
     }
     if (!body) fail()
-    if (controller.signal.aborted || performance.now() >= deadline) { void body!.cancel().catch(() => {}); throw new PolicyError('unavailable','publication_upload_timeout') }
+    if (controller.signal.aborted || performance.now() >= deadline) { void body!.cancel().catch(() => {}); throw timeout }
     const stored = await deps.store.put({ artifactId:s.artifact_id, revisionId:s.revision_id, kind:'resource', path }, { size:f.size, sha256:f.sha256 }, body!, controller.signal)
-    await guarded(deps,actor,s,pages,[deps.db.prepare('UPDATE publication_files SET object_key = ?, object_version = ?, stored_at = ? WHERE session_id = ? AND path = ?').bind(stored.key,stored.version,clock(deps),sessionId,path)])
+    await transferGuarded(deps,actor,s,pages,[deps.db.prepare('UPDATE publication_files SET object_key = ?, object_version = ?, stored_at = ? WHERE session_id = ? AND path = ?').bind(stored.key,stored.version,clock(deps),sessionId,path)])
     return {sessionId,path,stored:true,state:'open'}
   } catch (error) {
-    if (controller.signal.aborted && !(error instanceof StoreError && error.code === 'integrity_error')) throw new PolicyError('unavailable','publication_upload_timeout')
+    if (error === timeout || (error instanceof StoreError && error.cause === timeout)) throw timeout
     throw error
   } finally { clearTimeout(timer) }
 }
@@ -233,7 +255,8 @@ export function materialize(deps: PublicationDeps, actor: ManageActor, sessionId
 export async function seal(deps: PublicationDeps, actor: ManageActor, sessionId: string): Promise<PublicationStatus> {
   requireManageActor(actor, deps)
   const deadline = performance.now() + deps.publication.maxUploadTimeoutMs
-  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), deps.publication.maxUploadTimeoutMs)
+  const timeout = new PolicyError('unavailable','publication_upload_timeout')
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(timeout), deps.publication.maxUploadTimeoutMs)
   try {
   const s = await load(deps,actor,sessionId), r = await rows(deps,s)
   const existing = await deps.db.prepare("SELECT 1 AS found FROM publication_events WHERE session_id = ? AND action = 'seal'").bind(sessionId).first()
@@ -246,7 +269,7 @@ export async function seal(deps: PublicationDeps, actor: ManageActor, sessionId:
   if (r.files.some(f => f.stored_at === null || f.object_key === null || f.object_version === null)) throw new PolicyError('invalid_state','incomplete')
   const manifest = canonical({ files:r.files.map(f => ({path:f.path,kind:f.kind,sha256:f.sha256,size:f.size,contentType:f.content_type})), pages:r.pages.map(p => ({pageId:p.page_id,disposition:p.disposition,documentPath:p.document_path,metadata:p.metadata_json === null ? null : JSON.parse(p.metadata_json),expectedPolicyEpoch:p.expected_policy_epoch})), edges:r.edges.map(e => ({ownerPageId:e.owner_page_id,path:e.path,providerArtifactId:e.provider_artifact_id})) })
   const bytes = new TextEncoder().encode(manifest), digest = await hash(manifest)
-  if (controller.signal.aborted || performance.now() >= deadline) throw new PolicyError('unavailable','publication_upload_timeout')
+  if (controller.signal.aborted || performance.now() >= deadline) throw timeout
   const stored = await deps.store.put({artifactId:s.artifact_id,revisionId:s.revision_id,kind:'manifest'},{size:bytes.length,sha256:digest},new Blob([bytes]).stream(),controller.signal)
   const db = deps.db, now = clock(deps), effects: D1PreparedStatement[] = []
   if (s.artifact_is_new) effects.push(db.prepare("INSERT INTO artifacts (artifact_id,origin,created_at,created_by) VALUES (?,'published',?,?)").bind(s.artifact_id,now,actor.principalId))
@@ -258,12 +281,14 @@ export async function seal(deps: PublicationDeps, actor: ManageActor, sessionId:
   await guarded(deps,actor,s,r.pages,effects,false,{revisionId:s.revision_id,edges})
   return status(deps,actor,sessionId)
   } catch (error) {
-    if (controller.signal.aborted && !(error instanceof StoreError && error.code === 'integrity_error')) throw new PolicyError('unavailable','publication_upload_timeout')
-    const winner = await deps.db.prepare("SELECT 1 FROM publication_events WHERE session_id = ? AND action = 'seal'").bind(sessionId).first()
-    if (winner) {
-      const replay = await status(deps,actor,sessionId)
-      if (replay.state !== 'closed') return replay
+    if (error === timeout || (error instanceof StoreError && error.cause === timeout) || (error instanceof PolicyError && error.code === 'conflict')) {
+      const winner = await deps.db.prepare("SELECT 1 FROM publication_events WHERE session_id = ? AND action = 'seal'").bind(sessionId).first()
+      if (winner) {
+        const replay = await status(deps,actor,sessionId)
+        if (replay.state !== 'closed') return replay
+      }
     }
+    if (error === timeout || (error instanceof StoreError && error.cause === timeout)) throw timeout
     throw error
   } finally { clearTimeout(timer) }
 }

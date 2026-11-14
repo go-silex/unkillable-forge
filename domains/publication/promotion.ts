@@ -149,24 +149,29 @@ async function promote(deps: PublicationDeps, actor: ManageActor, command: Promo
   if (prior) return replay(deps, actor, prior, action, requestDigest, command.artifactId)
   try {
   const liveResult = await livePagesStatement(db, command.artifactId).all()
-  const target = revisionId === null ? [] : await all<ExistingPage>(db.prepare('SELECT p.page_id,rp.document_path,p.policy_epoch,p.tombstoned_at FROM revision_pages rp JOIN pages p ON p.page_id=rp.page_id WHERE rp.revision_id=? AND p.artifact_id=? ORDER BY p.page_id').bind(revisionId, command.artifactId))
+  const target = revisionId === null ? [] : await all<{ page_id: string; document_path: string }>(db.prepare('SELECT rp.page_id,rp.document_path FROM revision_pages rp JOIN revisions r ON r.revision_id=rp.revision_id WHERE rp.revision_id=? AND r.artifact_id=? ORDER BY rp.page_id').bind(revisionId, command.artifactId))
   const liveIds = (liveResult.results as { page_id: string }[]).map(p => p.page_id)
+  const liveIdSet = new Set(liveIds)
   const pageIds = [...new Set([...liveIds, ...target.map(p => p.page_id)])]
-  await assertPrepareAuthority(deps, actor, { artifactId: command.artifactId, pageIds, requireGlobal: pageIds.length === 0 || target.some(p => p.tombstoned_at !== null) })
+  await assertPrepareAuthority(deps, actor, { artifactId: command.artifactId, pageIds, requireGlobal: pageIds.length === 0 || target.some(p => !liveIdSet.has(p.page_id)) })
   const current: ExistingPage[] = livePagesFrom(liveResult).map(p => ({ page_id: p.pageId, document_path: p.documentPath, policy_epoch: p.policyEpoch, tombstoned_at: null }))
   if (revisionId !== null && target.length === 0) throw new PolicyError('invalid_state', 'revision_without_page')
+  const liveById = new Map(current.map(p => [p.page_id, p]))
+  if (target.some(p => liveById.has(p.page_id) && liveById.get(p.page_id)!.document_path !== p.document_path)) {
+    throw new PolicyError('invalid_state', 'restore_path_changed')
+  }
   if (revisionId !== null) await verifyRevision(deps, command.artifactId, revisionId)
   const targetIds = new Set(target.map(p => p.page_id))
   const dropped = current.filter(p => !targetIds.has(p.page_id))
   const result = receipt(command.artifactId, revisionId, command.expectedContentVersion + 1, target)
-  const guards: GuardRequest[] = [...target.map(p => ({ action: p.tombstoned_at === null ? 'publish' as const : 'restore_page' as const, pageId: p.page_id, artifactId: command.artifactId, revisionId: revisionId!, expectedPolicyEpoch: p.policy_epoch, expectedContentVersion: command.expectedContentVersion, requestDigest, occurredAt: at })), ...dropped.map(p => ({ action: 'unpublish' as const, pageId: p.page_id, artifactId: command.artifactId, revisionId: revisionId ?? undefined, expectedPolicyEpoch: p.policy_epoch, expectedContentVersion: command.expectedContentVersion, requestDigest, occurredAt: at }))]
+  const guards: GuardRequest[] = [...target.map(p => ({ action: liveById.has(p.page_id) ? 'publish' as const : 'restore_page' as const, pageId: p.page_id, artifactId: command.artifactId, revisionId: revisionId!, expectedPolicyEpoch: liveById.get(p.page_id)?.policy_epoch, expectedContentVersion: command.expectedContentVersion, requestDigest, occurredAt: at })), ...dropped.map(p => ({ action: 'unpublish' as const, pageId: p.page_id, artifactId: command.artifactId, revisionId: revisionId ?? undefined, expectedPolicyEpoch: p.policy_epoch, expectedContentVersion: command.expectedContentVersion, requestDigest, occurredAt: at }))]
   if (!guards.length) throw new PolicyError('invalid_state')
   const effects: D1PreparedStatement[] = [eventStatement(deps, actor, { action, sessionId: null, key: command.idempotencyKey, artifactId: command.artifactId, revisionId, digest: requestDigest, at, result, pageIds: guards.map(g => g.pageId!), expectedVersion: command.expectedContentVersion })]
   for (const p of dropped) effects.push(...retirePageStatements(deps, actor, { pageId: p.page_id, at }))
   if (revisionId === null) effects.push(db.prepare('DELETE FROM mounts WHERE artifact_id=?').bind(command.artifactId))
   else {
     effects.push(...mountStatements(deps, command.artifactId, revisionId))
-    for (const p of target.filter(p => p.tombstoned_at !== null)) effects.push(...restorePageStatements(db, { pageId: p.page_id, revisionId, at }))
+    for (const p of target.filter(p => !liveById.has(p.page_id))) effects.push(...restorePageStatements(db, { pageId: p.page_id, revisionId, at }))
   }
     await executeGuarded(deps, actor, guards, effects, undefined, [activation(deps, command.artifactId, revisionId)])
     return result

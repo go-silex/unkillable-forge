@@ -25,8 +25,8 @@ export interface ListedRevisionObject {
 export type StoreErrorCode = 'invalid_input' | 'conflict' | 'integrity_error' | 'unavailable'
 
 export class StoreError extends Error {
-  constructor(readonly code: StoreErrorCode) {
-    super(code)
+  constructor(readonly code: StoreErrorCode, options?: ErrorOptions) {
+    super(code, options)
     this.name = 'StoreError'
   }
 }
@@ -95,9 +95,9 @@ export class RevisionStore {
     }
     try {
       const key = await objectKey(this.instanceId, ref)
-      if (signal?.aborted) throw new StoreError('unavailable')
+      if (signal?.aborted) throw new StoreError('unavailable', { cause: signal.reason })
       const cancelled = new Promise<never>((_, reject) => {
-        abort = () => reject(new StoreError('unavailable'))
+        abort = () => reject(new StoreError('unavailable', { cause: signal?.reason }))
         signal?.addEventListener('abort', abort, { once: true })
         if (signal?.aborted) abort()
       })
@@ -119,23 +119,22 @@ export class RevisionStore {
       const destination = output
       const pump = async () => {
         let size = 0
-        let exceeded = false
         let last = 0
         for (;;) {
           const chunk = await source.read()
           if (chunk.done) break
           if (!(chunk.value instanceof Uint8Array)) throw new StoreError('unavailable')
+          if (chunk.value.byteLength > expected.size - size) throw new StoreError('integrity_error')
           await hashing.write(chunk.value)
           const writable = Math.max(0, Math.min(chunk.value.byteLength, expected.size - 1 - size))
           if (writable) await destination.write(chunk.value.subarray(0, writable))
           const lastIndex = expected.size - 1 - size
           if (lastIndex >= 0 && lastIndex < chunk.value.byteLength) last = chunk.value[lastIndex]
-          exceeded ||= chunk.value.byteLength > expected.size - size
-          size = Math.min(Number.MAX_SAFE_INTEGER, size + chunk.value.byteLength)
+          size += chunk.value.byteLength
         }
         await hashing.close()
         const actual = hex(await digestResult)
-        if (exceeded || size !== expected.size || actual !== expected.sha256) throw new StoreError('integrity_error')
+        if (size !== expected.size || actual !== expected.sha256) throw new StoreError('integrity_error')
         // Holding the last byte prevents R2 from committing before clean EOF
         // and our integrity verdict, without buffering the object.
         if (expected.size) await destination.write(new Uint8Array([last]))
@@ -149,16 +148,15 @@ export class RevisionStore {
         // For zero bytes, close the fixed-length writer after validating input;
         // start R2 first so the close is not blocked on an absent reader.
         const validation = (async () => {
-          let size = 0
           for (;;) {
             const chunk = await source.read()
             if (chunk.done) break
             if (!(chunk.value instanceof Uint8Array)) throw new StoreError('unavailable')
-            size = Math.min(Number.MAX_SAFE_INTEGER, size + chunk.value.byteLength)
+            if (chunk.value.byteLength > 0) throw new StoreError('integrity_error')
             await hashing.write(chunk.value)
           }
           await hashing.close()
-          if (size !== 0 || hex(await digestResult) !== expected.sha256) throw new StoreError('integrity_error')
+          if (hex(await digestResult) !== expected.sha256) throw new StoreError('integrity_error')
         })()
         await Promise.race([validation, cancelled])
         const provider = put()

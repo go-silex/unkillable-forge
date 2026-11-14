@@ -113,7 +113,7 @@ describe("restore composition", () => {
       env.DB.prepare("INSERT INTO revision_pages (revision_id,page_id,document_path,metadata_json) VALUES (?,?,'/docs/page.html','{}')").bind(stagedRevision, pageId),
     ], { revisionId: stagedRevision, edges: [{ ownerPageId: pageId, path: "/docs/asset.js", providerArtifactId: artifactId }] })
     expect(await readPagePolicy(deps, global, pageId)).toBeNull()
-    expect(await decideRead(env.DB, (await configs()).read, { kind: "page", route, candidates: ["/docs/page.html"], fragmentPath: null }, anonymous, null)).not.toMatchObject({ kind: "allow" })
+    expect(await decideRead(env.DB, (await configs()).read, { kind: "page", route, candidates: ["/docs/page.html"], fragmentPath: null }, anonymous, null)).toEqual({ kind: "deny", reason: "login_required" })
     await assignRole(deps, actor, { targetPrincipalId: globalId, expectedTargetAuthorityEpoch: 1, role: "publisher", scope: { kind: "page", pageId } })
     await expect(executeGuarded(deps, global, [stage], [])).rejects.toMatchObject({ code: "conflict" })
   })

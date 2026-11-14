@@ -113,3 +113,12 @@ Subsequent review corrections were exercised by TSC and36 targeted Store/publica
 
 
 This interface adds no MCP business-client proof, F05 serving, GC scheduler or maintenance endpoint. It changes no legacy URLs or Shlink behavior. Real three-client business publication belongs to F08; further cloud operations require separate approval.
+
+### Post-review contract corrections — 2026-11-14
+
+- Historical restore refuses full-path drift of an already live page with generic422 `invalid_state`; `restore_path_changed` stays an internal detail, not a new public DTO. Explicit unpublish/drop then restore recovers the historical route and page ID privately, with a new policy epoch and no old-share revival.
+- Committed restore/unpublish receipt replay validates the current principal and roles before the recorded epoch: a freshly revoked actor gets403; an otherwise authorized recorded-epoch change or already stale handle remains409. Upload/status retain their separate session-epoch check; these rules do not promise identical error precedence at every endpoint.
+- Only the unique owned deadline cause maps to `publication_upload_timeout`. A genuine prior native failure retains its class after a later timer; a confirmed sealed winner is reauthorized and reconciled before timeout translation. Native local regressions prove both outcomes, while actual HTTP still returns the owned408 for a genuinely stalled producer.
+- Inventory failures retain distinct ownership: malformed native Store descriptors are `integrity_error`; a well-formed inventory that does not prove Publication's declared revision set is `invalid_state`. Both are422 and fail closed, with no activation, replacement bytes or invented provider checksum.
+
+The complete0a80726 CI tree passed309 Vitest/205 Python tests. Later local corrections passed their separate source-bound checkpoints; neither statement is a final-SHA acceptance or cloud-capacity claim.
