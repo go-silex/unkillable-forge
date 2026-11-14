@@ -75,14 +75,19 @@ CASE
   WHEN ?3 = 'disable_principal' AND EXISTS (SELECT 1 FROM principals WHERE principal_id = ?9 AND status = 'disabled') THEN 'invalid_state'
   WHEN ?19 = 1 AND ?3 IN ('create_page', 'publish', 'restore_page') AND ?17 IS NOT NULL AND EXISTS (SELECT 1 FROM revision_resources rr JOIN mounts m ON m.path = rr.path WHERE rr.revision_id = ?17 AND m.artifact_id IS NOT ?7) THEN 'conflict'
   WHEN ?19 = 1 AND ?3 IN ('create_page', 'publish', 'restore_page') AND ?17 IS NOT NULL AND EXISTS (
-    SELECT 1 FROM revision_resources rr JOIN routes r ON r.kind = 'subtree' AND r.artifact_id <> ?7
-      AND substr(rr.path, 1, length('/a/' || r.route_key || '/')) = '/a/' || r.route_key || '/'
-    WHERE rr.revision_id = ?17
+    SELECT 1 FROM routes r CROSS JOIN revision_resources rr
+    WHERE r.kind = 'subtree' AND r.artifact_id <> ?7
+      AND rr.revision_id = ?17
+      AND rr.path >= '/a/' || r.route_key || '/'
+      AND rr.path < '/a/' || r.route_key || '0'
   ) THEN 'conflict'
   WHEN ?19 = 1 AND ?3 IN ('create_page', 'publish', 'restore_page') AND EXISTS (
-    SELECT 1 FROM revision_resources d JOIN mounts m ON m.artifact_id IS NOT ?7
-      AND substr(m.path, 1, length(substr(d.path, 1, length(d.path) - 10))) = substr(d.path, 1, length(d.path) - 10)
-    WHERE d.revision_id = ?17 AND d.kind = 'document' AND d.path GLOB '/a/*/index.html' AND d.path NOT GLOB '/a/*/*/*'
+    SELECT 1 FROM revision_resources d CROSS JOIN mounts m
+    WHERE d.revision_id = ?17 AND d.kind = 'document'
+      AND d.path GLOB '/a/*/index.html' AND d.path NOT GLOB '/a/*/*/*'
+      AND m.path >= substr(d.path, 1, length(d.path) - 10)
+      AND m.path < substr(d.path, 1, length(d.path) - 11) || '0'
+      AND m.artifact_id IS NOT ?7
   ) THEN 'conflict'
   WHEN ?3 IN ('publish', 'restore_page', 'share', 'rotate_share') AND ?17 IS NOT NULL AND ?6 IS NOT NULL
     AND NOT EXISTS (SELECT 1 FROM role_grants WHERE principal_id = ?4 AND revoked_at IS NULL AND (role = 'admin' OR (role = 'publisher' AND scope_kind = 'installation')))
