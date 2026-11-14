@@ -10,6 +10,7 @@ import type { BeginCommand, PublicationDeps, PublicationFile, PublicationPage, P
 type Session = { session_id: string; instance_id: string; actor_principal_id: string; actor_authority_epoch: number; request_digest: string; artifact_id: string; artifact_is_new: number; revision_id: string; base_revision_id: string | null; base_content_version: number; expires_at: number; closed_at: number | null }
 type FileRow = { path: string; kind: PublicationFile['kind']; sha256: string; size: number; content_type: string; source: PublicationFile['source']; object_key: string | null; object_version: string | null; stored_at: number | null }
 type PageRow = { page_id: string; disposition: PublicationPage['disposition']; document_path: string | null; metadata_json: string | null; expected_policy_epoch: number | null }
+type PageScope = Pick<PageRow, 'page_id' | 'disposition' | 'expected_policy_epoch'>
 type EdgeRow = { owner_page_id: string; path: string; provider_artifact_id: string }
 const id = (s: unknown, prefix: string): s is string => typeof s === 'string' && new RegExp(`^${prefix}_[a-z2-7]{26}$`).test(s)
 const fail = (): never => { throw new PolicyError('invalid_state') }
@@ -93,8 +94,8 @@ function guards(s: Session, pages: PageRow[], now: number): GuardRequest[] {
   if (!existing.length || pages.some(p => p.disposition === 'new')) result.push({ action: 'stage', artifactId: s.artifact_id, requestDigest: s.request_digest, occurredAt: now })
   return result
 }
-function transferGuard(s: Session, pages: PageRow[], now: number): GuardRequest {
-  let selected: PageRow | undefined
+function transferGuard(s: Session, pages: PageScope[], now: number): GuardRequest {
+  let selected: PageScope | undefined
   let requiresGlobal = false
   for (const page of pages) {
     if (page.disposition === 'new' || page.disposition === 'restore') requiresGlobal = true
@@ -121,12 +122,17 @@ async function guarded(deps: PublicationDeps, actor: ManageActor, s: Session, pa
   const now = clock(deps)
   await executeGuarded(deps, actor, guards(s, pages, now), [...assertion(deps, s, now, allowSealed), ...effects], ownership)
 }
-async function transferGuarded(deps: PublicationDeps, actor: ManageActor, s: Session, pages: PageRow[], effects: D1PreparedStatement[]): Promise<void> {
+async function transferGuarded(deps: PublicationDeps, actor: ManageActor, s: Session, pages: PageScope[], effects: D1PreparedStatement[]): Promise<void> {
   const now = clock(deps)
   await executeGuarded(deps, actor, [transferGuard(s, pages, now)], [...assertion(deps, s, now), ...effects])
 }
 export async function status(deps: PublicationDeps, actor: ManageActor, sessionId: string): Promise<PublicationStatus> {
-  const s = await load(deps, actor, sessionId), r = await rows(deps, s)
+  const s = await load(deps, actor, sessionId)
+  const [files, pages] = await deps.db.batch([
+    deps.db.prepare('SELECT * FROM publication_files WHERE session_id = ? ORDER BY path').bind(s.session_id),
+    deps.db.prepare('SELECT * FROM publication_pages WHERE session_id = ? ORDER BY page_id').bind(s.session_id),
+  ])
+  const r = { files: files.results as FileRow[], pages: pages.results as PageRow[] }
   const events = await deps.db.prepare("SELECT action FROM publication_events WHERE session_id = ? AND action IN ('seal','commit')").bind(sessionId).all<{ action: string }>()
   const actions = new Set(events.results.map(e => e.action))
   const existingPageIds = r.pages.filter(p => p.disposition !== 'new').map(p => p.page_id)
@@ -207,11 +213,11 @@ async function transfer(deps: PublicationDeps, actor: ManageActor, sessionId: st
     const s = await load(deps,actor,sessionId)
     const [fileResult, pageResult, eventResult, sessionResult] = await deps.db.batch([
       deps.db.prepare('SELECT * FROM publication_files WHERE session_id = ? AND path = ?').bind(sessionId,path),
-      deps.db.prepare('SELECT * FROM publication_pages WHERE session_id = ?').bind(sessionId),
+      deps.db.prepare('SELECT page_id, disposition, expected_policy_epoch FROM publication_pages WHERE session_id = ?').bind(sessionId),
       deps.db.prepare("SELECT action FROM publication_events WHERE session_id = ? AND action IN ('seal','commit')").bind(sessionId),
       deps.db.prepare('SELECT * FROM publication_sessions WHERE session_id = ?').bind(sessionId),
     ])
-    const pages = pageResult.results as PageRow[], f = fileResult.results[0] as FileRow | undefined
+    const pages = pageResult.results as PageScope[], f = fileResult.results[0] as FileRow | undefined
     const existingIds = pages.filter(p => p.disposition !== 'new').map(p => p.page_id)
     if (existingIds.length) await assertReplayAuthority(deps,actor,{artifactId:s.artifact_id,pageIds:existingIds,expectedActorAuthorityEpoch:s.actor_authority_epoch})
     const snapshot = sessionResult.results[0] as Session | undefined
