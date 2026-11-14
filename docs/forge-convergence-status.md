@@ -80,7 +80,7 @@ Le hash d'upload a été lu dans les bundles Wrangler installés, puis calibré 
 
 Les **828 HTML retirés sont tous couverts**. Les deux éléments restants sont `manifest.json` et `asset-owners.json`, métadonnées générées à reconstruire selon le nouveau modèle ; ils ne sont pas déclarés identiques. Aucune exécution de JavaScript d'artefact ni écriture des sources n'a été nécessaire.
 
-Les loaders incluent des `fetch` root-relative et des références d'hôte absolues : le pinning reste à prouver sur le corpus réel en F05. Le plus gros fichier régulier local Roxabi dépasse 400 Mo ; il ne fait pas partie automatiquement du corpus historique approuvé. Les candidats historiques effectivement comparés ne dépassent pas 7 997 944 octets.
+Les loaders incluent des `fetch` root-relative et des références d'hôte absolues : le pinning reste à prouver sur le corpus réel en F05. Le plus gros fichier régulier local Roxabi dépasse 400 Mo ; il ne fait pas partie automatiquement du corpus historique approuvé. Le maximum observé des fichiers locaux directs rapprochés est de 7 997 944 octets ; les tailles finales de tous les fichiers transformés/reconstruits ne sont pas établies. Ce nombre n'est donc pas un majorant prouvé de l'union sélectionnée.
 
 ### Shortlinks et parc de publishers
 
@@ -202,7 +202,15 @@ Zone Gosilex établie avec le grant opérateur existant rafraîchi ; DNS/Access 
 - Sessions, manifestes, reçus idempotents et activation CAS sur D1 primaire ; restore/unpublish, réadmission des ownerships et refus des providers étrangers sous un subtree. Les lectures de statut relisent l'autorité courante sans confondre conflit de contenu et perte du travail en staging.
 - La fermeture authentifiée de sa propre session réduit uniquement cette capacité ; elle ne publie rien et ne change aucun droit. Le discard permanent bloque restauration et nouveau pinning avant suppression des octets. La maintenance doit rebalayer les discards, y compris déjà balayés : un PUT natif tardif peut laisser des octets après une première purge.
 - Historique des preuves locales : premier passage 186/189 tests et TSC refusé ; après correction des trois causes, TSC réussi et 197/198 tests. Le dernier refus venait d'une fixture essayant de créer via le publisher un ownership désormais interdit ; le cas de défense en profondeur conserve ses assertions, avec injection explicite de cet état historique/corrompu. Les gates natives et la CI doivent être prouvées sur le SHA proposé ; cette trace historique ne les remplace pas.
-- Aucun adapter HTTP/configuration du manage Worker ni déploiement à ce stade. F06 accepté et mergé ouvre désormais cette phase ; preuves cloud ciblées, revue indépendante du SHA final et CI requise restent dues avant livraison F04. Le domaine préparé `a8c2c18679f5c75d62b4a1602d4f16d06a4a6d7a` avait ses deux typages, 31 fichiers / 234 tests et sa CI réelle verts ; ce n'est pas une validation HTTP. Pas de modification des accès de production ou des shortlinks.
+- Le domaine préparé `a8c2c18679f5c75d62b4a1602d4f16d06a4a6d7a` avait ses deux typages, 31 fichiers / 234 tests et sa CI réelle verts ; cette preuve historique ne valide pas à elle seule l'interface HTTP ajoutée depuis. F03 et F06 sont satisfaits. Aucune ressource Cloudflare F04, migration ou modification des accès de production et des shortlinks n'est autorisée ou revendiquée.
+
+### API manage et vérification native — candidat local
+
+- [Interface HTTP](forge-manage-http.md) séparée du legacy, commandes JSON et upload streamé, Host/Origin avant auto-enregistrement et authentification avant lecture du corps. Les six durées Publication et quatre bornes transport sont obligatoires, sans valeur de production par défaut ; le profil Wrangler reste strictement local.
+- Le vrai essai réseau a révélé un défaut que le stub de `fetch` ne voyait pas : workerd refuse `redirect: "error"` avant tout appel JWKS. Le mode `manual` conserve le refus des réponses non réussies et des redirections. Deux régressions natives vérifient une identité signée autorisant un effet gardé, puis le refus d'une redirection vers le même JWK sur un host non fiable.
+- Vérification parent après correction et retrait du diagnostic temporaire : **TSC réussi, 32/32 tests dans quatre fichiers, exit0**. Le vrai socket HTTP local a ensuite réussi : ancienne révision conservée après déconnexion, reprise, version1→2, document et asset exacts avec SHA-256 natif pour les deux révisions. Les compteurs runtime observés du socket sont nuls dans leur couverture déclarée, pas une détection universelle ; des diagnostics natifs EOF/`INTERNAL_ASYNC` restent visibles dans certains tests d'échec HTTP.
+- **F04 non livré.** Le plus gros fichier approuvé et la capacité réelle body/mémoire/CPU restent à prouver ; la proposition de témoin32MiB n'a pas été approuvée. Les opérations Cloudflare éventuelles exigent une autorisation propre. Revue indépendante du SHA final et CI requise restent dues ; F05/F07 ne démarrent pas.
+
 
 ## Lots et traçabilité
 
@@ -221,7 +229,7 @@ Quatre lots sur seize livrés : F01, F02, F03 et F06.
 
 | Lot | État | Dépendances bloquantes |
 |---|---|---|
-| F04 | Domaine local préparé, phase HTTP/configuration ouverte, **non livré** ; `~/.omp/wt/unkillable-forge/feat-F04-publication`, `feat/F04-publication`, base initiale `48b1d11a44b817a642e095087457d7f24e94a088` | [PR draft #10](https://github.com/go-silex/unkillable-forge/pull/10), domaine préparé `a8c2c18679f5c75d62b4a1602d4f16d06a4a6d7a`. F03 et F06 satisfaits ; adapter HTTP/config manage Worker, preuves ciblées puis revue indépendante finale et CI restent dus ; aucun déploiement autorisé |
+| F04 | Domaine et HTTP locaux exercés, **non livré** ; `~/.omp/wt/unkillable-forge/feat-F04-publication`, `feat/F04-publication`, base initiale `48b1d11a44b817a642e095087457d7f24e94a088` | [PR draft #10](https://github.com/go-silex/unkillable-forge/pull/10), domaine préparé `a8c2c18679f5c75d62b4a1602d4f16d06a4a6d7a`. F03/F06 satisfaits ; TSC, 32 tests HTTP/JWKS natifs et socket local réussis ; capacité réelle, revue indépendante finale et CI encore dues ; aucun déploiement autorisé |
 | F05 | Non démarré | F03, F04 |
 | F07 | Non démarré | F04, F06 |
 | F08 | Non démarré | F04, F05, F06, F07 ; worktrees consommateurs distincts |

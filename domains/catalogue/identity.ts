@@ -36,7 +36,8 @@ export function accessJwksSource(fetcher: typeof fetch = fetch): JwksSource {
     const cached = cache.get(teamDomain)
     if (cached && now >= cached.at && now - cached.at < JWKS_TTL_MS) return cached.keys
     try {
-      const response = await fetcher(`https://${teamDomain}/cdn-cgi/access/certs`, { redirect: "error" })
+      // workerd does not support redirect: "error"; never follow a key-source redirect.
+      const response = await fetcher(`https://${teamDomain}/cdn-cgi/access/certs`, { redirect: "manual" })
       if (!response.ok) return []
       const body: unknown = await response.json()
       if (!body || typeof body !== "object" || !("keys" in body) || !Array.isArray(body.keys)) return []
