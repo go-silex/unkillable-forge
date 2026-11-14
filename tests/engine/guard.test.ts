@@ -70,14 +70,14 @@ describe("transactional policy guard", () => {
   })
   it("reports reserved, shell and foreign subtree paths against the primary", async () => {
     const deps = { db: env.DB, config: (await configs()).manage }
-    const conflicts = await validateRevisionPaths(deps, { artifactId: `ar_${"b".repeat(26)}`, paths: ["/a/sample/file.js", "/a/unclaimed/file.js", "/api/private", "/login"], newSubtreeSlugs: [] })
+    const conflicts = await validateRevisionPaths(deps, { artifactId: `ar_${"b".repeat(26)}`, paths: ["/a/sample/file.js", "/a/unclaimed/file.js", "/api/private", "/login"], resultingSubtreeSlugs: [] })
     expect(conflicts).toEqual([
       { path: "/a/sample/file.js", reason: "foreign_subtree" },
       { path: "/a/unclaimed/file.js", reason: "reserved" },
       { path: "/api/private", reason: "reserved" },
       { path: "/login", reason: "shell" },
     ])
-    await expect(validateRevisionPaths({ ...deps, config: { ...deps.config, instanceId: "different" } }, { artifactId, paths: [], newSubtreeSlugs: [] })).rejects.toMatchObject({ code: "instance_mismatch" })
+    await expect(validateRevisionPaths({ ...deps, config: { ...deps.config, instanceId: "different" } }, { artifactId, paths: [], resultingSubtreeSlugs: [] })).rejects.toMatchObject({ code: "instance_mismatch" })
   })
   it("reports a foreign mount under a newly claimed subtree", async () => {
     const foreign = `ar_${"b".repeat(26)}`, foreignRevision = `rv_${"b".repeat(26)}`
@@ -88,7 +88,20 @@ describe("transactional policy guard", () => {
       env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES ('/a/future/foreign.js',?,?,'asset')").bind(foreign, foreignRevision),
     ])
     const deps = { db: env.DB, config: (await configs()).manage }
-    expect(await validateRevisionPaths(deps, { artifactId, paths: ["/a/future/index.html"], newSubtreeSlugs: ["future"] })).toContainEqual({ path: "/a/future/foreign.js", reason: "foreign_subtree" })
+    expect(await validateRevisionPaths(deps, { artifactId, paths: ["/a/future/index.html"], resultingSubtreeSlugs: ["future"] })).toContainEqual({ path: "/a/future/foreign.js", reason: "foreign_subtree" })
+  })
+  it("rejects resources left under a dropped subtree but accepts a retained subtree", async () => {
+    const deps = { db: env.DB, config: (await configs()).manage }
+    const paths = ["/a/sample/file.js"]
+    expect(await validateRevisionPaths(deps, { artifactId, paths, resultingSubtreeSlugs: [] })).toEqual([{ path: paths[0], reason: "dropped_subtree" }])
+    expect(await validateRevisionPaths(deps, { artifactId, paths, resultingSubtreeSlugs: ["sample"] })).toEqual([])
+  })
+  it("validates all resulting subtrees across bounded query chunks", async () => {
+    const deps = { db: env.DB, config: (await configs()).manage }
+    const slugs = Array.from({ length: 900 }, (_, index) => `s${index}-${"a".repeat(90)}`)
+    slugs.push("sample")
+    const conflicts = await validateRevisionPaths(deps, { artifactId: `ar_${"b".repeat(26)}`, paths: ["/a/sample/file.js"], resultingSubtreeSlugs: slugs })
+    expect(conflicts).toContainEqual({ path: "/a/sample/file.js", reason: "foreign_subtree" })
   })
   it("refuses forged actors at the page statement builders", async () => {
     const deps = { db: env.EMPTY_DB, config: (await configs()).manage, jwks, now: () => 10 }

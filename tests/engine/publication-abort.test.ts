@@ -44,7 +44,7 @@ describe("publication session abort authority", () => {
     await publication.abort(publisher, draft.session.sessionId)
     await publication.abort(publisher, draft.session.sessionId)
     expect(await publication.status(publisher, draft.session.sessionId)).toMatchObject({ state: "closed" })
-    await expect(publication.commit(publisher, draft.session.sessionId)).rejects.toThrow()
+    await expect(publication.commit(publisher, draft.session.sessionId)).rejects.toMatchObject({ code: "invalid_state", detail: "publication_closed" })
     expect(await storedBytes(store, { artifactId: draft.session.artifactId, revisionId: draft.session.revisionId, kind: "resource", path })).toEqual(draft.file.bytes)
   })
 
@@ -64,10 +64,10 @@ describe("publication session abort authority", () => {
     await publication.abort(stranger, draft.session.sessionId)
     const ref = { artifactId: draft.session.artifactId, revisionId: draft.session.revisionId }
     const maintenance = { db: deps.db, store, now: time.now, retainMs: 900_000, marginMs: 1000, maxUploadTimeoutMs: 1000, manageClockSkewMs: 0, readClockSkewMs: 0 }
-    await expect(collectRevision(maintenance, ref)).rejects.toThrow()
+    await expect(collectRevision(maintenance, ref)).rejects.toThrow(/discard_revision_staged/)
     await publication.abort(handle === "old" ? owner : refreshed, draft.session.sessionId)
-    await expect(publication.commit(refreshed, draft.session.sessionId)).rejects.toThrow()
-    await expect(publication.status(refreshed, draft.session.sessionId)).rejects.toThrow()
+    await expect(publication.commit(refreshed, draft.session.sessionId)).rejects.toMatchObject({ code: revocation === "role" ? "forbidden" : "unauthenticated" })
+    await expect(publication.status(refreshed, draft.session.sessionId)).rejects.toMatchObject({ code: "conflict" })
     time.advance(1001)
     expect(await collectRevision(maintenance, ref)).toBe("purged")
     expect(await storedBytes(store, { ...ref, kind: "resource", path })).toBeNull()
@@ -77,7 +77,7 @@ describe("publication session abort authority", () => {
     const { publication } = await setup()
     const first = await documentCommand("abort-forgery", path, "bytes")
     const draft = await publication.begin(actor, first.command)
-    await expect(publication.abort({ ...actor } as ManageActor, draft.sessionId)).rejects.toThrow()
+    await expect(publication.abort({ ...actor } as ManageActor, draft.sessionId)).rejects.toMatchObject({ code: "unauthenticated" })
     expect(await publication.status(actor, draft.sessionId)).toMatchObject({ state: "open" })
   })
   it("refuses to close a session when the primary belongs to a different instance", async () => {

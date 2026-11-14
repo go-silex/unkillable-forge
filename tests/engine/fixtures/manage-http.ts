@@ -69,6 +69,11 @@ export async function status(response: Response) {
   for (const file of result.files) expect(Object.keys(file).sort()).toEqual(["path", "source", "stored"])
   return result
 }
+export async function uploaded(response: Response, sessionId: string, path: string, state: "open" | "sealed" | "committed" = "open") {
+  const result = await success<{ sessionId: string; path: string; stored: true; state: "open" | "sealed" | "committed" }>(response)
+  expect(result).toEqual({ sessionId, path, stored: true, state })
+  return result
+}
 export async function receipt(response: Response) {
   const result = await success<PublicationReceipt>(response)
   expect(Object.keys(result).sort()).toEqual(["artifactId", "contentVersion", "pages", "revisionId"])

@@ -5,6 +5,7 @@ import { isShareKey, shareKeyDigests } from './share-secrets'
 import type { ManageDeps, PagePolicyView } from './commands'
 import { PolicyError } from './guard'
 import { requireManageActor, type ManageActor } from './principals'
+import { activeGrantSql } from './artifact-pages'
 interface PinnedReadProof {
   readonly instanceId: string; readonly pageId: string; readonly revisionId: string; readonly policyEpoch: number
   readonly basis: { readonly kind: 'public' } | { readonly kind: 'team' } | { readonly kind: 'grant'; readonly grantId: string }
@@ -121,9 +122,9 @@ const R1 = `SELECT p.page_id, p.artifact_id, p.visibility, p.policy_epoch, a.act
  gc.grant_id AS cookie_grant_id, rr.revision_id AS resource_revision_id, rr.path, rr.kind, rr.object_key, rr.sha256, rr.size, rr.content_type
  FROM routes r JOIN pages p ON p.page_id = r.page_id AND p.tombstoned_at IS NULL
  JOIN artifacts a ON a.artifact_id = p.artifact_id AND a.active_revision_id IS NOT NULL
- LEFT JOIN share_grants gk ON gk.page_id = p.page_id AND gk.revoked_at IS NULL
+ LEFT JOIN share_grants gk ON gk.page_id = p.page_id AND ${activeGrantSql('gk')}
  AND ((gk.key_kid = ?3 AND gk.key_hmac = ?4) OR (gk.key_kid = ?5 AND gk.key_hmac = ?6))
- LEFT JOIN share_grants gc ON gc.page_id = p.page_id AND gc.revoked_at IS NULL AND gc.mode = 'follow_active'
+ LEFT JOIN share_grants gc ON gc.page_id = p.page_id AND ${activeGrantSql('gc')} AND gc.mode = 'follow_active'
  AND r.kind = 'tree_page' AND r.route_key = ?7
  AND ((gc.key_kid = ?8 AND gc.key_hmac = ?9) OR (gc.key_kid = ?10 AND gc.key_hmac = ?11))
  LEFT JOIN revision_resources rr ON rr.revision_id IN (a.active_revision_id, gk.pinned_revision_id) AND rr.path IN (?12, ?13, ?14)
@@ -141,7 +142,7 @@ const R2 = `SELECT m.path, m.kind, m.artifact_id, m.revision_id, rr.object_key, 
  (SELECT g.grant_id FROM resource_owners o JOIN pages op ON op.page_id = o.owner_page_id AND op.tombstoned_at IS NULL AND op.visibility = 'shared'
  JOIN artifacts oa ON oa.artifact_id = op.artifact_id AND oa.active_revision_id = o.owner_revision_id
  JOIN routes cr ON cr.page_id = op.page_id AND cr.kind = 'tree_page' AND cr.route_key = ?2
- JOIN share_grants g ON g.page_id = op.page_id AND g.revoked_at IS NULL AND g.mode = 'follow_active'
+ JOIN share_grants g ON g.page_id = op.page_id AND ${activeGrantSql('g')} AND g.mode = 'follow_active'
  AND ((g.key_kid = ?3 AND g.key_hmac = ?4) OR (g.key_kid = ?5 AND g.key_hmac = ?6)) WHERE o.path = m.path AND o.provider_artifact_id = m.artifact_id LIMIT 1) AS cookie_grant_id
  FROM mounts m JOIN artifacts a ON a.artifact_id = m.artifact_id AND a.active_revision_id = m.revision_id
  JOIN revision_resources rr ON rr.revision_id = m.revision_id AND rr.path = m.path AND rr.kind = m.kind
@@ -162,7 +163,7 @@ const R4 = `SELECT p.page_id, p.artifact_id, p.visibility, p.policy_epoch, a.act
    AND NOT EXISTS (SELECT 1 FROM revision_resources local WHERE local.revision_id = rv.revision_id AND local.path = ?3)
    AND EXISTS (SELECT 1 FROM resource_owners o WHERE o.owner_revision_id = ?2 AND o.owner_page_id = p.page_id AND o.path = ?3 AND o.provider_artifact_id = m.artifact_id)
  LEFT JOIN revision_resources rr ON rr.revision_id = coalesce(m.revision_id, rv.revision_id) AND rr.path = ?3 AND (m.path IS NULL OR rr.kind = m.kind)
- LEFT JOIN share_grants g ON g.grant_id = ?4 AND g.page_id = p.page_id AND g.revoked_at IS NULL
+ LEFT JOIN share_grants g ON g.grant_id = ?4 AND g.page_id = p.page_id AND ${activeGrantSql('g')}
  WHERE p.page_id = ?1 AND p.tombstoned_at IS NULL`
 
 function makePlan(config: ReadInstanceConfig, row: Row, revisionId: string, basis: ReadPlan['authority']['basis'], pageId: string | null, grantId: string | null, epoch: number | null, requestedPath: string | null): ReadDecision {
@@ -278,13 +279,36 @@ function assertPolicyPrincipal(results: D1Result[], deps: ManageDeps, actor: Man
   if (pageCount === 0 ? !principal.global_authority : !principal.page_authority) throw new PolicyError('forbidden')
 }
 
+/** Check current publishing authority before prepare-time state can be disclosed.
+ * The mutation still requires its normal guard in the effects transaction. */
+export async function assertPrepareAuthority(deps: ManageDeps, actor: ManageActor, input: { readonly artifactId: string | null; readonly pageIds: readonly string[]; readonly requireGlobal: boolean }): Promise<void> {
+  requireManageActor(actor, deps)
+  try {
+    const results = await deps.db.batch([
+      instanceStatement(deps.db),
+      policyPrincipalStatement(deps.db, actor, input.pageIds),
+      deps.db.prepare(`SELECT
+        EXISTS (SELECT 1 FROM artifacts WHERE artifact_id = ?1)
+        AND NOT EXISTS (SELECT 1 FROM json_each(?2) j WHERE NOT EXISTS
+          (SELECT 1 FROM pages p WHERE p.page_id = j.value AND p.artifact_id = ?1))
+        AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.artifact_id = ?1 AND p.tombstoned_at IS NULL AND NOT EXISTS
+          (SELECT 1 FROM role_grants g WHERE g.principal_id = ?3 AND g.revoked_at IS NULL
+            AND (g.role = 'admin' OR (g.role = 'publisher' AND (g.scope_kind = 'installation' OR (g.scope_kind = 'page' AND g.scope_page_id = p.page_id))))))
+        AS artifact_authority`).bind(input.artifactId, JSON.stringify(input.pageIds), actor.principalId),
+    ])
+    assertPolicyPrincipal(results, deps, actor, input.pageIds.length)
+    const principal = results[1].results[0] as Row | undefined
+    if (!principal?.global_authority && (input.requireGlobal || !input.artifactId || !(results[2].results[0] as Row | undefined)?.artifact_authority)) throw new PolicyError('forbidden')
+  } catch (error) { if (error instanceof PolicyError) throw error; throw new PolicyError('unavailable') }
+}
+
 export async function readPagePolicy(deps: ManageDeps, actor: ManageActor, pageId: string): Promise<PagePolicyView | null> {
   try {
     requireManageActor(actor, deps)
     const results = await deps.db.batch([
       instanceStatement(deps.db),
       policyPrincipalStatement(deps.db, actor, [pageId]),
-      deps.db.prepare(`SELECT p.page_id, p.artifact_id, p.visibility, p.policy_epoch, a.content_version, g.grant_id, g.mode, g.pinned_revision_id, (g.sealed_key IS NOT NULL) AS revealable FROM pages p JOIN artifacts a ON a.artifact_id = p.artifact_id LEFT JOIN share_grants g ON g.page_id = p.page_id AND g.revoked_at IS NULL WHERE p.page_id = ?1 AND p.tombstoned_at IS NULL`).bind(pageId),
+      deps.db.prepare(`SELECT p.page_id, p.artifact_id, p.visibility, p.policy_epoch, a.content_version, g.grant_id, g.mode, g.pinned_revision_id, (g.sealed_key IS NOT NULL) AS revealable FROM pages p JOIN artifacts a ON a.artifact_id = p.artifact_id LEFT JOIN share_grants g ON g.page_id = p.page_id AND ${activeGrantSql('g')} WHERE p.page_id = ?1 AND p.tombstoned_at IS NULL`).bind(pageId),
     ])
     assertPolicyPrincipal(results, deps, actor, 1)
     const row = results[2].results[0] as Row | undefined

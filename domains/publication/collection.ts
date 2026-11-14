@@ -1,3 +1,4 @@
+import { activePinnedGrantSql } from '../catalogue/artifact-pages'
 import type { RevisionRef, RevisionStore } from '../store/revision-store'
 
 /** Server-owned maintenance configuration. All durations and timestamps are milliseconds. */
@@ -74,7 +75,7 @@ export async function collectRevision(deps: CollectionDeps, ref: RevisionRef): P
     SELECT ?1, ?2, CASE
       WHEN NOT EXISTS (SELECT 1 FROM revisions r WHERE r.revision_id = ?1 AND r.artifact_id = ?3) THEN 'not_found'
       WHEN EXISTS (SELECT 1 FROM artifacts a WHERE a.active_revision_id = ?1) THEN 'revision_active'
-      WHEN EXISTS (SELECT 1 FROM share_grants g WHERE g.pinned_revision_id = ?1 AND g.revoked_at IS NULL) THEN 'revision_pinned'
+      WHEN ${activePinnedGrantSql('?1')} THEN 'revision_pinned'
       WHEN EXISTS (SELECT 1 FROM publication_sessions s
         WHERE (s.revision_id = ?1 OR s.base_revision_id = ?1)
           AND CASE

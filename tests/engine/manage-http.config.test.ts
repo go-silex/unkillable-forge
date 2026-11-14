@@ -68,4 +68,18 @@ describe("manage runtime configuration", () => {
     expect(await status(ownStatus)).toMatchObject({ sessionId: second.sessionId, state: "open" })
     expect(await status(await command(jwt, { op: "status", sessionId: session.sessionId }))).toMatchObject({ sessionId: session.sessionId })
   })
+  it("rejects a foreign-instance session in the same primary database", async () => {
+    const jwt = await signed()
+    const doc = await documentCommand("foreign-session-marker", "/a/session-marker/index.html", "owned")
+    const session = await status(await command(jwt, { op: "begin", command: doc.command }))
+    const lookup = () => command(jwt, { op: "status", sessionId: session.sessionId })
+    expect(await status(await lookup())).toMatchObject({ sessionId: session.sessionId, state: "open" })
+    // Simulate a foreign session row in the same real primary; leave the instance marker untouched.
+    await env.DB.prepare("UPDATE publication_sessions SET instance_id = ? WHERE session_id = ?").bind("other-forge", session.sessionId).run()
+    const denied = await lookup()
+    expect(denied.status).toBe(404)
+    expect(await denied.json()).toEqual({ ok: false, error: { code: "not_found" } })
+    await env.DB.prepare("UPDATE publication_sessions SET instance_id = ? WHERE session_id = ?").bind("test-forge", session.sessionId).run()
+    expect(await status(await lookup())).toMatchObject({ sessionId: session.sessionId, state: "open" })
+  })
 })

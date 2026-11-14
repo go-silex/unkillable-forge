@@ -2,14 +2,14 @@
 
 This JSON and streaming interface is implemented by the separate [manage Worker](../adapters/http/manageWorker.ts). It composes Catalogue authentication, Publication and Revision Store; it is not a second authorization or publication engine. The [core contract §9.3](forge-core-contract.md#93-publication-commit-composition) owns the publication and commit semantics.
 
-**F04 is not yet delivered or accepted.** The approved largest-file scope and real Cloudflare body, memory and CPU capacity remain unproved; no capacity amendment has been approved. Local tests, including a synthetic 7,997,944-byte file, do not establish the largest approved file or a production support envelope. This document authorizes no Cloudflare resources, deployment or migration.
+**F04 is not yet delivered or accepted.** On 2026-11-14 the operator explicitly approved a real **32 MiB capacity witness** for F04 rather than waiting for the unknown largest historical file. That witness and real Cloudflare body, memory, CPU and cardinality capacity remain unproved. Every larger real file must be tested, with verified chunking if needed, before its migration; no file is excluded and no permanent 32 MiB product cap is established. Local tests, including a synthetic 7,997,944-byte file, do not prove that envelope. This amendment authorizes no Cloudflare resources, deployment, cleanup or migration.
 
 ## Endpoints and commands
 
 | Endpoint | Body | Result |
 |---|---|---|
-| `POST /api/publication` | UTF-8 JSON command; no query parameters | Status, receipt or `null` |
-| `PUT /api/publication/upload?sessionId=<encoded>&path=<encoded>` | Raw file bytes | Status |
+| `POST /api/publication` | UTF-8 JSON command; no query parameters | Full status, small file acknowledgement, receipt or `null`, according to operation |
+| `PUT /api/publication/upload?sessionId=<encoded>&path=<encoded>` | Raw file bytes | Small file acknowledgement |
 
 Paths are exact: there are no trailing-slash aliases. The upload query has exactly one `sessionId` and one `path`, with no other names. Encode with `URLSearchParams` or equivalent: a literal `+` must be encoded. The Worker decodes selectors once and passes the resulting path unchanged to Publication. Selectors identify a session and resource; they are not authorization capabilities.
 
@@ -26,7 +26,7 @@ The POST body is exactly one of these envelopes, with no additional fields:
 { op: 'unpublish', command: PromotionCommand }
 ```
 
-The authoritative command and result fields are in [Publication types](../domains/publication/types.ts). Every DTO field is required, including explicit nulls; unknown fields are rejected. Integers must be finite safe integers. Metadata may be any finite JSON value within the body and depth bounds. Publication retains responsibility for semantic validation, ownership, current authorization, idempotency and promotion.
+The authoritative command and result fields are in [Publication types](../domains/publication/types.ts). Every request DTO field is required, including explicit nulls; unknown request fields are rejected. Integers must be finite safe integers. Metadata may be any finite JSON value within the body and depth bounds. Publication retains semantic validation, ownership, current authorization, idempotency and promotion. Clients ignore additive response fields; removing a field or changing its meaning requires a versioned contract change.
 
 Typical flow: `begin` → upload client files and `materialize` each retained base file → `seal` → `commit`. `status` reports staging progress; `restore` promotes a retained revision and `unpublish` performs the guarded metadata transition. `abort` returns `null` after the domain operation, including its deliberately indistinguishable no-op cases; an authenticated owner can close their own session even after revocation. It is not an implicit disconnect action.
 
@@ -42,15 +42,18 @@ Configuration, effective HTTPS URL origin and any literal Host header are checke
 
 Catalogue verifies the Access JWT and obtains keys only from the configured Access team certificate endpoint. Its outbound JWKS request uses manual redirect handling and rejects non-success responses, including redirects; it never follows a redirected key source. See [identity.ts](../domains/catalogue/identity.ts).
 
+Catalogue performs target-bound preparation authority checks before private namespace/base/revision verdicts. A scope on an unrelated page is not authority over the requested artefact. The worker uses the shared [manage-edge](../adapters/http/manage-edge.ts) admission/error primitives; it implements no second role policy.
+
+
 ## Bounds, streaming and recovery
 
 Content-Length, when present, must be one nonnegative decimal safe integer and must not exceed the configured cap. Actual bytes are counted even when length is absent or misleading. JSON is read with a deadline, decoded as fatal UTF-8 and checked for finite values and configured nesting depth. A `begin` file larger than `maxUploadBytes` is rejected whether its source is client or base.
 
-Uploads are pull-driven and forward byte chunks without buffering the entire file or rehashing it in JavaScript. Publication enforces its own upload deadline; Store verifies the expected size and native checksum. An interrupted open request body errors the stream and does not implicitly abort the session. Use `status` and retry missing files. A disconnect after EOF or a lost commit response is uncertain, not a rollback: reconcile using `status` and the same idempotency key. Native storage cancellation is not a guarantee that a provider operation physically rolled back; see [core contract §9.3](forge-core-contract.md#93-publication-commit-composition).
+Uploads are pull-driven without buffering the entire file or hashing it in JavaScript. Store counts actual bytes and uses native `crypto.DigestStream` plus R2 checksum verification, retaining the last byte until clean EOF and digest verification. Publication owns its upload deadline. An interrupted open body errors the stream without implicitly aborting the session. Reconcile uncertain disconnects/lost replies with `status` and the same idempotency key. A verified file retry after seal/commit checks fresh authority and performs no new write; new writes after seal reject. Native cancellation does not prove physical provider rollback; see [core §9.3](forge-core-contract.md#93-publication-commit-composition). Visibility/share changes may allow ordinary live-page byte staging to continue, but commit rejects stale policy epochs. A principal authority-epoch change, including a new role grant, requires a fresh session and key.
 
 ## Responses and errors
 
-Success is HTTP 200 with `{"ok":true,"result":...}`. A status contains exactly `sessionId`, `artifactId`, `revisionId`, `baseRevisionId`, `expiresAt`, `state`, and `files` entries of `path`, `source`, `stored`. A receipt contains exactly `artifactId`, `revisionId`, `contentVersion`, and `pages` entries of `pageId`, `url`. Receipt URLs are the domain's relative paths. Abort returns `result: null`.
+Success is HTTP200 with `{"ok":true,"result":...}`. `upload` and `materialize` return only `{sessionId,path,stored:true,state}`, where state is the real `open`, `sealed` or `committed` snapshot. They never return all session files. `begin`, `seal` and `status` return full status: `sessionId`, `artifactId`, `revisionId`, `baseRevisionId`, `expiresAt`, `state`, and `files` entries of `path`, `source`, `stored`. A receipt contains `artifactId`, `revisionId`, `contentVersion`, and `pages` entries of `pageId`, `url`; URLs are relative paths. Abort returns `result:null`.
 
 Errors have the fixed shape `{"ok":false,"error":{"code":"..."}}`; no exception detail or credentials are returned.
 
@@ -61,8 +64,9 @@ Errors have the fixed shape `{"ok":false,"error":{"code":"..."}}`; no exception 
 | 403 | `forbidden` | Host, Origin or policy refusal |
 | 404 | `not_found` | Unknown route or unavailable resource |
 | 405 | `method_not_allowed` | Known route with another method; `Allow` names the supported method |
-| 408 | `request_timeout` | Command read deadline or observed interrupted body |
+| 408 | `request_timeout` | Command read deadline, Publication-owned upload deadline or observed interrupted body |
 | 409 | `conflict` | Idempotency, version or storage conflict |
+| 409 | `last_admin` | Last-administrator protection; shared classifier, no role endpoint added by F04 |
 | 409 | `upload_incomplete`, `not_sealed`, `session_closed` | Corresponding publication state |
 | 410 | `session_expired` | Session expired |
 | 413 | `payload_too_large` | Configured byte cap exceeded |
@@ -71,7 +75,7 @@ Errors have the fixed shape `{"ok":false,"error":{"code":"..."}}`; no exception 
 | 500 | `internal_error` | Explicit invariant violation |
 | 503 | `configuration_error`, `unavailable` | Invalid configuration/instance mismatch, or unavailable/unclassified operation |
 
-An unclassified native R2 checksum or length failure may be `503 unavailable`; the adapter does not infer integrity errors from provider text. HEAD returns the same status and headers without a body. Every response has `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, JSON content type and `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`. There are no CORS allow headers, redirects or successful preflight.
+Actual input size/digest mismatch is a typed422 integrity failure; unknown native provider/producer failures remain503. The classifier never infers causes from provider prose. HEAD returns the same status and headers without a body. Every response has `Cache-Control:no-store`, `X-Content-Type-Options:nosniff`, `Referrer-Policy:no-referrer`, JSON content type and `Content-Security-Policy:default-src 'none'; frame-ancestors 'none'`. There are no CORS allow headers, redirects or successful preflight.
 
 ## Trusted configuration and local profile
 
@@ -85,6 +89,9 @@ Two additional required JSON **strings**, with exact keys and safe integer value
 | `FORGE_MANAGE_TRANSPORT` | `maxCommandBytes`, `commandReadTimeoutMs`, `maxUploadBytes`, `maxJsonDepth` |
 
 Transport values must be positive; `maxJsonDepth` is at most 64, and command and upload timeouts must fit the timer range (at most 2,147,483,647 ms). The Publication constructor enforces positive session/upload durations, nonnegative skews, retention of at least 900,000 ms plus both skews, and margin of at least the upload timeout plus both skews. Safe arithmetic and a matching Store instance are required. Invalid configuration fails closed with `503 configuration_error`. Values must be selected from an independently measured deployment profile; test values are not production defaults.
+
+The domain's10,000-file/1,000-page/20,000-edge ceilings are unchanged, but an actual serialized command must also fit the explicit transport profile. A32KiB test setting cannot admit a10k-file begin. Measure encoded request/JSON parameter sizes, native whole-batch duration and cardinality rather than treating individual validation maxima or one32MiB upload as proof of their joint capacity.
+
 
 Immutable runtime dependencies are cached in a WeakMap per actual environment object, including Catalogue's JWKS cache. Actors, roles, epochs, authorization decisions and receipts are not cached; each accepted request authenticates anew and domain operations consult current authority.
 
@@ -100,6 +107,9 @@ The following commands target the current engine typecheck and the isolated HTTP
 ./node_modules/.bin/vitest run --project native-jwks tests/engine/native-jwks.test.ts
 ```
 
-The local targeted checks passed (32 tests across four files). A separate local socket exercise used the actual default Worker, native JWKS, D1 and R2: after a disconnected upload the old snapshot remained selected, and retry produced the expected new content version, exact bytes and native SHA. These are local observations, not Cloudflare capacity or deployment proof. Native EOF and internal asynchronous diagnostics were observed in some HTTP failure tests; their existence is not a claim that every runtime diagnostic is harmless or resolved.
+Historical candidate `6de673e523c6211c9781d544f97058b1d3ce1c5b` passed32 tests across four files. Its separate local socket exercise used the actual default Worker, native JWKS, D1 and R2: after a disconnected upload the old snapshot remained selected, and retry produced the expected content version, exact bytes and native SHA. Those inputs exclude the subsequent corrections, whose separate proof is below. No local observation establishes Cloudflare capacity or deployment proof. Native EOF/internal asynchronous diagnostics occurred in failure tests; this does not classify every diagnostic as harmless or resolved.
+
+Subsequent review corrections were exercised by TSC and36 targeted Store/publication-HTTP tests, all passing, after the earlier complete engine run reported271/272. This is not a claim of a fresh complete-suite pass. The corrected physical socket then passed with the exact21 compiler-consumed source hashes, bundle hash, migration bytes and bracketed profile/parser hashes recorded. Its runtime-observer counters were zero only within the declared coverage. Failure-path native pipe/connection/uncaught diagnostics remain visible in unit output; no filter or universal harmlessness claim is applied.
+
 
 This interface adds no MCP business-client proof, F05 serving, GC scheduler or maintenance endpoint. It changes no legacy URLs or Shlink behavior. Real three-client business publication belongs to F08; further cloud operations require separate approval.

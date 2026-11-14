@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers"
 import { beforeEach, describe, expect, it } from "vitest"
+import { readPagePolicy, share } from "../../domains/catalogue/commands"
 import { newId } from "../../domains/catalogue/ids"
 import { PublicationService } from "../../domains/publication"
 import { collectRevision, type CollectionDeps } from "../../domains/publication/collection"
@@ -57,10 +58,31 @@ describe("publication collection boundary", () => {
     const late = await content("late native bytes")
     await store.put(resource, late, body(late.bytes))
     expect(await storedBytes(store, resource)).toEqual(late.bytes)
-    await expect(publication.restore(actor, { idempotencyKey: "late-put-restore", ...ref, expectedContentVersion: removed.contentVersion })).rejects.toThrow()
+    await expect(publication.restore(actor, { idempotencyKey: "late-put-restore", ...ref, expectedContentVersion: removed.contentVersion })).rejects.toMatchObject({ code: "not_found" })
     await collectRevision(maintenance, ref)
     expect(await storedBytes(store, resource)).toBeNull()
     expect(await collectRevision(maintenance, ref)).toBe("already_purged")
     expect(await storedBytes(store, resource)).toBeNull()
+  })
+  it("fences pin and restore after collection while preserving the newer active revision", async () => {
+    const time = clock(10_000), store = new RevisionStore(env.REVISION_BYTES, instanceId)
+    const options = { sessionTtlMs: 60_000, maxUploadTimeoutMs: 1000, retainMs: 900_000, marginMs: 1000, manageClockSkewMs: 0, readClockSkewMs: 0 }
+    const deps = { db: env.DB, config: (await configs()).manage, jwks, now: time.now, store, publication: options }
+    const publication = new PublicationService(deps)
+    const maintenance: CollectionDeps = { db: env.DB, store, now: time.now, retainMs: options.retainMs, marginMs: options.marginMs, maxUploadTimeoutMs: options.maxUploadTimeoutMs, manageClockSkewMs: 0, readClockSkewMs: 0 }
+    const path = "/a/fence/index.html"
+    const input = await documentCommand("fence-original", path, "original")
+    const initial = await publishDocument(publication, actor, input.command, input.bytes)
+    const next = await content("new active")
+    const update = { ...input.command, idempotencyKey: "fence-next", artifactId: initial.session.artifactId, expectedRevisionId: initial.session.revisionId, expectedContentVersion: initial.receipt.contentVersion, files: [{ ...input.command.files[0], size: next.size, sha256: next.sha256 }], pages: [{ ...input.command.pages[0], disposition: "keep" as const, expectedPolicyEpoch: 0 }] }
+    const active = await publishDocument(publication, actor, update, next.bytes)
+    const ref = { artifactId: initial.session.artifactId, revisionId: initial.session.revisionId }
+    time.advance(900_001)
+    expect(await collectRevision(maintenance, ref)).toBe("purged")
+    await expect(share(deps, actor, { artifactId: ref.artifactId, pageId: input.pageId, expectedPolicyEpoch: 0, mode: "pinned", revisionId: ref.revisionId })).rejects.toMatchObject({ code: "invalid_state" })
+    await expect(publication.restore(actor, { idempotencyKey: "fence-restore", ...ref, expectedContentVersion: active.receipt.contentVersion })).rejects.toMatchObject({ code: "not_found" })
+    expect(await readPagePolicy(deps, actor, input.pageId)).toMatchObject({ visibility: "private", grant: null, contentVersion: active.receipt.contentVersion })
+    expect(await storedBytes(store, { artifactId: active.session.artifactId, revisionId: active.session.revisionId, kind: "resource", path })).toEqual(next.bytes)
+    expect(await storedBytes(store, { ...ref, kind: "resource", path })).toBeNull()
   })
 })

@@ -54,6 +54,12 @@ export interface PublicationStatus {
   readonly state: 'open' | 'sealed' | 'committed' | 'closed'
   readonly files: readonly { readonly path: string; readonly source: 'client' | 'base'; readonly stored: boolean }[]
 }
+export interface PublicationUploadStatus {
+  readonly sessionId: string
+  readonly path: string
+  readonly stored: true
+  readonly state: 'open' | 'sealed' | 'committed'
+}
 export interface PublicationReceipt {
   readonly artifactId: string
   readonly revisionId: string | null
@@ -68,8 +74,8 @@ export interface PromotionCommand {
 export interface RestoreCommand extends PromotionCommand { readonly revisionId: string }
 export interface Publication {
   begin(actor: ManageActor, command: BeginCommand): Promise<PublicationStatus>
-  upload(actor: ManageActor, sessionId: string, path: string, body: ReadableStream<Uint8Array>): Promise<PublicationStatus>
-  materialize(actor: ManageActor, sessionId: string, path: string): Promise<PublicationStatus>
+  upload(actor: ManageActor, sessionId: string, path: string, body: ReadableStream<Uint8Array>): Promise<PublicationUploadStatus>
+  materialize(actor: ManageActor, sessionId: string, path: string): Promise<PublicationUploadStatus>
   seal(actor: ManageActor, sessionId: string): Promise<PublicationStatus>
   commit(actor: ManageActor, sessionId: string): Promise<PublicationReceipt>
   status(actor: ManageActor, sessionId: string): Promise<PublicationStatus>

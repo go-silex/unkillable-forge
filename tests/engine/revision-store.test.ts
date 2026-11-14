@@ -64,31 +64,154 @@ describe("Revision Store with local R2", () => {
     expect(await store.head(ref)).toEqual(winners[0].info)
   })
 
-  it("never exposes a partial object after checksum, length, producer, or cancellation failure", async () => {
+  it("classifies complete wrong digests and lengths as integrity errors without committing bytes", async () => {
     const store = new RevisionStore(env.REVISION_BYTES, "store-failures")
     const rev = revision()
     const data = bytes("correct bytes")
     const metadata = await expected(data)
-    const cases: { name: string; run: (ref: RevisionObjectRef) => Promise<unknown> }[] = [
-      { name: "checksum", run: ref => store.put(ref, { ...metadata, sha256: "0".repeat(64) }, stream(data)) },
-      { name: "underlength", run: ref => store.put(ref, { ...metadata, size: metadata.size + 1 }, stream(data)) },
-      { name: "overlength", run: ref => store.put(ref, { ...metadata, size: metadata.size - 1 }, stream(data)) },
-      { name: "producer-error", run: ref => store.put(ref, metadata, new ReadableStream({ start(controller) { controller.enqueue(data.subarray(0, 3)); controller.error(new Error("producer failed")) } })) },
-      { name: "cancelled", run: ref => {
-        const abort = new AbortController()
-        const body = new ReadableStream<Uint8Array>({ pull(controller) { controller.enqueue(data.subarray(0, 3)); abort.abort() } })
-        return store.put(ref, metadata, body, abort.signal)
-      } },
+    const cases = [
+      { name: "checksum", metadata: { ...metadata, sha256: "0".repeat(64) }, data },
+      { name: "underlength", metadata: { ...metadata, size: metadata.size + 1 }, data },
+      { name: "overlength", metadata: { ...metadata, size: metadata.size - 1 }, data },
+      { name: "declared-zero", metadata: await expected(new Uint8Array()), data },
     ]
     for (const scenario of cases) {
       const ref = resource(rev, `/failures/${scenario.name}`)
-      await expect(scenario.run(ref), scenario.name).rejects.toMatchObject({ code: expect.stringMatching(/^(integrity_error|unavailable)$/) })
+      await expect(store.put(ref, scenario.metadata, stream(scenario.data)), scenario.name).rejects.toMatchObject({ code: "integrity_error" })
       expect(await store.head(ref), scenario.name).toBeNull()
       expect(await readBytes(store, ref), scenario.name).toBeNull()
       const stored = await put(store, ref, data)
+      expect(stored.version, scenario.name).toBeTruthy()
+      expect(await put(store, ref, data), scenario.name).toEqual(stored)
       expect(await store.head(ref), scenario.name).toEqual(stored)
       expect(await readBytes(store, ref), scenario.name).toEqual(data)
     }
+  }, 30_000)
+
+  it("stores and reconciles a genuinely empty object", async () => {
+    const store = new RevisionStore(env.REVISION_BYTES, "store-empty")
+    const ref = resource(revision(), "/empty")
+    const data = new Uint8Array()
+    const original = await put(store, ref, data)
+    expect(original.size).toBe(0)
+    expect(original.version).toBeTruthy()
+    expect(await put(store, ref, data)).toEqual(original)
+    expect(await store.head(ref)).toEqual(original)
+    expect(await readBytes(store, ref)).toEqual(data)
+  })
+
+  it("preserves an existing object when another producer errors or aborts", async () => {
+    const store = new RevisionStore(env.REVISION_BYTES, "store-producer")
+    const rev = revision()
+    const existing = resource(rev, "/existing")
+    const data = bytes("correct bytes")
+    const metadata = await expected(data)
+    const original = await put(store, existing, data)
+    const failed = resource(rev, "/producer-error")
+    const producer = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(data.subarray(0, 3)); controller.error(new Error("producer failed")) },
+    })
+    await expect(store.put(failed, metadata, producer)).rejects.toMatchObject({ code: "unavailable" })
+    expect(await store.head(failed)).toBeNull()
+    expect(await readBytes(store, failed)).toBeNull()
+
+    let signalPull!: () => void
+    let signalCancel!: () => void
+    const pulled = new Promise<void>(resolve => { signalPull = resolve })
+    const cancelled = new Promise<void>(resolve => { signalCancel = resolve })
+    const pending = new ReadableStream<Uint8Array>({
+      pull(controller) { controller.enqueue(data.subarray(0, 3)); signalPull(); return new Promise<void>(() => {}) },
+      cancel() { signalCancel() },
+    }, { highWaterMark: 0 })
+    const abort = new AbortController()
+    const interrupted = store.put(resource(rev, "/aborted"), metadata, pending, abort.signal)
+    const rejection = expect(interrupted).rejects.toMatchObject({ code: "unavailable" })
+    await pulled
+    abort.abort()
+    await rejection
+    await cancelled
+    const aborted = resource(rev, "/aborted")
+    expect(await store.head(aborted)).toBeNull()
+    expect(await readBytes(store, aborted)).toBeNull()
+    for (const ref of [failed, aborted]) {
+      const stored = await put(store, ref, data)
+      expect(await put(store, ref, data)).toEqual(stored)
+      expect(await readBytes(store, ref)).toEqual(data)
+    }
+    expect(await store.head(existing)).toEqual(original)
+    expect(await readBytes(store, existing)).toEqual(data)
+  }, 30_000)
+
+  it("cancels an already-aborted unpulled producer without waiting for cancellation", async () => {
+    const store = new RevisionStore(env.REVISION_BYTES, "store-preabort")
+    const ref = resource(revision(), "/preabort")
+    const data = bytes("not uploaded")
+    const metadata = await expected(data)
+    let pulled = false
+    let signalCancel!: () => void
+    const cancelled = new Promise<void>(resolve => { signalCancel = resolve })
+    const body = new ReadableStream<Uint8Array>({
+      pull() { pulled = true },
+      cancel() { signalCancel(); return new Promise<void>(() => {}) },
+    }, { highWaterMark: 0 })
+    const abort = new AbortController()
+    abort.abort()
+    await expect(store.put(ref, metadata, body, abort.signal)).rejects.toMatchObject({ code: "unavailable" })
+    await cancelled
+    expect(pulled).toBe(false)
+    expect(await store.head(ref)).toBeNull()
+    expect(await readBytes(store, ref)).toBeNull()
+    const stored = await put(store, ref, data)
+    expect(await put(store, ref, data)).toEqual(stored)
+    expect(await readBytes(store, ref)).toEqual(data)
+  }, 30_000)
+
+  it("reconciles an existing object without waiting for an uncooperative producer cancellation", async () => {
+    const store = new RevisionStore(env.REVISION_BYTES, "store-pending")
+    const ref = resource(revision(), "/pending")
+    const data = bytes("already stored")
+    const metadata = await expected(data)
+    const original = await put(store, ref, data)
+    let signalCancel!: () => void
+    const cancelled = new Promise<void>(resolve => { signalCancel = resolve })
+    const body = new ReadableStream<Uint8Array>({
+      pull() { return new Promise<void>(() => {}) },
+      cancel() { signalCancel(); return new Promise<void>(() => {}) },
+    })
+    const retry = store.put(ref, metadata, body)
+    expect(await retry).toEqual(original)
+    await cancelled
+    expect(await store.head(ref)).toEqual(original)
+    expect(await readBytes(store, ref)).toEqual(data)
+  }, 30_000)
+
+  it("converges concurrent identical writes on one native version", async () => {
+    const store = new RevisionStore(env.REVISION_BYTES, "store-converge")
+    const ref = resource(revision(), "/same")
+    const data = bytes("same concurrent bytes")
+    const metadata = await expected(data)
+    let release!: () => void
+    let signalBothPulled!: () => void
+    const ready = new Promise<void>(resolve => { signalBothPulled = resolve })
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let pulls = 0
+    const gated = () => new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        pulls++
+        if (pulls === 2) signalBothPulled()
+        await gate
+        controller.enqueue(data)
+        controller.close()
+      },
+    }, { highWaterMark: 0 })
+    const results = Promise.all([store.put(ref, metadata, gated()), store.put(ref, metadata, gated())])
+    await ready
+    release()
+    const [first, second] = await results
+    expect(first.version).toBeTruthy()
+    expect(second).toEqual(first)
+    expect(await store.head(ref)).toEqual(first)
+    expect(await readBytes(store, ref)).toEqual(data)
   }, 30_000)
 
   it("keeps instance and revision identities separate and preserves exact long Unicode paths", async () => {
@@ -121,21 +244,50 @@ describe("Revision Store with local R2", () => {
     const foreign = resource(rev, "/keep.txt")
     const keptRevision = bytes("other revision survives")
     const keptInstance = bytes("other instance survives")
-    await put(store, survivor, keptRevision)
-    await put(other, foreign, keptInstance)
+    const survivorInfo = await put(store, survivor, keptRevision)
+    const foreignInfo = await put(other, foreign, keptInstance)
     const data = bytes("collection object")
     const metadata = await expected(data)
     const refs = Array.from({ length: 1005 }, (_, index) => resource(rev, `/bulk/${index.toString().padStart(4, "0")}`))
+    const manifest: RevisionObjectRef = { ...rev, kind: "manifest" }
+    const manifestInfo = await put(store, manifest, bytes("manifest"))
+    const expectedObjects = new Map([[manifestInfo.key, manifestInfo]])
     for (let start = 0; start < refs.length; start += 16) {
-      await Promise.all(refs.slice(start, start + 16).map(ref => store.put(ref, metadata, stream(data))))
+      const written = await Promise.all(refs.slice(start, start + 16).map(ref => store.put(ref, metadata, stream(data))))
+      for (const object of written) expectedObjects.set(object.key, object)
     }
+    let cursor: string | null = null
+    let pages = 0
+    const seen = new Set<string>()
+    do {
+      const page = await store.listRevision(rev, cursor)
+      pages++
+      expect(page.objects.length).toBeLessThanOrEqual(1000)
+      for (const object of page.objects) {
+        expect(seen.has(object.key)).toBe(false)
+        seen.add(object.key)
+        const written = expectedObjects.get(object.key)
+        expect(written).toBeDefined()
+        expect(object.size).toBe(written!.size)
+        expect(object.version).toBe(written!.version)
+        expect(object.version).toBeTruthy()
+        if (object.sha256 !== null) expect(object.sha256).toBe(written!.sha256)
+      }
+      cursor = page.cursor
+    } while (cursor !== null)
+    expect(pages).toBeGreaterThan(1)
+    expect(seen).toEqual(new Set(expectedObjects.keys()))
+    expect(seen.has(survivorInfo.key)).toBe(false)
+    expect(seen.has(foreignInfo.key)).toBe(false)
+    expect(await readBytes(store, manifest)).toEqual(bytes("manifest"))
     expect(await readBytes(store, refs[0])).toEqual(data)
     expect(await readBytes(store, refs[1004])).toEqual(data)
-    expect(await store.deleteRevision(rev)).toBe(1005)
+    expect(await store.deleteRevision(rev)).toBe(1006)
     for (let start = 0; start < refs.length; start += 16) {
       const remaining = await Promise.all(refs.slice(start, start + 16).map(ref => store.head(ref)))
       expect(remaining.every(value => value === null)).toBe(true)
     }
+    expect(await store.head(manifest)).toBeNull()
     expect(await store.deleteRevision(rev)).toBe(0)
     expect(await readBytes(store, survivor)).toEqual(keptRevision)
     expect(await readBytes(other, foreign)).toEqual(keptInstance)

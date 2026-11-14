@@ -35,8 +35,8 @@ The engine varies along five dimensions:
 | Module | Sole authority over | Interface (summary) |
 |---|---|---|
 | **Catalogue & Policy** | verified identities and their assurance, principals, roles and scopes, page identity, routes and aliases, visibility, share grants, resource ownership, read decisions and pinned-read tokens, the mutation guard | `authenticateManage` · `resolveRead` · policy commands · `executeGuarded` and statement builders |
-| **Publication** | which sealed revision of an artefact is active (compare-and-set), publication sessions, idempotency, unpublish, restore | `begin` · `upload` · `status` · `commit` · `abort` · `remove` · `restore` |
-| **Revision Store** | immutable bytes and their integrity | `putOnce` · `inspect` · `seal` · `read` · `collect` |
+| **Publication** | which sealed revision of an artefact is active (compare-and-set), publication sessions, idempotency, unpublish, restore | `begin` · `upload` · `materialize` · `seal` · `status` · `commit` · `abort` · `unpublish` · `restore` |
+| **Revision Store** | immutable bytes and their integrity | `put` · `head` · `get` · `listRevision` · `deleteRevision` |
 | **Delivery** | turning an authorized read plan into an HTTP response | `serve` |
 
 Adapters (HTTP read Worker, HTTP manage Worker, remote MCP, local stdio client, web UI) parse transport input, call module interfaces and render results. **They decide nothing**: no authorization, visibility, grant, role, route or active-revision decision is computed in an adapter.
@@ -46,7 +46,7 @@ Mapping from the plan's §2.1 names: *Accès* and *Catalogue* → Catalogue & Po
 ### Invariants carried over from ADR 0001
 
 1. Authorization is decided in exactly one module (0001: `functions/_lib/access.ts`; now Catalogue & Policy).
-2. Every write to policy or active state runs the one guard inside the same D1 transaction as its effects, except the explicitly bounded F11 operator bootstrap. Verified manage-identity self-registration is a separate, role-free exception for new principals only (contract §9.1); it cannot change or reactivate an existing principal. A per-action difference is a parameter of that guard, never a second guard (0001: `EXPECTED_REMOVALS` as a parameter of `preflight_cf_mutations`).
+2. Every write to policy or active state runs the one guard inside the same D1 transaction as its effects, except the explicitly bounded bootstrap and role-free new-principal self-registration in contract §8.3. Publication's internal discard maintenance and actor-bound monotonic own-session abort write no policy or active state and have their own explicit bounds there; neither grants authority. A per-action difference is a parameter of the guard, never a second authority guard.
 3. Active state changes at exactly one commit point, Publication's transaction (0001: the single `wrangler pages deploy` with re-asserted sentinels).
 4. Three strikes: a concern found in three or more adapters or actions moves into its owning module.
 
@@ -73,7 +73,7 @@ Until F15 removes them, `plugins/silex-forge/scripts/` and `functions/` keep 000
 A reviewer flags any of these:
 
 - An adapter that reads `role_grants`, `share_grants`, `pages.visibility`, `routes` or `artifacts.active_revision_id`, or issues a D1 write, instead of calling the owning module.
-- An adapter or lot that builds an `AccessVerifier`, an actor, a guard row, a pinned-read token, or writes ownership edges outside `executeGuarded`.
+- An adapter or lot that implements its own verifier/authority logic or invents an actor, guard row or pinned-read token instead of using Catalogue-owned factories and interfaces, or writes ownership edges outside `executeGuarded`. Wiring a Catalogue-owned verifier or a Revision Store from validated bindings is composition, not a second decider.
 - A D1 batch that writes a policy or active-state table without the guard (other than the bounded operator bootstrap), a self-registration batch that grants a role or modifies an existing principal, or a second guard written for one action.
 - A refusal derived from a zero-row update, `changes()`, an `ON CONFLICT … WHERE` that silently skips, or a read followed by a separate write. Self-registration may use `ON CONFLICT (issuer, subject) DO NOTHING`, but its instance verdict comes from the same batch’s explicit instance read, never from affected-row counts.
 - An authorization input taken from KV, a cache, isolate memory, `withSession()` or a stale JWT claim beyond its own expiry.
@@ -87,6 +87,16 @@ A reviewer flags any of these:
 - The guard SQL, the ownership admission and their named CHECK constraints live in code (`domains/catalogue/guard.ts`, `migrations/0001_catalogue.sql`); the contract states the rules they must satisfy. `executeGuarded` also rejects structurally invalid batches before any D1 call: a role or principal mutation must be the only guard in its batch, so two removals cannot each count the other administrator. Multi-page publication remains allowed. An ownership edge is accepted only alongside a same-revision `stage` or `create_page` guard and first creation of its owner revision-page in that batch; activation and pinned sharing re-admit existing cross-artefact edges, and read-only receipt replay rechecks current authority without minting a mutation event. Principal self-registration and operator bootstrap are the only unguarded policy-table exceptions; Publication's internal discard claim writes no policy table.
 - `R-axial-adr-review` (dev-core) path-hits `domains/` and `adapters/` through `AXIAL_RE` and reviews diffs against this ADR.
 - Legacy enforcement listed in 0001 (`tests/publish-*.sh`, `tests/*.test.ts`) stays in force for the legacy tree until F15.
+
+### F04 contract amendment — 2026-11-14
+
+F04 remains pending acceptance. This dated amendment clarifies technical interfaces and dependencies; it does not claim delivery, production capacity or authorization to create Cloudflare resources.
+
+- **I-CV:** live-page membership, primary routes and active revision-page membership change only in Publication's activation batch with `content_version + 1`. Publication may rely on this CAS instead of duplicating Catalogue's page/route/epoch predicates. F10 imports must preserve it.
+- Catalogue owns target-bound prepare authority, live-page selectors and the pinned-grant SQL predicate. Publication consumes them; Catalogue's guard may atomically read Publication's permanent discard fence. These declared read dependencies do not transfer write or policy ownership.
+- Native version-bound R2 inventory replaces per-file commit HEAD fanout. Same key/size/native upload version binds bytes already verified by Store; this is an explicit design inference, not a claim that version or ETag is SHA-256. Missing versions fail closed and the native cloud witness remains due.
+- HTTP uses shared, actually consumed edge admission/error primitives. F07 owns the scoped fresh-machine state read and F08 proves its consumption. The local profile is not a production deployment guard; F10 owns bounded/non-starving resweeps and F11 their scheduling and instance profiles.
+
 
 ## Expected debt
 

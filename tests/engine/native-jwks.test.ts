@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { readPagePolicy, setVisibility } from "../../domains/catalogue/commands"
+import { assignRole, readPagePolicy, revokeRole, setVisibility } from "../../domains/catalogue/commands"
 import { accessJwksSource } from "../../domains/catalogue/identity"
 import { authenticateManage } from "../../domains/catalogue/principals"
 import { actor, artifactId, bootstrap, configs, jwks, manageRequest, pageFixture, pageId } from "./fixtures/catalogue"
@@ -45,6 +45,23 @@ describe.sequential("native Access JWKS outbound policy", () => {
     if (!nativeActor) throw new Error("Native JWKS did not authenticate the signed identity")
     await setVisibility(deps, nativeActor, { artifactId, pageId, expectedPolicyEpoch: 0, visibility: "public" })
     expect(await readPagePolicy(deps, nativeActor, pageId)).toMatchObject({ visibility: "public", policyEpoch: 1 })
+    expect(await fixtureState()).toEqual({ jwksCalls: 1, redirectTargetCalls: 0, deniedCalls: 0 })
+  })
+
+  it("reuses cached keys but mints fresh authority after a role is revoked", async () => {
+    const deps = { db: env.DB, config: (await configs()).manage, jwks: accessJwksSource(), now: () => 10 }
+    const admin = await authenticateManage(await manageRequest(), deps)
+    const initial = await authenticateManage(await manageRequest("native-publisher"), deps)
+    if (!admin || !initial) throw new Error("Native JWKS did not authenticate fixture identities")
+    const grant = await assignRole(deps, admin, { targetPrincipalId: initial.principalId, expectedTargetAuthorityEpoch: 0, role: "publisher", scope: { kind: "installation" } })
+    const granted = await authenticateManage(await manageRequest("native-publisher"), deps)
+    if (!granted) throw new Error("Native publisher could not authenticate")
+    await setVisibility(deps, granted, { artifactId, pageId, expectedPolicyEpoch: 0, visibility: "public" })
+    await revokeRole(deps, admin, { targetPrincipalId: initial.principalId, expectedTargetAuthorityEpoch: 1, roleGrantId: grant.roleGrantId })
+    const revoked = await authenticateManage(await manageRequest("native-publisher"), deps)
+    if (!revoked) throw new Error("Revoked principal could not authenticate")
+    await expect(setVisibility(deps, revoked, { artifactId, pageId, expectedPolicyEpoch: 1, visibility: "private" })).rejects.toMatchObject({ code: "forbidden" })
+    expect(await readPagePolicy(deps, admin, pageId)).toMatchObject({ visibility: "public", policyEpoch: 1 })
     expect(await fixtureState()).toEqual({ jwksCalls: 1, redirectTargetCalls: 0, deniedCalls: 0 })
   })
 

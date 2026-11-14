@@ -1,4 +1,8 @@
 -- Publication state is separate from Catalogue policy and immutable revision data.
+ALTER TABLE revision_resources ADD COLUMN object_version TEXT;
+ALTER TABLE revisions ADD COLUMN manifest_object_version TEXT;
+ALTER TABLE revisions ADD COLUMN manifest_size INTEGER CHECK (manifest_size IS NULL OR manifest_size >= 0);
+
 CREATE TABLE publication_sessions (
   session_id TEXT PRIMARY KEY NOT NULL CHECK (length(session_id) = 29 AND substr(session_id,1,3) = 'ps_' AND substr(session_id,4) NOT GLOB '*[^a-z2-7]*'),
   instance_id TEXT NOT NULL,
@@ -27,8 +31,10 @@ CREATE TABLE publication_files (
   content_type TEXT NOT NULL CHECK (length(content_type) BETWEEN 1 AND 255),
   source TEXT NOT NULL CHECK (source IN ('client','base')),
   object_key TEXT,
+  object_version TEXT,
   stored_at INTEGER,
   CHECK ((stored_at IS NULL) = (object_key IS NULL)),
+  CHECK ((stored_at IS NULL) = (object_version IS NULL)),
   PRIMARY KEY (session_id,path)
 );
 CREATE TABLE publication_pages (

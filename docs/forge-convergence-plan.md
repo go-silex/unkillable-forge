@@ -112,7 +112,11 @@ Une suppression dépublie via une transition de métadonnées contrôlée ; elle
 
 L'idempotence est liée à l'acteur, l'instance et au digest de commande : même clé + mêmes paramètres = même reçu, paramètres différents = conflit. Le GC ferme d'abord la session en D1 pour empêcher un commit concurrent, puis respecte la marge d'upload en vol et revérifie toutes les références actives et retenues. Un PUT réussi suivi d'une réponse perdue se réconcilie sans réécrire l'objet.
 
-La vérification d'intégrité doit être assurée par le flux d'upload ou une primitive de checksum documentée, pas par le seul hash annoncé par le client, ni par l'hypothèse qu'un ETag multipart serait un SHA-256. F04 mesure les limites réelles de body/mémoire/CPU sur le plus gros fichier approuvé par F01. Si un flux simple ne suffit pas, le même contrat reçoit un upload découpé avec finalisation vérifiée ; jamais un échec tardif découvert pendant la migration de production.
+La vérification d'intégrité doit être assurée par le flux d'upload ou une primitive de checksum documentée, pas par le seul hash annoncé par le client, ni par l'hypothèse qu'un ETag multipart serait un SHA-256.
+
+**Amendement de preuve explicitement approuvé le 2026-11-14 :** F04 mesure les limites réelles de body/mémoire/CPU avec un fichier artificiel de **32 Mio (33 554 432 octets)**, sans attendre l'identification du plus gros fichier de l'historique Roxabi. Cet accord n'est ni un résultat de test ni une autorisation de création, déploiement ou suppression de ressources Cloudflare.
+
+Ce témoin ne fixe aucun plafond définitif dans le code et n'exclut aucun fichier. **Tout fichier réel plus gros doit être testé avant sa migration** ; si un flux simple ne suffit pas, le même contrat reçoit un upload découpé avec finalisation vérifiée avant cette migration. Les autres dimensions de capacité et les critères de concurrence/reprise restent exigés ; jamais un échec tardif découvert pendant la migration de production.
 
 #### Lecture cohérente pendant une publication
 

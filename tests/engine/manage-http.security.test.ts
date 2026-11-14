@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest"
 import worker from "../../adapters/http/manageWorker"
+import { publicError } from "../../adapters/http/manage-edge"
+import { PolicyError } from "../../domains/catalogue/guard"
 import { manageHttpBindings } from "./fixtures/manage-http-bindings"
 import { command, dispatch, env, request, setupHttp, signed, status } from "./fixtures/manage-http"
+import { pageFixture } from "./fixtures/catalogue"
 import { documentCommand } from "./fixtures/publication"
 
 setupHttp()
@@ -21,6 +24,10 @@ async function error(response: Response, status: number, code: string) {
 }
 
 describe("manage HTTP security", () => {
+  it("maps the role-management last-admin fault to the shared public vocabulary", () => {
+    expect(publicError(new PolicyError("last_admin"))).toEqual({ status: 409, code: "last_admin" })
+  })
+
   it("rejects bad browser origins before a valid unseen principal can self-register", async () => {
     const jwt = await signed("origin-witness")
     const count = async () => (await env.DB.prepare("SELECT count(*) AS n FROM principals WHERE subject = ?").bind("origin-witness").first<{ n: number }>())?.n
@@ -77,12 +84,23 @@ describe("manage HTTP security", () => {
     await error(await command(await signed("unprivileged"), { op: "begin", command: begin }), 403, "forbidden")
   })
 
+  it("does not disclose claimed versus free routes to a roleless principal", async () => {
+    await pageFixture()
+    const jwt = await signed("route-guessing-roleless")
+    const claimed = await documentCommand("claimed-guess", "/a/sample/index.html", "claimed")
+    const free = await documentCommand("free-guess", "/a/free-guess/index.html", "free")
+    for (const candidate of [claimed.command, free.command]) {
+      await error(await command(jwt, { op: "begin", command: candidate }), 403, "forbidden")
+    }
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM publication_sessions").first()).toEqual({ n: 0 })
+  })
+
   it("accepts exact-origin Access cookies and never reflects credentials or private claims", async () => {
     const jwt = await signed("admin", { email: "private-claim@example.test" })
-    const response = await dispatch(request("/api/publication", "POST", null, JSON.stringify({ op: "status", sessionId: "unknown" }), { Origin: "https://manage.example.test", Cookie: `CF_Authorization=${jwt}`, "Content-Type": "application/json" }))
-    expect(response.status).not.toBe(401)
-    expect(response.status).not.toBe(403)
-    const text = await response.text()
+    const doc = await documentCommand("cookie-positive", "/a/cookie-positive/index.html", "cookie document")
+    const response = await dispatch(request("/api/publication", "POST", null, JSON.stringify({ op: "begin", command: doc.command }), { Origin: "https://manage.example.test", Cookie: `CF_Authorization=${jwt}`, "Content-Type": "application/json" }))
+    const text = await response.clone().text()
+    expect(await status(response)).toMatchObject({ state: "open", files: [{ path: "/a/cookie-positive/index.html", source: "client", stored: false }] })
     expect(text).not.toContain(jwt)
     expect(text).not.toContain("private-claim-witness")
     expect(text).not.toContain("private-claim@example.test")

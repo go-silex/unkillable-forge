@@ -24,6 +24,7 @@ export default defineConfig({
         plugins: [cloudflareTest(async () => ({
           miniflare: {
             compatibilityDate: "2025-02-14",
+            compatibilityFlags: ["unhandled_rejection_after_microtask_checkpoint"],
             d1Databases: ["DB", "EMPTY_DB"],
             r2Buckets: ["REVISION_BYTES"],
             bindings: { TEST_MIGRATIONS: await readD1Migrations(path.join(root, "migrations")) },

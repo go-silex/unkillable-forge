@@ -56,3 +56,36 @@ export async function publishDocument(publication: Publication, actor: ManageAct
   const receipt = await publication.commit(actor, session.sessionId)
   return { session, receipt }
 }
+
+/** Counts real D1 executions; every query and batch still runs against the supplied binding. */
+export function observeD1(db: D1Database): { db: D1Database; calls: () => number } {
+  let count = 0
+  const originals = new WeakMap<D1PreparedStatement, D1PreparedStatement>()
+  const wrap = (statement: D1PreparedStatement): D1PreparedStatement => {
+    const proxy = new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind") return (...values: unknown[]) => wrap(target.bind(...values))
+        const value = Reflect.get(target, property, target)
+        if (typeof value !== "function") return value
+        if (property === "first" || property === "all" || property === "run" || property === "raw") {
+          return (...args: unknown[]) => { count++; return value.apply(target, args) }
+        }
+        return value.bind(target)
+      },
+    })
+    originals.set(proxy, statement)
+    return proxy
+  }
+  const observed = new Proxy(db, {
+    get(target, property) {
+      if (property === "prepare") return (query: string) => wrap(target.prepare(query))
+      if (property === "batch") return (statements: D1PreparedStatement[]) => {
+        count++
+        return target.batch(statements.map(statement => originals.get(statement) ?? statement))
+      }
+      const value = Reflect.get(target, property, target)
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  })
+  return { db: observed, calls: () => count }
+}
