@@ -73,13 +73,13 @@ CASE
   WHEN ?3 IN ('publish', 'unpublish', 'restore_page') AND (SELECT content_version FROM artifacts WHERE artifact_id = ?7) IS NOT ?13 THEN 'conflict'
   WHEN ?3 IN ('assign_role', 'revoke_role', 'disable_principal') AND (SELECT authority_epoch FROM principals WHERE principal_id = ?9) IS NOT ?14 THEN 'conflict'
   WHEN ?3 = 'disable_principal' AND EXISTS (SELECT 1 FROM principals WHERE principal_id = ?9 AND status = 'disabled') THEN 'invalid_state'
-  WHEN ?3 IN ('create_page', 'publish', 'restore_page') AND ?17 IS NOT NULL AND EXISTS (SELECT 1 FROM revision_resources rr JOIN mounts m ON m.path = rr.path WHERE rr.revision_id = ?17 AND m.artifact_id IS NOT ?7) THEN 'conflict'
-  WHEN ?3 IN ('create_page', 'publish', 'restore_page') AND ?17 IS NOT NULL AND EXISTS (
+  WHEN ?19 = 1 AND ?3 IN ('create_page', 'publish', 'restore_page') AND ?17 IS NOT NULL AND EXISTS (SELECT 1 FROM revision_resources rr JOIN mounts m ON m.path = rr.path WHERE rr.revision_id = ?17 AND m.artifact_id IS NOT ?7) THEN 'conflict'
+  WHEN ?19 = 1 AND ?3 IN ('create_page', 'publish', 'restore_page') AND ?17 IS NOT NULL AND EXISTS (
     SELECT 1 FROM revision_resources rr JOIN routes r ON r.kind = 'subtree' AND r.artifact_id <> ?7
       AND substr(rr.path, 1, length('/a/' || r.route_key || '/')) = '/a/' || r.route_key || '/'
     WHERE rr.revision_id = ?17
   ) THEN 'conflict'
-  WHEN ?3 IN ('create_page', 'publish', 'restore_page') AND EXISTS (
+  WHEN ?19 = 1 AND ?3 IN ('create_page', 'publish', 'restore_page') AND EXISTS (
     SELECT 1 FROM revision_resources d JOIN mounts m ON m.artifact_id IS NOT ?7
       AND substr(m.path, 1, length(substr(d.path, 1, length(d.path) - 10))) = substr(d.path, 1, length(d.path) - 10)
     WHERE d.revision_id = ?17 AND d.kind = 'document' AND d.path GLOB '/a/*/index.html' AND d.path NOT GLOB '/a/*/*/*'
@@ -101,13 +101,13 @@ CASE
 
 const GUARD_ACTIONS: readonly string[] = ["create_page", "stage", "publish", "restore_page", "unpublish", "set_visibility", "share", "rotate_share", "revoke_share", "reveal_share", "import_share", "set_alias", "assign_role", "revoke_role", "disable_principal"]
 
-function guardStatement(db: D1Database, instanceId: string, input: GuardInput, hasEdges: boolean): D1PreparedStatement {
+function guardStatement(db: D1Database, instanceId: string, input: GuardInput, hasEdges: boolean, checkNamespace: boolean): D1PreparedStatement {
   if (!GUARD_ACTIONS.includes(input.action)) throw new PolicyError("forbidden")
   return db.prepare(GUARD_SQL).bind(newId("ev"), instanceId, input.action, input.actor.principalId, input.actor.surface,
     input.pageId ?? null, input.artifactId ?? null, input.grantId ?? null, input.targetPrincipalId ?? null,
     input.roleGrantId ?? null, input.actor.expectedAuthorityEpoch, input.expectedPolicyEpoch ?? null,
     input.expectedContentVersion ?? null, input.expectedTargetAuthorityEpoch ?? null,
-    input.requestDigest, input.occurredAt, input.revisionId ?? null, hasEdges ? 1 : 0)
+    input.requestDigest, input.occurredAt, input.revisionId ?? null, hasEdges ? 1 : 0, checkNamespace ? 1 : 0)
 }
 
 export function mapPolicyError(error: unknown): PolicyError {
@@ -192,9 +192,20 @@ export async function executeGuarded(deps: ManageDeps, actor: ManageActor, guard
     }
   }
   try {
-    return await deps.db.batch([...guards.map(g => guardStatement(deps.db, deps.config.instanceId, {
-      ...g, actor: { principalId: actor.principalId, surface: "manage", expectedAuthorityEpoch: actor.authorityEpoch },
-    }, !!ownership?.edges.some(edge => edge.ownerPageId === g.pageId))), ...effects, ...(ownership ? ownershipStatements(deps.db, actor, ownership) : []), ...finalEffects])
+    const claims = new Map<string | null, Set<string | null>>()
+    const statements = guards.map(g => {
+      let checkNamespace = false
+      if (g.action === "create_page" || g.action === "publish" || g.action === "restore_page") {
+        const artifact = g.artifactId ?? null, revision = g.revisionId ?? null
+        let revisions = claims.get(artifact)
+        if (!revisions) { revisions = new Set(); claims.set(artifact, revisions) }
+        if (!revisions.has(revision)) { revisions.add(revision); checkNamespace = true }
+      }
+      return guardStatement(deps.db, deps.config.instanceId, {
+        ...g, actor: { principalId: actor.principalId, surface: "manage", expectedAuthorityEpoch: actor.authorityEpoch },
+      }, !!ownership?.edges.some(edge => edge.ownerPageId === g.pageId), checkNamespace)
+    })
+    return await deps.db.batch([...statements, ...effects, ...(ownership ? ownershipStatements(deps.db, actor, ownership) : []), ...finalEffects])
   } catch (error) {
     throw mapPolicyError(error)
   }
