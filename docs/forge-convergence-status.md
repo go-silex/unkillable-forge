@@ -317,3 +317,12 @@ The local runtime diagnostic experiment stops with three inconclusive captures: 
 - Décision humaine `f04_memory_evidence_standard=operational_limits_no_peak_claim` : le témoin cloud 32 Mio et joint exige des opérations réussies, le contrôle des dépassements mémoire et les métriques natives disponibles, sans revendiquer de pic ou marge par requête. Ni plafond permanent à 32 Mio ni abandon des cardinalités, concurrence ou fichiers plus gros à supporter avant migration. Aucun grant F04 Cloudflare, écriture ni télémétrie n'est accordé ; les opérateurs cloud restent incomplets.
 
 **Toujours 4/16 livrés ; F04 non livré.** Aucun merge, bascule, changement de droits, clé, URL, asset ou shortlink n'est autorisé par ce checkpoint.
+
+### Revue du correctif Q1 et CI réelle — 2026-11-15
+
+- Runtime `e38a7b2a17f326c043b74dfd2aa629ee98cd5653` : GREEN natif 113/113 sur les mêmes tests que le RED 13/100, avec 82 inputs stables ; [CI43701028804](https://github.com/go-silex/unkillable-forge/actions/runs/43701028804) cinq jobs requis verts, 41 fichiers/384 Vitest et 205 Python ; [secret scan43701028744](https://github.com/go-silex/unkillable-forge/actions/runs/43701028744) vert. Le merge CI `5c8e88cd0b4caf5be290611773f3500fccc1ca5f` et le head ont le même arbre observé `fffee568a733d5f7eaf51cb5ba8f58c4b00827c3`.
+- Les deux revues indépendantes de ce SHA ne trouvent aucun défaut bloquant dans le runtime Q1, mais E1/D-1 signale trois cellules normatives perdues en §6 du contrat. Le présent correctif documentaire rétablit `actor authority · policy epoch` pour share, rotate/revoke et import, corrige le renvoi ADR vers §7 et précise le glossaire. Aucun code, test, schéma, ordre de refus ou droit existant ne change.
+- R16 reste INCONCLUSIVE. Le log CI `e38a7b2` contient 12 occurrences `fixed-length`, 24 `Network connection lost`, 16 `client disconnected` et 40 `Uncaught` : ce sont des occurrences textuelles, pas une attribution causale, un nombre d'événements ou une preuve d'innocuité. Les résultats et comptes antérieurs restent historiques.
+- La correction documentaire demande un nouveau SHA, sa liaison, sa revue et sa CI propres. Les preuves jointes/largeur du SHA final et les cycles Cloudflare restent à établir ; les préparations privées ne sont pas des résultats. H1 est décidé selon le standard indiqué ci-dessus, mais aucun grant Cloudflare F04, déploiement, bootstrap, télémétrie ou bascule n'est accordé.
+
+**Toujours 4/16 livrés ; F04 non livré.** Aucun changement de production, accès, clé de partage, URL, asset ou shortlink.

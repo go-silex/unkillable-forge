@@ -202,10 +202,10 @@ Owner-approved (plan §2.5): team readers read and never mutate; publishing and 
 | `unpublish` | same as `publish` | page live | actor authority · policy epoch · content version |
 | `restore_page` (F04 restore, §9.4) | admin · publisher@installation | page tombstoned in artefact; revision belongs to artefact and contains the page; paths unclaimed by other artefacts; former route free | actor authority · artefact content version (the tombstone is the page precondition; the effect increments the policy epoch) |
 | `set_visibility` (private, public) | same as `publish` | page live | actor authority · policy epoch |
-| `share` | same as `publish` | page live; a new pinned revision satisfies rule 7 (§8) |
-| `rotate_share` · `revoke_share` | same as `publish` | page live, grant active on page; a new or carried pin for `rotate_share` satisfies rule 7 (§8) |
+| `share` | same as `publish` | page live; a new pinned revision satisfies rule 7 (§8) | actor authority · policy epoch |
+| `rotate_share` · `revoke_share` | same as `publish` | page live, grant active on page; a new or carried pin for `rotate_share` satisfies rule 7 (§8) | actor authority · policy epoch |
 | `reveal_share` | same as `publish` | grant active with a sealed copy | actor authority · policy epoch |
-| `import_share` | admin | page live; `follow_active` only |
+| `import_share` | admin | page live; `follow_active` only | actor authority · policy epoch |
 | `set_alias` | admin | target page live if given | actor authority |
 | `assign_role` · `revoke_role` · `disable_principal` | admin | target principal exists; revoked role grant active | actor authority · target authority; last active admin protected |
 
