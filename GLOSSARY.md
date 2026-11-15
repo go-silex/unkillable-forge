@@ -105,6 +105,7 @@ The instance's fixed public files: landing, login and icons.
 
 **Pinned read**:
 Reading the resources of one named revision of a page. It needs a read right that holds now; a pinned-read token only makes that revision reachable for a short time.
+A new pinned grant can name only a revision previously made active.
 
 ### Access
 

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest"
 import { assignRole, claimPageStatements, disablePrincipal, retirePageStatements, revokeRole } from "../../domains/catalogue/commands"
 import { executeGuarded, type GuardRequest } from "../../domains/catalogue/guard"
 import { documentRouteOf, validateRevisionPaths } from "../../domains/catalogue/revision-paths"
-import { actor, adminRoleId, artifactId, authenticatedActor, bootstrap, configs, digest, jwks, pageFixture, pageId, principalId, revisionId } from "./fixtures/catalogue"
+import { actor, adminRoleId, artifactId, authenticatedActor, bootstrap, configs, digest, jwks, pageFixture, pageId, principalId, revisionId, syntheticCommitHistory } from "./fixtures/catalogue"
 
 const guard: GuardRequest = { action: "set_visibility", pageId, artifactId, expectedPolicyEpoch: 0, requestDigest: digest, occurredAt: 10 }
 const effect = () => env.DB.prepare("UPDATE pages SET visibility = 'public' WHERE page_id = ?").bind(pageId)
@@ -58,6 +58,7 @@ describe("transactional policy guard", () => {
       env.DB.prepare("INSERT INTO revisions (revision_id,artifact_id,origin,manifest_sha256,manifest_object_key,sealed_at) VALUES (?,?,'published',?,'discarded',2)").bind(discarded, artifactId, digest),
       env.DB.prepare("INSERT INTO revision_discards (revision_id,discarded_at,verdict) VALUES (?,3,'ok')").bind(discarded),
     ])
+    await syntheticCommitHistory({ artifact: artifactId, revision: discarded, at: 2 })
     const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
     await expect(executeGuarded(deps, actor, [{ action: "publish", pageId, artifactId, revisionId: discarded, expectedPolicyEpoch: 0, expectedContentVersion: 0, requestDigest: digest, occurredAt: 10 }], [effect()])).rejects.toMatchObject({ code: "not_found" })
     await expect(executeGuarded(deps, actor, [{ action: "share", pageId, artifactId, revisionId: discarded, expectedPolicyEpoch: 0, requestDigest: digest, occurredAt: 10 }], [effect()])).rejects.toMatchObject({ code: "invalid_state" })
@@ -196,6 +197,7 @@ describe("revision-wide namespace guard", () => {
   }
   it.each(["stage", "unpublish", "share"] as const)("checks the first claim after a %s guard, with atomic rollback", async action => {
     await seedOther()
+    if (action === "share") await syntheticCommitHistory({ artifact: otherArtifact, revision: candidate, at: 2 })
     await mount("/public/collision.js", artifactId, revisionId)
     await resource(candidate, "/public/collision.js")
     const d = await deps()

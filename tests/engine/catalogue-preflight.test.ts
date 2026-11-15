@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { activePinnedGrantSql, livePagesFrom, livePagesStatement } from '../../domains/catalogue/artifact-pages'
 import { assignRole, claimPageStatements, revokeRole, revokeShare, share } from '../../domains/catalogue/commands'
 import { assertPrepareAuthority } from '../../domains/catalogue/read'
-import { actor, artifactId, authenticatedActor, bootstrap, configs, digest, jwks, pageFixture, pageId, revisionId } from './fixtures/catalogue'
+import { actor, artifactId, authenticatedActor, bootstrap, configs, digest, jwks, pageFixture, pageId, revisionId, syntheticCommitHistory } from './fixtures/catalogue'
 
 beforeEach(async () => { await bootstrap(); await pageFixture() })
 
@@ -52,6 +52,7 @@ describe('Catalogue publication preflight', () => {
     expect(livePagesFrom(selected[0])).toEqual([{ pageId, policyEpoch: 0, documentPath: '/a/sample/index.html', route: { kind: 'subtree', slug: 'sample' } }])
     const isPinned = async () => (await env.DB.prepare(`SELECT ${activePinnedGrantSql('?1')} AS pinned`).bind(revisionId).first<{ pinned: number }>())?.pinned
     expect(await isPinned()).toBe(0)
+    await syntheticCommitHistory({ artifact: artifactId, revision: revisionId, at: 1 })
     const grant = await share(deps, actor, { pageId, artifactId, expectedPolicyEpoch: 0, mode: 'pinned', revisionId })
     expect(await isPinned()).toBe(1)
     await revokeShare(deps, actor, { pageId, artifactId, expectedPolicyEpoch: 1, grantId: grant.grantId })

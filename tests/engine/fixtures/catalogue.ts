@@ -4,6 +4,7 @@ import type { ManageInstanceConfig, ReadInstanceConfig } from "../../../domains/
 import { authenticateManage, type ManageActor } from "../../../domains/catalogue/principals"
 import { authenticate, type JwksSource, type VerifiedIdentity } from "../../../domains/catalogue/identity"
 import { executeGuarded } from "../../../domains/catalogue/guard"
+import { newId } from "../../../domains/catalogue/ids"
 
 export const instanceId = "test-forge"
 export const principalId = `pr_${"a".repeat(26)}`
@@ -89,6 +90,15 @@ export async function pageFixture(options: { artifact?: string; revision?: strin
   if (options.visibility === "public") {
     await setVisibility({ db: env.DB, config: (await configs()).manage, jwks, now: () => 2 }, actor, { pageId: page, artifactId: artifact, expectedPolicyEpoch: 0, visibility: "public" })
   }
+}
+
+// Synthetic Publication history for policy-only Catalogue fixtures; not a native publication receipt, byte, capacity or F10 import proof.
+export async function syntheticCommitHistory({ revision, artifact, at, instance = instanceId }: { revision: string; artifact: string; at: number; instance?: string }): Promise<void> {
+  const session = newId("ps")
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO publication_sessions (session_id,instance_id,actor_principal_id,actor_authority_epoch,idempotency_key,request_digest,artifact_id,artifact_is_new,revision_id,base_revision_id,base_content_version,created_at,expires_at) VALUES (?,?,?,0,?,?,?,0,?,NULL,0,?,?)").bind(session, instance, principalId, `synthetic-commit-${revision}`, digest, artifact, revision, at, at + 1),
+    env.DB.prepare("INSERT INTO publication_events (event_id,action,session_id,instance_id,idempotency_key,artifact_id,revision_id,actor_principal_id,request_digest,occurred_at,receipt_json,verdict) VALUES (?,'commit',?,?,NULL,?,?,?,?,?,NULL,'ok')").bind(newId("pe"), session, instance, artifact, revision, principalId, digest, at),
+  ])
 }
 
 export async function mountedSubdocument(path: string): Promise<void> {

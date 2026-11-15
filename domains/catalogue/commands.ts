@@ -104,9 +104,9 @@ export async function revealShare(deps: ManageDeps, actor: ManageActor, cmd: Pag
 }
 export async function importShare(deps: ManageDeps, actor: ManageActor, cmd: PageTarget & { readonly key: string; readonly mode: 'follow_active' }): Promise<{ readonly grantId: string; readonly policyEpoch: number }> {
   requireManageActor(actor, deps)
-  if (!isShareKey(cmd.key)) throw new PolicyError('invalid_state')
+  if (cmd.mode !== 'follow_active' || !isShareKey(cmd.key)) throw new PolicyError('invalid_state')
   const g = await input(deps, 'import_share', cmd, target(cmd))
-  const created = await newGrant(deps, cmd.pageId, cmd.key, cmd, g.occurredAt, actor.principalId, 'imported')
+  const created = await newGrant(deps, cmd.pageId, cmd.key, { mode: 'follow_active' }, g.occurredAt, actor.principalId, 'imported')
   await run(deps, actor, g, [created.statement, updatePage(deps.db, cmd.pageId, 'shared')])
   return { grantId: created.grantId, policyEpoch: cmd.expectedPolicyEpoch + 1 }
 }

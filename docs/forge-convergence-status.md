@@ -1,6 +1,6 @@
 # Convergence Forge — état d'exécution
 
-Plan : [forge-convergence-plan.md](forge-convergence-plan.md). Dernière mise à jour : 2026-11-14. Ce suivi ne constitue pas une autorisation de mutation de production.
+Plan : [forge-convergence-plan.md](forge-convergence-plan.md). Dernière mise à jour : 2026-11-15. Ce suivi ne constitue pas une autorisation de mutation de production.
 
 ## Autorisations et invariants
 
@@ -247,7 +247,7 @@ Quatre lots sur seize livrés : F01, F02, F03 et F06.
 
 | Lot | État | Dépendances bloquantes |
 |---|---|---|
-| F04 | Corrections natives vérifiées, **non livré** ; `~/.omp/wt/unkillable-forge/feat-F04-publication`, `feat/F04-publication` | [PR #10 ready pour ses checks seulement](https://github.com/go-silex/unkillable-forge/pull/10). F03/F06 satisfaits. CI du candidat02ec355 :353 Vitest/205 Python et cinq jobs requis verts, mais revues indépendantes NOT_CLEAR : restore jamais committé et preuves de courses absentes. Corrections et checkpoint composite ci-dessous ; nouveau SHA/revues/CI requis. Joint-max local/cloud,32Mio distant et méthode mémoire restent dus ; aucun grant Cloudflare F04 |
+| F04 | Correctif committed-only en cours, **non livré** ; `~/.omp/wt/unkillable-forge/feat-F04-publication`, `feat/F04-publication` | [PR #10](https://github.com/go-silex/unkillable-forge/pull/10). F03/F06 satisfaits. Les preuves et CI du baseline `96fe5e2` restent liées à ce SHA ; le correctif exige nouveau SHA, revues indépendantes et CI réelle. Témoin cloud joint et 32 Mio, inspection D1/R2/CPU et contrôles mémoire restent dus ; aucun grant Cloudflare F04 |
 | F05 | Non démarré | F03, F04 |
 | F07 | Non démarré | F04, F06 |
 | F08 | Non démarré | F04, F05, F06, F07 ; worktrees consommateurs distincts |
@@ -307,3 +307,13 @@ The local runtime diagnostic experiment stops with three inconclusive captures: 
 - Les scripts privés du témoin ne valent pas une preuve native : syntaxe/refus sans arguments PASS, générateur joint hors ligne vérifié ; harnais10k/1k/20k et largeur/UTF-8 à relier/exécuter au nouveau SHA. Aucun cycle cloud exécuté, aucun grant F04. R16 reste INCONCLUSIVE ;11/22/16/38 sont des occurrences textuelles du logCI02ec, pas des événements uniques ou inoffensifs. Mémoire H1 non décidée : métriques d'isolat à l'invocation ≠ pic par requête.
 
 **Toujours4/16 livrés.** Ce checkpoint correctif ne ferme pas F04 ; le prochain SHA demande sa propre liaison, revue indépendante et vraie CI. Capacité locale jointe et32Mio upload/matérialisation cloud, inspection D1/R2/CPU/mémoire restent des gates séparées. Aucun merge, bascule, droit Cloudflare F04, retrait de credential, changement production/Roxabi, accès/clé/URL/asset ou shortlink.
+
+### Politique committed-only et preuves baseline — 2026-11-15
+
+- Décision humaine `pinned_share_revision_policy=committed_only` : toute création ou rotation d'un pin exige une activation Publication durable pour le triplet exact instance/artefact/révision. Le guard Catalogue décide atomiquement, sans contrôle rétroactif en lecture ni révocation automatique. `importShare` reste `follow_active` seulement ; F10 devra préserver les droits et prouver toute activation historique équivalente sans fausse session native ; F11 préservera les faits.
+- RED natif avant correctif sur les sources runtime `96fe5e2` : deux projets TypeScript passent ; huit fichiers, 113 tests, dont 13 refus attendus résolus à tort et 100 succès. Les 82 inputs sélectionnés sont identiques avant/après. Cela établit le bypass avant correction, pas un GREEN du futur SHA.
+- Baseline exacte `96fe5e2` : Native MAX réussit 10 000 fichiers, 1 000 pages, 20 000 edges, deux révisions CV1→2 et 10 000 décisions de lecture en 471 861 ms (client all→base all). Native WIDTH est une preuve d'admission seulement : 8 Mio UTF-8 exacts, 250 métadonnées de 8 192 unités acceptées ; 8 193, UTF-8 malformé et dépassement de budget octets refusés. Reçu privé `F04-native96-MAX-and-WIDTH-GREEN.json`, SHA-256 `2f6df463a78774ab525a2c6767695be65348123817d5fadfa56636bd8eef4ae7`.
+- CI réelle baseline `96fe5e2` : cinq jobs et secret scan verts, 367 Vitest/205 Python, arbre `77f985e`, merge CI `042f1c4` ; revue du code de ce seul baseline claire, pas acceptation de livraison. Aucun résultat n'est attribué au futur SHA corrigé, qui exige sa propre revue et CI.
+- Décision humaine `f04_memory_evidence_standard=operational_limits_no_peak_claim` : le témoin cloud 32 Mio et joint exige des opérations réussies, le contrôle des dépassements mémoire et les métriques natives disponibles, sans revendiquer de pic ou marge par requête. Ni plafond permanent à 32 Mio ni abandon des cardinalités, concurrence ou fichiers plus gros à supporter avant migration. Aucun grant F04 Cloudflare, écriture ni télémétrie n'est accordé ; les opérateurs cloud restent incomplets.
+
+**Toujours 4/16 livrés ; F04 non livré.** Aucun merge, bascule, changement de droits, clé, URL, asset ou shortlink n'est autorisé par ce checkpoint.

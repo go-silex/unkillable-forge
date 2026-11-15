@@ -97,6 +97,8 @@ F04 remains pending acceptance. This dated amendment clarifies technical interfa
 - Native version-bound R2 inventory replaces per-file commit HEAD fanout. Same key/size/native upload version binds bytes already verified by Store; this is an explicit design inference, not a claim that version or ETag is SHA-256. Missing versions fail closed and the native cloud witness remains due.
 - HTTP uses shared, actually consumed edge admission/error primitives. F07 owns the scoped fresh-machine state read and F08 proves its consumption. The local profile is not a production deployment guard; F10 owns bounded/non-starving resweeps and F11 their scheduling and instance profiles.
 
+**Clarification — 2026-11-15.** Catalogue remains the sole decider for new pinned grants; its atomic guard also reads Publication's permanent exact commit fact. The read dependencies are declared in contract §8.3; neither authority nor write ownership moves.
+
 
 ## Expected debt
 

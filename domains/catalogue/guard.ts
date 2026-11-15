@@ -98,7 +98,11 @@ CASE
     OR EXISTS (SELECT 1 FROM revision_pages WHERE revision_id = ?17 AND page_id = ?6)
     OR EXISTS (SELECT 1 FROM artifacts WHERE active_revision_id = ?17)
     OR EXISTS (SELECT 1 FROM revision_discards WHERE revision_id = ?17)) THEN 'invalid_state'
-  WHEN ?3 IN ('share', 'rotate_share') AND ?17 IS NOT NULL AND (NOT EXISTS (SELECT 1 FROM revisions WHERE revision_id = ?17 AND artifact_id = ?7) OR EXISTS (SELECT 1 FROM revision_discards WHERE revision_id = ?17)) THEN 'invalid_state'
+  WHEN ?3 IN ('share', 'rotate_share') AND ?17 IS NOT NULL AND (
+    NOT EXISTS (SELECT 1 FROM revisions WHERE revision_id = ?17 AND artifact_id = ?7)
+    OR EXISTS (SELECT 1 FROM revision_discards WHERE revision_id = ?17)
+    OR NOT EXISTS (SELECT 1 FROM publication_events WHERE action = 'commit' AND instance_id = ?2 AND artifact_id = ?7 AND revision_id = ?17)
+  ) THEN 'invalid_state'
   WHEN ?3 = 'reveal_share' AND (SELECT sealed_key FROM share_grants WHERE grant_id = ?8) IS NULL THEN 'invalid_state'
   WHEN ?3 = 'revoke_role' AND (SELECT role FROM role_grants WHERE role_grant_id = ?10) = 'admin' AND NOT EXISTS (SELECT 1 FROM role_grants g JOIN principals p ON p.principal_id = g.principal_id WHERE g.role = 'admin' AND g.revoked_at IS NULL AND p.status = 'active' AND g.role_grant_id <> ?10) THEN 'last_admin'
   WHEN ?3 = 'disable_principal' AND EXISTS (SELECT 1 FROM role_grants WHERE principal_id = ?9 AND role = 'admin' AND revoked_at IS NULL) AND NOT EXISTS (SELECT 1 FROM role_grants g JOIN principals p ON p.principal_id = g.principal_id WHERE g.role = 'admin' AND g.revoked_at IS NULL AND p.status = 'active' AND g.principal_id <> ?9) THEN 'last_admin'
