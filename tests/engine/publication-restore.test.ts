@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers"
 import { beforeEach, describe, expect, it } from "vitest"
 import { assignRole, readPagePolicy, revokeRole, share } from "../../domains/catalogue/commands"
+import { PolicyError } from "../../domains/catalogue/guard"
 import { newId } from "../../domains/catalogue/ids"
 import { documentRouteOf } from "../../domains/catalogue/revision-paths"
 import { canonicalUrl } from "../../domains/catalogue/routing/grammar"
@@ -17,6 +18,110 @@ const anonymous: ReadCredentials = { team: null, shareKey: null, shareCookie: nu
 beforeEach(async () => { await bootstrap() })
 
 describe("multi-page publication restore", () => {
+  it.each([["admin", "sealed"], ["admin", "abandoned"], ["scoped", "sealed"], ["scoped", "abandoned"]] as const)(
+    "refuses %s restore of a never-committed %s revision without reserving its new page",
+    async (authority, state) => {
+      const time = clock(10_000)
+      const { manage, read } = await configs()
+      const store = new RevisionStore(env.REVISION_BYTES, instanceId)
+      const deps: PublicationDeps = { db: env.DB, config: manage, jwks, now: time.now, store, publication: { sessionTtlMs: 60_000, maxUploadTimeoutMs: 1000, retainMs: 900_000, marginMs: 1000, manageClockSkewMs: 0, readClockSkewMs: 0 } }
+      const publication = new PublicationService(deps)
+      const first = await documentCommand("never-committed-original", firstPath, "original private page")
+      const initial = await publishDocument(publication, actor, first.command, first.bytes)
+      expect(await readPagePolicy(deps, actor, first.pageId)).toMatchObject({ visibility: "private", contentVersion: initial.receipt.contentVersion })
+      const added = await content("uncommitted new page")
+      const addedPage = newId("pg")
+      const command: BeginCommand = {
+        idempotencyKey: "never-committed-stage",
+        artifactId: initial.session.artifactId,
+        expectedRevisionId: initial.session.revisionId,
+        expectedContentVersion: initial.receipt.contentVersion,
+        files: [...first.command.files, { path: droppedPath, kind: "document", sha256: added.sha256, size: added.size, contentType: "text/html", source: "client" }],
+        pages: [{ ...first.command.pages[0], disposition: "keep", expectedPolicyEpoch: 0 }, { pageId: addedPage, disposition: "new", documentPath: droppedPath, metadata: {}, expectedPolicyEpoch: null }],
+        edges: [],
+      }
+      const staged = await publication.begin(actor, command)
+      await publication.upload(actor, staged.sessionId, firstPath, body(first.bytes))
+      await publication.upload(actor, staged.sessionId, droppedPath, body(added.bytes))
+      expect(await publication.seal(actor, staged.sessionId)).toMatchObject({ state: "sealed", revisionId: staged.revisionId })
+      if (state === "abandoned") {
+        await publication.abort(actor, staged.sessionId)
+        expect(await publication.status(actor, staged.sessionId)).toMatchObject({ state: "closed" })
+      }
+      let restorer = actor
+      if (authority === "scoped") {
+        const person = await authenticatedActor("never-committed-scoped")
+        await assignRole(deps, actor, { targetPrincipalId: person.principalId, expectedTargetAuthorityEpoch: 0, role: "publisher", scope: { kind: "page", pageId: first.pageId } })
+        restorer = await authenticatedActor("never-committed-scoped")
+      }
+      const snapshot = async () => (await env.DB.batch([
+        env.DB.prepare("SELECT * FROM mounts ORDER BY path"),
+        env.DB.prepare("SELECT * FROM routes ORDER BY kind, route_key"),
+        env.DB.prepare("SELECT * FROM mutation_events ORDER BY event_id"),
+        env.DB.prepare("SELECT * FROM publication_events ORDER BY event_id"),
+        env.DB.prepare("SELECT active_revision_id, content_version FROM artifacts WHERE artifact_id = ?").bind(initial.session.artifactId),
+      ])).map(result => result.results)
+      const before = await snapshot()
+      const attempt = publication.restore(restorer, { idempotencyKey: "never-committed-restore", artifactId: initial.session.artifactId, revisionId: staged.revisionId, expectedContentVersion: initial.receipt.contentVersion })
+      await expect(attempt).rejects.toBeInstanceOf(PolicyError)
+      await expect(attempt).rejects.toMatchObject({ code: "invalid_state", detail: "publication_never_committed" })
+      expect(await snapshot()).toEqual(before)
+      expect(await readPagePolicy(deps, actor, first.pageId)).toMatchObject({ visibility: "private", contentVersion: initial.receipt.contentVersion })
+      expect(await readPagePolicy(deps, actor, addedPage)).toBeNull()
+      expect(await decideRead(env.DB, read, { kind: "page", route: { kind: "subtree", slug: "kept" }, candidates: [firstPath], fragmentPath: null }, { ...anonymous, team: teamIdentity }, null)).toMatchObject({ kind: "allow", plan: { revisionId: initial.session.revisionId } })
+      expect(await decideRead(env.DB, read, { kind: "page", route: { kind: "subtree", slug: "dropped" }, candidates: [droppedPath], fragmentPath: null }, { ...anonymous, team: teamIdentity }, null)).toEqual({ kind: "deny", reason: "not_found" })
+      expect(await storedBytes(store, { artifactId: initial.session.artifactId, revisionId: initial.session.revisionId, kind: "resource", path: firstPath })).toEqual(first.bytes)
+      expect(await storedBytes(store, { artifactId: staged.artifactId, revisionId: staged.revisionId, kind: "resource", path: firstPath })).toEqual(first.bytes)
+      expect(await storedBytes(store, { artifactId: staged.artifactId, revisionId: staged.revisionId, kind: "resource", path: droppedPath })).toEqual(added.bytes)
+      const other = await documentCommand("never-committed-independent", droppedPath, "independent owner")
+      const claimed = await publishDocument(publication, actor, other.command, other.bytes)
+      expect(await decideRead(env.DB, read, { kind: "page", route: { kind: "subtree", slug: "dropped" }, candidates: [droppedPath], fragmentPath: null }, { ...anonymous, team: teamIdentity }, null)).toMatchObject({ kind: "allow", plan: { artifactId: claimed.session.artifactId, revisionId: claimed.session.revisionId } })
+      expect(await storedBytes(store, { artifactId: staged.artifactId, revisionId: staged.revisionId, kind: "resource", path: droppedPath })).toEqual(added.bytes)
+    },
+  )
+  it("can commit and later restore a sealed revision after its premature restore is refused", async () => {
+    const time = clock(10_000)
+    const { manage, read } = await configs()
+    const store = new RevisionStore(env.REVISION_BYTES, instanceId)
+    const deps: PublicationDeps = { db: env.DB, config: manage, jwks, now: time.now, store, publication: { sessionTtlMs: 60_000, maxUploadTimeoutMs: 1000, retainMs: 900_000, marginMs: 1000, manageClockSkewMs: 0, readClockSkewMs: 0 } }
+    const publication = new PublicationService(deps)
+    const first = await documentCommand("retry-after-refusal-original", firstPath, "original bytes")
+    const initial = await publishDocument(publication, actor, first.command, first.bytes)
+    const added = await content("new committed page")
+    const addedPage = newId("pg")
+    const command: BeginCommand = {
+      idempotencyKey: "retry-after-refusal-stage",
+      artifactId: initial.session.artifactId,
+      expectedRevisionId: initial.session.revisionId,
+      expectedContentVersion: initial.receipt.contentVersion,
+      files: [...first.command.files, { path: droppedPath, kind: "document", sha256: added.sha256, size: added.size, contentType: "text/html", source: "client" }],
+      pages: [{ ...first.command.pages[0], disposition: "keep", expectedPolicyEpoch: 0 }, { pageId: addedPage, disposition: "new", documentPath: droppedPath, metadata: {}, expectedPolicyEpoch: null }],
+      edges: [],
+    }
+    const staged = await publication.begin(actor, command)
+    await publication.upload(actor, staged.sessionId, firstPath, body(first.bytes))
+    await publication.upload(actor, staged.sessionId, droppedPath, body(added.bytes))
+    expect(await publication.seal(actor, staged.sessionId)).toMatchObject({ state: "sealed", revisionId: staged.revisionId })
+    const restoreKey = "retry-after-refusal-restore"
+    const premature = publication.restore(actor, { idempotencyKey: restoreKey, artifactId: staged.artifactId, revisionId: staged.revisionId, expectedContentVersion: initial.receipt.contentVersion })
+    await expect(premature).rejects.toBeInstanceOf(PolicyError)
+    await expect(premature).rejects.toMatchObject({ code: "invalid_state", detail: "publication_never_committed" })
+    expect(await publication.status(actor, staged.sessionId)).toMatchObject({ state: "sealed" })
+    const committed = await publication.commit(actor, staged.sessionId)
+    expect(committed).toMatchObject({ artifactId: staged.artifactId, revisionId: staged.revisionId, contentVersion: initial.receipt.contentVersion + 1 })
+    expect(committed.pages).toEqual(expect.arrayContaining([expect.objectContaining({ pageId: first.pageId }), expect.objectContaining({ pageId: addedPage })]))
+    const removed = await publication.unpublish(actor, { idempotencyKey: "retry-after-refusal-unpublish", artifactId: staged.artifactId, expectedContentVersion: committed.contentVersion })
+    expect(removed).toMatchObject({ revisionId: null, contentVersion: committed.contentVersion + 1 })
+    const restored = await publication.restore(actor, { idempotencyKey: restoreKey, artifactId: staged.artifactId, revisionId: staged.revisionId, expectedContentVersion: removed.contentVersion })
+    expect(restored).toMatchObject({ revisionId: staged.revisionId, contentVersion: removed.contentVersion + 1 })
+    expect(restored.pages).toEqual(expect.arrayContaining([expect.objectContaining({ pageId: first.pageId }), expect.objectContaining({ pageId: addedPage })]))
+    expect(await readPagePolicy(deps, actor, first.pageId)).toMatchObject({ visibility: "private", contentVersion: restored.contentVersion })
+    expect(await readPagePolicy(deps, actor, addedPage)).toMatchObject({ visibility: "private", contentVersion: restored.contentVersion })
+    expect(await decideRead(env.DB, read, { kind: "page", route: { kind: "subtree", slug: "kept" }, candidates: [firstPath], fragmentPath: null }, { ...anonymous, team: teamIdentity }, null)).toMatchObject({ kind: "allow", plan: { revisionId: staged.revisionId } })
+    expect(await decideRead(env.DB, read, { kind: "page", route: { kind: "subtree", slug: "dropped" }, candidates: [droppedPath], fragmentPath: null }, { ...anonymous, team: teamIdentity }, null)).toMatchObject({ kind: "allow", plan: { revisionId: staged.revisionId } })
+    expect(await storedBytes(store, { artifactId: staged.artifactId, revisionId: staged.revisionId, kind: "resource", path: firstPath })).toEqual(first.bytes)
+    expect(await storedBytes(store, { artifactId: staged.artifactId, revisionId: staged.revisionId, kind: "resource", path: droppedPath })).toEqual(added.bytes)
+  })
   it("restores a dropped page under its original ID, privately, without reviving its share or role", async () => {
     const time = clock(10_000)
     const { manage, read } = await configs()
@@ -103,8 +208,17 @@ describe("multi-page publication restore", () => {
     expect(await decideRead(env.DB, read, page, team, null)).toMatchObject({ kind: "allow", plan: { revisionId: moved.revisionId, resource: { path: newPath } } })
     expect(await decideRead(env.DB, read, oldPage, team, canonicalUrl(oldRoute))).toEqual({ kind: "deny", reason: "not_found" })
     expect(await decideRead(env.DB, read, page, anonymous, null)).toEqual({ kind: "deny", reason: "login_required" })
+    const eventsBefore = await env.DB.batch([
+      env.DB.prepare("SELECT event_id FROM mutation_events ORDER BY event_id"),
+      env.DB.prepare("SELECT event_id FROM publication_events ORDER BY event_id"),
+    ])
 
     await expect(publication.restore(actor, { idempotencyKey: "move-historical-restore", artifactId: initial.session.artifactId, revisionId: initial.session.revisionId, expectedContentVersion: receipt.contentVersion })).rejects.toMatchObject({ code: "invalid_state", detail: "restore_path_changed" })
+    const eventsAfter = await env.DB.batch([
+      env.DB.prepare("SELECT event_id FROM mutation_events ORDER BY event_id"),
+      env.DB.prepare("SELECT event_id FROM publication_events ORDER BY event_id"),
+    ])
+    expect(eventsAfter.map(result => result.results)).toEqual(eventsBefore.map(result => result.results))
     expect(await publication.status(actor, moved.sessionId)).toMatchObject({ state: "committed", revisionId: moved.revisionId })
     expect(await readPagePolicy(deps, actor, original.pageId)).toEqual(policy)
     expect(await decideRead(env.DB, read, page, team, null)).toMatchObject({ kind: "allow", plan: { revisionId: moved.revisionId, resource: { path: newPath } } })
@@ -126,7 +240,7 @@ describe("multi-page publication restore", () => {
     expect(await storedBytes(store, { artifactId: initial.session.artifactId, revisionId: initial.session.revisionId, kind: "resource", path: oldPath })).toEqual(original.bytes)
     expect(await storedBytes(store, { artifactId: moved.artifactId, revisionId: moved.revisionId, kind: "resource", path: newPath })).toEqual(movedContent.bytes)
   })
-  it("rejects keep for a tombstoned page at begin without creating a session or audit event", async () => {
+  it.each(["keep", "drop"] as const)("rejects %s for a tombstoned page at begin without creating a session or audit event", async disposition => {
     const time = clock(10_000)
     const { manage, read } = await configs()
     const store = new RevisionStore(env.REVISION_BYTES, instanceId)
@@ -145,11 +259,28 @@ describe("multi-page publication restore", () => {
     const before = await env.DB.prepare("SELECT (SELECT count(*) FROM publication_sessions) AS sessions, (SELECT count(*) FROM mutation_events) AS events, (SELECT count(*) FROM publication_events) AS publications").first()
     const artifactBefore = await env.DB.prepare("SELECT active_revision_id, content_version FROM artifacts WHERE artifact_id = ?").bind(initial.session.artifactId).first()
     expect(artifactBefore).toEqual({ active_revision_id: null, content_version: removed.contentVersion })
-    const command: BeginCommand = { idempotencyKey: "keep-tombstone-attempt", artifactId: initial.session.artifactId, expectedRevisionId: null, expectedContentVersion: removed.contentVersion, files: original.command.files, pages: [{ pageId: original.pageId, disposition: "keep", documentPath: path, metadata: {}, expectedPolicyEpoch: tombstone.policy_epoch }], edges: [] }
+    const candidate = await documentCommand("tombstone-candidate", "/a/tombstone-candidate/index.html", "candidate")
+    const command: BeginCommand = {
+      idempotencyKey: `tombstone-${disposition}-attempt`,
+      artifactId: initial.session.artifactId,
+      expectedRevisionId: null,
+      expectedContentVersion: removed.contentVersion,
+      files: disposition === "keep" ? original.command.files : candidate.command.files,
+      pages: disposition === "keep"
+        ? [{ pageId: original.pageId, disposition: "keep", documentPath: path, metadata: {}, expectedPolicyEpoch: tombstone.policy_epoch }]
+        : [{ pageId: original.pageId, disposition: "drop", documentPath: null, metadata: null, expectedPolicyEpoch: tombstone.policy_epoch }, ...candidate.command.pages],
+      edges: [],
+    }
+    const prefix = `${instanceId}/${initial.session.artifactId}/`
+    const objectsBefore = await env.REVISION_BYTES.list({ prefix })
+    expect(objectsBefore.truncated).toBe(false)
 
     await expect(publication.begin(actor, command)).rejects.toMatchObject({ code: "not_found" })
     expect(await env.DB.prepare("SELECT (SELECT count(*) FROM publication_sessions) AS sessions, (SELECT count(*) FROM mutation_events) AS events, (SELECT count(*) FROM publication_events) AS publications").first()).toEqual(before)
     expect(await env.DB.prepare("SELECT active_revision_id, content_version FROM artifacts WHERE artifact_id = ?").bind(initial.session.artifactId).first()).toEqual(artifactBefore)
+    const objectsAfter = await env.REVISION_BYTES.list({ prefix })
+    expect(objectsAfter.truncated).toBe(false)
+    expect(objectsAfter.objects.map(object => object.key).sort()).toEqual(objectsBefore.objects.map(object => object.key).sort())
     expect(await readPagePolicy(deps, actor, original.pageId)).toBeNull()
     expect(await decideRead(env.DB, read, { kind: "page", route: { kind: "subtree", slug: "keep-tombstone" }, candidates: [path], fragmentPath: null }, { ...anonymous, team: teamIdentity }, null)).toEqual({ kind: "deny", reason: "not_found" })
     expect(await storedBytes(store, { artifactId: initial.session.artifactId, revisionId: initial.session.revisionId, kind: "resource", path })).toEqual(original.bytes)

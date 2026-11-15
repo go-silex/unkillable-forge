@@ -11,6 +11,8 @@ type Session = { session_id: string; instance_id: string; actor_principal_id: st
 type FileRow = { path: string; kind: PublicationFile['kind']; sha256: string; size: number; content_type: string; source: PublicationFile['source']; object_key: string | null; object_version: string | null; stored_at: number | null }
 type PageRow = { page_id: string; disposition: PublicationPage['disposition']; document_path: string | null; metadata_json: string | null; expected_policy_epoch: number | null }
 type PageScope = Pick<PageRow, 'page_id' | 'disposition' | 'expected_policy_epoch'>
+type StatusFile = Pick<FileRow, 'path' | 'source' | 'stored_at'>
+type StatusPage = Pick<PageRow, 'page_id' | 'disposition'>
 type EdgeRow = { owner_page_id: string; path: string; provider_artifact_id: string }
 const id = (s: unknown, prefix: string): s is string => typeof s === 'string' && new RegExp(`^${prefix}_[a-z2-7]{26}$`).test(s)
 const fail = (): never => { throw new PolicyError('invalid_state') }
@@ -129,10 +131,10 @@ async function transferGuarded(deps: PublicationDeps, actor: ManageActor, s: Ses
 export async function status(deps: PublicationDeps, actor: ManageActor, sessionId: string): Promise<PublicationStatus> {
   const s = await load(deps, actor, sessionId)
   const [files, pages] = await deps.db.batch([
-    deps.db.prepare('SELECT * FROM publication_files WHERE session_id = ? ORDER BY path').bind(s.session_id),
-    deps.db.prepare('SELECT * FROM publication_pages WHERE session_id = ? ORDER BY page_id').bind(s.session_id),
+    deps.db.prepare('SELECT path,source,stored_at FROM publication_files WHERE session_id = ? ORDER BY path').bind(s.session_id),
+    deps.db.prepare('SELECT page_id,disposition FROM publication_pages WHERE session_id = ? ORDER BY page_id').bind(s.session_id),
   ])
-  const r = { files: files.results as FileRow[], pages: pages.results as PageRow[] }
+  const r = { files: files.results as StatusFile[], pages: pages.results as StatusPage[] }
   const events = await deps.db.prepare("SELECT action FROM publication_events WHERE session_id = ? AND action IN ('seal','commit')").bind(sessionId).all<{ action: string }>()
   const actions = new Set(events.results.map(e => e.action))
   const existingPageIds = r.pages.filter(p => p.disposition !== 'new').map(p => p.page_id)
@@ -176,7 +178,7 @@ export async function begin(deps: PublicationDeps, actor: ManageActor, command: 
     const pagesById = new Map(command.pages.map(p => [p.pageId,p]))
     const livePages = livePagesFrom(preflight[1])
     const liveIds = new Set(livePages.map(p => p.pageId))
-    if (command.pages.some(p => p.disposition === 'keep' && !liveIds.has(p.pageId))) throw new PolicyError('not_found')
+    if (command.pages.some(p => (p.disposition === 'keep' || p.disposition === 'drop') && !liveIds.has(p.pageId))) throw new PolicyError('not_found')
     for (const p of livePages) {
       const requested = pagesById.get(p.pageId)
       if (!requested || !['keep','drop'].includes(requested.disposition) || requested.expectedPolicyEpoch !== p.policyEpoch || (requested.disposition === 'keep' && requested.documentPath !== p.documentPath)) throw new PolicyError('conflict')

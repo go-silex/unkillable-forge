@@ -9,7 +9,7 @@ import { canonicalUrl, type SubtreeOrTree } from '../catalogue/routing/grammar'
 import type { PublicationDeps, PublicationReceipt, PromotionCommand, RestoreCommand } from './types'
 
 type Page = { page_id: string; disposition: 'new' | 'keep' | 'drop' | 'restore'; document_path: string | null; metadata_json: string | null; expected_policy_epoch: number | null }
-type ExistingPage = { page_id: string; document_path: string; policy_epoch: number; tombstoned_at: number | null }
+type ExistingPage = { page_id: string; document_path: string; policy_epoch: number }
 type Session = { session_id: string; instance_id: string; actor_principal_id: string; actor_authority_epoch: number; artifact_id: string; revision_id: string; base_revision_id: string | null; base_content_version: number; expires_at: number; closed_at: number | null; request_digest: string }
 type Event = { action: string; request_digest: string; receipt_json: string | null }
 
@@ -82,6 +82,7 @@ function eventStatement(deps: PublicationDeps, actor: ManageActor, p: { action: 
       WHEN ?14=1 AND ?13 IS NOT NULL AND EXISTS (SELECT 1 FROM revision_discards WHERE revision_id=?13) THEN 'conflict'
       WHEN ?5 IS NOT NULL AND EXISTS (SELECT 1 FROM publication_sessions WHERE instance_id=?4 AND actor_principal_id=?8 AND idempotency_key=?5) THEN 'conflict'
       WHEN ?7 IS NOT NULL AND EXISTS (SELECT 1 FROM revision_discards WHERE revision_id=?7) THEN 'conflict'
+      WHEN ?2='restore' AND NOT EXISTS (SELECT 1 FROM publication_events e WHERE e.action='commit' AND e.instance_id=?4 AND e.artifact_id=?6 AND e.revision_id=?7) THEN 'never_committed'
       ELSE 'ok' END`).bind(newId('pe'), p.action, p.sessionId, deps.config.instanceId, p.key, p.artifactId, p.revisionId, actor.principalId, p.digest, p.at, JSON.stringify({ receipt: p.result, pageIds: p.pageIds, actorAuthorityEpoch: actor.authorityEpoch }), p.expectedVersion, p.baseRevision ?? null, p.baseRevision === undefined ? 0 : 1, actor.authorityEpoch)
 }
 function mountStatements(deps: PublicationDeps, artifactId: string, revisionId: string): D1PreparedStatement[] {
@@ -154,8 +155,14 @@ async function promote(deps: PublicationDeps, actor: ManageActor, command: Promo
   const liveIdSet = new Set(liveIds)
   const pageIds = [...new Set([...liveIds, ...target.map(p => p.page_id)])]
   await assertPrepareAuthority(deps, actor, { artifactId: command.artifactId, pageIds, requireGlobal: pageIds.length === 0 || target.some(p => !liveIdSet.has(p.page_id)) })
-  const current: ExistingPage[] = livePagesFrom(liveResult).map(p => ({ page_id: p.pageId, document_path: p.documentPath, policy_epoch: p.policyEpoch, tombstoned_at: null }))
-  if (revisionId !== null && target.length === 0) throw new PolicyError('invalid_state', 'revision_without_page')
+  if (revisionId !== null) {
+    const revision = await db.prepare('SELECT 1 AS present FROM revisions WHERE revision_id=? AND artifact_id=? AND NOT EXISTS (SELECT 1 FROM revision_discards WHERE revision_id=?)').bind(revisionId, command.artifactId, revisionId).first<{ present: number }>()
+    if (!revision) throw new PolicyError('not_found')
+    if (target.length === 0) throw new PolicyError('invalid_state', 'revision_without_page')
+    const committed = await db.prepare("SELECT 1 AS present FROM publication_events WHERE action='commit' AND instance_id=? AND artifact_id=? AND revision_id=? LIMIT 1").bind(deps.config.instanceId, command.artifactId, revisionId).first<{ present: number }>()
+    if (!committed) throw new PolicyError('invalid_state', 'publication_never_committed')
+  }
+  const current: ExistingPage[] = livePagesFrom(liveResult).map(p => ({ page_id: p.pageId, document_path: p.documentPath, policy_epoch: p.policyEpoch }))
   const liveById = new Map(current.map(p => [p.page_id, p]))
   if (target.some(p => liveById.has(p.page_id) && liveById.get(p.page_id)!.document_path !== p.document_path)) {
     throw new PolicyError('invalid_state', 'restore_path_changed')
