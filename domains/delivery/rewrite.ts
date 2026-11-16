@@ -95,6 +95,35 @@ function rewriteSrcset(value: string, base: URL, origin: string, namespace: Name
   return result
 }
 
+// Preserve the original parameter text; semicolons inside quoted strings are
+// data, and quoted-pair escapes do not end a quoted string.
+function mediaTypeParts(type: string): string[] {
+  const parts: string[] = []
+  let start = 0, quoted = false, escaped = false
+  for (let i = 0; i < type.length; i++) {
+    const char = type[i]
+    if (quoted && escaped) { escaped = false; continue }
+    if (quoted && char === "\\") { escaped = true; continue }
+    if (char === '"') { quoted = !quoted; continue }
+    if (char === ";" && !quoted) { parts.push(type.slice(start, i)); start = i + 1 }
+  }
+  parts.push(type.slice(start))
+  return parts
+}
+
+function charsetParameter(part: string): string | undefined {
+  const match = /^\s*charset\s*=\s*(?:"((?:\\[\t -~]|[^"\\])*)"|([^\s;]+))\s*$/i.exec(part)
+  return match ? (match[1] === undefined ? match[2] : match[1].replace(/\\([\t -~])/g, "$1")) : undefined
+}
+
+function mediaTypeCharset(type: string): string | undefined {
+  for (const part of mediaTypeParts(type).slice(1)) {
+    const charset = charsetParameter(part)
+    if (charset !== undefined) return charset
+  }
+  return undefined
+}
+
 async function htmlEncoding(prefix: string): Promise<string | undefined> {
   let label: string | undefined
   await new HTMLRewriter().on("meta", {
@@ -102,7 +131,7 @@ async function htmlEncoding(prefix: string): Promise<string | undefined> {
       if (label) return
       let candidate = element.getAttribute("charset")
       if (!candidate && element.getAttribute("http-equiv")?.trim().toLowerCase() === "content-type") {
-        candidate = /(?:^|;)\s*charset\s*=\s*(?:"([^"]+)"|'([^']+)'|([^;\s]+))/i.exec(element.getAttribute("content") ?? "")?.slice(1).find(Boolean) ?? null
+        candidate = mediaTypeCharset(element.getAttribute("content") ?? "") ?? null
       }
       if (!candidate) return
       try { label = new TextDecoder(candidate.trim()).encoding } catch { /* Continue to the next declaration. */ }
@@ -114,7 +143,7 @@ async function htmlEncoding(prefix: string): Promise<string | undefined> {
 async function decodedText(response: Response, kind: "html" | "css"): Promise<string> {
   const bytes = new Uint8Array(await response.arrayBuffer())
   const type = response.headers.get("content-type") ?? ""
-  let label = /(?:^|;)\s*charset\s*=\s*(?:"([^"]+)"|'([^']+)'|([^;\s]+))/i.exec(type)?.slice(1).find(Boolean)
+  let label = mediaTypeCharset(type)
   if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) label = "utf-8"
   else if (bytes[0] === 0xff && bytes[1] === 0xfe) label = "utf-16le"
   else if (bytes[0] === 0xfe && bytes[1] === 0xff) label = "utf-16be"
@@ -128,7 +157,8 @@ async function decodedText(response: Response, kind: "html" | "css"): Promise<st
 }
 
 export function transformedContentType(type: string): string {
-  return `${type.replace(/;\s*charset\s*=\s*(?:"[^"]*"|'[^']*'|[^;\s]*)/ig, "")}; charset=utf-8`
+  const parts = mediaTypeParts(type)
+  return `${parts[0]}${parts.slice(1).filter(part => charsetParameter(part) === undefined).map(part => `;${part}`).join("")}; charset=utf-8`
 }
 
 function transformedHeaders(response: Response): Headers {
@@ -214,7 +244,7 @@ export async function rewriteHtml(response: Response, options: HtmlRewriteOption
       if (element.hasAttribute("charset")) element.setAttribute("charset", "utf-8")
       if (element.getAttribute("http-equiv")?.toLowerCase() === "content-type") {
         const content = element.getAttribute("content")
-        if (content) element.setAttribute("content", content.replace(/charset\s*=\s*[^;\s]+/i, "charset=utf-8"))
+        if (content) element.setAttribute("content", transformedContentType(content))
       }
     },
   })
