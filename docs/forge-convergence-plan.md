@@ -256,6 +256,8 @@ F03 et F06 sont parallélisables après F02. Le spike F06 livre une preuve de tr
 
 L'acceptation F04 conserve les preuves natives de concurrence/reprise/révocation et d'intégrité, la revue indépendante du SHA final et les checks CI requis. Le smoke réel acquis couvre création puis mise à jour, upload et matérialisation serveur d'un asset de 32 Mio, avec rapprochement D1/manifeste et lecture physique R2 vérifiée. Ni ce smoke ni les limites configurées ne certifient la capacité jointe cloud, un pic mémoire ou des fichiers plus gros non exercés.
 
+Un payload réellement sélectionné hors du périmètre démontré — notamment un fichier de plus de 32 Mio — ou un dépassement opérationnel observé exige son support et une vérification ciblée avant migration. Cette condition ne rétablit pas automatiquement la campagne synthétique maximale.
+
 Après merge F04, F05 et F07 avancent en parallèle dans leurs worktrees/PR distincts, puis F08 livre la publication réelle des trois clients. Le parcours est moteur utilisable → déploiement → vérification fonctionnelle ciblée publication/lecture/droits/liens → bascule approuvée. Ce recadrage ne retire aucun comportement produit ni la fidélité du corpus, des accès, des clés et des shortlinks ; il n'autorise pas une bascule avant livraison du lecteur/MCP, sauvegarde/retour arrière et confirmation de l'opération exacte.
 
 Pas de « tester uniquement que le tool appelle une fonction » : les tests permanents couvrent les transitions, autorisations, octets servis et conflits observables. La configuration/wiring peut être vérifiée par un smoke jetable.
