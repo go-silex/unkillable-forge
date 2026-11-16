@@ -1,0 +1,103 @@
+{
+  "format": "unkillable-forge-native",
+  "version": 1,
+  "napiVersion": 8,
+  "artifacts": [
+    {
+      "platform": "linux",
+      "arch": "x64",
+      "file": "linux-x64/posix.node",
+      "sha256": "8fd576b52b0465b0b6ec41aa80503c8241783be401223d41c2fc6c54a97fc8e5",
+      "sourceInputSha256": "019e94bb3767b1062a9c305d1417d477e482244db2d8557c76989229f191b215",
+      "nodeHeaders": {
+        "version": "22.23.5",
+        "sha256": "be890e343a72acd49e3b0491aefdc55400ed8a8fa29272d2d1ad19823e80035f"
+      },
+      "toolchain": {
+        "compiler": "gcc (GCC) 14.2.1 20250110 (Red Hat 14.2.1-11) (quay.io/pypa/manylinux_2_28_x86_64@sha256:7e41b1c7fd64dfc69703a1124b43c404382973ee06ec5d764b85c34d2221fded)",
+        "target": "x86_64-redhat-linux",
+        "osFloor": "glibc-2.28",
+        "libcFloor": "2.28",
+        "sdk": null
+      },
+      "provenance": {
+        "kind": "ci",
+        "repository": "go-silex/unkillable-forge",
+        "runId": "43956815472",
+        "inputSha": "5698cc7ee47bd61fc9254fbc514a7568227def5f"
+      }
+    },
+    {
+      "platform": "linux",
+      "arch": "arm64",
+      "file": "linux-arm64/posix.node",
+      "sha256": "171b907e564cb7e82246a4987bdd43db6c9e98cff4265376abab028e92f98b4a",
+      "sourceInputSha256": "019e94bb3767b1062a9c305d1417d477e482244db2d8557c76989229f191b215",
+      "nodeHeaders": {
+        "version": "22.23.5",
+        "sha256": "be890e343a72acd49e3b0491aefdc55400ed8a8fa29272d2d1ad19823e80035f"
+      },
+      "toolchain": {
+        "compiler": "gcc (GCC) 14.2.1 20250110 (Red Hat 14.2.1-11) (quay.io/pypa/manylinux_2_28_aarch64@sha256:54b271d9562a3686298880df05367909e949ed317e7b1b79b59c696d75f78676)",
+        "target": "aarch64-redhat-linux",
+        "osFloor": "glibc-2.28",
+        "libcFloor": "2.28",
+        "sdk": null
+      },
+      "provenance": {
+        "kind": "ci",
+        "repository": "go-silex/unkillable-forge",
+        "runId": "43956815472",
+        "inputSha": "5698cc7ee47bd61fc9254fbc514a7568227def5f"
+      }
+    },
+    {
+      "platform": "darwin",
+      "arch": "x64",
+      "file": "darwin-x64/posix.node",
+      "sha256": "069c1e0a9b12a877414aad55c42136bace613da01bc3cf081a5be77cc05cd68f",
+      "sourceInputSha256": "019e94bb3767b1062a9c305d1417d477e482244db2d8557c76989229f191b215",
+      "nodeHeaders": {
+        "version": "22.23.5",
+        "sha256": "be890e343a72acd49e3b0491aefdc55400ed8a8fa29272d2d1ad19823e80035f"
+      },
+      "toolchain": {
+        "compiler": "Apple clang version 17.0.0 (clang-1700.0.13.5)",
+        "target": "x86_64-apple-darwin24.6.0",
+        "osFloor": "11.0",
+        "libcFloor": null,
+        "sdk": "15.5"
+      },
+      "provenance": {
+        "kind": "ci",
+        "repository": "go-silex/unkillable-forge",
+        "runId": "43956815472",
+        "inputSha": "5698cc7ee47bd61fc9254fbc514a7568227def5f"
+      }
+    },
+    {
+      "platform": "darwin",
+      "arch": "arm64",
+      "file": "darwin-arm64/posix.node",
+      "sha256": "f572614af02b193bdbd8a237f67ed0cb20a8ba1e87301a24c02ae32b32bf769d",
+      "sourceInputSha256": "019e94bb3767b1062a9c305d1417d477e482244db2d8557c76989229f191b215",
+      "nodeHeaders": {
+        "version": "22.23.5",
+        "sha256": "be890e343a72acd49e3b0491aefdc55400ed8a8fa29272d2d1ad19823e80035f"
+      },
+      "toolchain": {
+        "compiler": "Apple clang version 17.0.0 (clang-1700.0.13.5)",
+        "target": "arm64-apple-darwin24.6.0",
+        "osFloor": "11.0",
+        "libcFloor": null,
+        "sdk": "15.5"
+      },
+      "provenance": {
+        "kind": "ci",
+        "repository": "go-silex/unkillable-forge",
+        "runId": "43956815472",
+        "inputSha": "5698cc7ee47bd61fc9254fbc514a7568227def5f"
+      }
+    }
+  ]
+}

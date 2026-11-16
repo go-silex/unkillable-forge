@@ -4,7 +4,7 @@ A separate, profile-isolated MCP publisher for the Unkillable Forge engine. It c
 
 ## Build and distribution
 
-The runtime requires Node 22 or later on Linux or macOS, on x64 or arm64, and the matching packaged POSIX native payload. Distribute the entire `dist/` directory—including its inventory, shared ESM chunks, native payloads and notices—together with `LICENSE`. The public source catalogue is the installation source; startup does not compile or download code. Build and release do not authorize a deployment or a migration.
+The runtime requires Node 22 or later on Linux (glibc 2.28 or later) or macOS 11 or later, on x64 or arm64, and the matching packaged POSIX native payload. Distribute the entire `dist/` directory—including its inventory, shared ESM chunks, native payloads and notices—together with `LICENSE`. The public source catalogue is the installation source; startup does not compile or download code. Build and release do not authorize a deployment or a migration.
 
 ## Instance profile
 

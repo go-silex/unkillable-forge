@@ -24,6 +24,15 @@ L'open redirect est déjà corrigé : [Roxabi PR #13](https://github.com/Roxabi/
 
 La fermeture de ce gate exige un graphe historique vérifié ou un rapprochement probant page/parcours/ressource des droits attendus, validé par l'opérateur. L'assistant porte l'investigation et conserve les preuves privées. Une politique de droits nouvellement approuvée serait une décision distincte, pas une reconstruction présumée équivalente.
 
+**Recentrage demandé par l’opérateur : avancer sur le moteur, sans plateforme de sauvegarde/restauration avancée.** Les fichiers du hub/Drive restent une source de travail ; R2 reste l’autorité de publication et les droits/clés/destinations doivent être rapprochés séparément. Les précisions suivantes remplacent les exigences plus larges ci-dessous :
+
+- F08 reste prioritaire et indépendant de F09/F10 : publisher Linux/macOS, trois clients, catalogues, revue du SHA final et CI réelle.
+- F09 conserve images et capture existantes, statut best-effort et reprise explicite sous un appelant authentifié. Aucun nouveau renderer de cartes, cron, ordonnanceur autonome ou SLA n’est requis.
+- F10 se limite à l’import sélectionné et rejouable, aux empreintes, routes, propriétaires, droits, clés, alias et destinations de shortlinks. Archives universelles, restauration générique, admission recovery globale et inventaire/suppression physique des orphelins sont hors du chemin critique. Le travail isolé est préservé, pas déclaré livré.
+- Le retour arrière du code utilise un Worker compatible sur le même état courant R2/D1. Aucun retour à une vieille base ni à Pages après de nouveaux writes n’est présumé sans perte ; en incident de données, rester fermé plutôt que réactiver des droits anciens.
+
+Ces fonctions avancées ne seront réintroduites que sur besoin concret approuvé : restauration complète demandée ou indispensable à une opération définie ; suppression physique justifiée avant son activation ; reprise autonome uniquement si un besoin sans appelant authentifié est établi. Cela ne réduit ni G1/G1b, ni les contrôles ciblés d’accès/liens, ni les autorisations de production.
+
 ### 1.1 Vocabulaire
 
 | Terme | Sens dans ce plan |
@@ -258,7 +267,7 @@ L'acceptation F04 conserve les preuves natives de concurrence/reprise/révocatio
 
 Un payload réellement sélectionné hors du périmètre démontré — notamment un fichier de plus de 32 Mio — ou un dépassement opérationnel observé exige son support et une vérification ciblée avant migration. Cette condition ne rétablit pas automatiquement la campagne synthétique maximale.
 
-Après merge F04, F05 et F07 avancent en parallèle dans leurs worktrees/PR distincts, puis F08 livre la publication réelle des trois clients. Le parcours est moteur utilisable → déploiement → vérification fonctionnelle ciblée publication/lecture/droits/liens → bascule approuvée. Ce recadrage ne retire aucun comportement produit ni la fidélité du corpus, des accès, des clés et des shortlinks ; il n'autorise pas une bascule avant livraison du lecteur/MCP, sauvegarde/retour arrière et confirmation de l'opération exacte.
+Après merge F04, F05 et F07 avancent en parallèle dans leurs worktrees/PR distincts, puis F08 livre la publication réelle des trois clients. Le parcours est moteur utilisable → déploiement → vérification fonctionnelle ciblée publication/lecture/droits/liens → bascule approuvée. Ce recadrage conserve la fidélité du corpus, des accès, des clés et des shortlinks ; la migration exige lecteur/MCP livrés, captures des sources et retour arrière compatible, puis confirmation de l’opération exacte. Il n’ajoute pas de restaurateur générique préalable.
 
 Pas de « tester uniquement que le tool appelle une fonction » : les tests permanents couvrent les transitions, autorisations, octets servis et conflits observables. La configuration/wiring peut être vérifiée par un smoke jetable.
 
@@ -278,9 +287,9 @@ Une installation neuve depuis chaque catalogue actif doit fonctionner **sans dro
 
 | Lot / worktree | Dépendances | Changement / livrable | Validation bloquante |
 |---|---|---|---|
-| F09 `U/feat-F09-previews-sharing` | F04, F05 | OG par révision, unfurl sans cookie, Shlink, état des enrichissements et conservation des images existantes | Aperçu d'un lien partagé sans login ; mauvaise clé refusée ; renderer sans privilèges ; panne Shlink/OG annoncée sans prétendre que la publication a échoué |
-| F10 `U/feat-F10-import-export` | F04, F05 | Import dry-run/reprise, rapports d'empreintes, mapping de routes et grants, export restaurable, GC sûr | Import rejouable sans doublons ni rotation involontaire des clés ; restore en environnement isolé ; suppression d'orphelins sans toucher aux révisions référencées |
-| F11 `U/chore-F11-release-ops` | F05, F07, F08, F09, F10 | CI/release moteur/client, migrations D1, staging isolé, runbooks, sauvegardes et rollback avec reprise des mutations de sécurité | SHA testé uniquement ; publisher incapable de déployer ; exercices sur les deux instances, dont sauvegarde → révocation → restauration avec lien toujours refusé |
+| F09 `U/feat-F09-previews-sharing` | F04, F05 | OG par révision, unfurl sans cookie, Shlink, statut et retry explicite sur requête authentifiée ; conservation des images/captures existantes, sans cron ni refonte | Aperçu partagé sans login ; mauvaise clé refusée ; renderer sans privilèges et entrées/réseau bornés ; panne Shlink/OG distincte du succès de publication ; reprise sans seconde publication |
+| F10 `U/feat-F10-import-export` | F04, F05 ; F09 pour ses mappings previews/Shlink | Import sélectionné dry-run/reprise, empreintes, routes, ownership, visibilité, grants, clés, alias et destinations ; aucun effacement automatique | Dry-run sans mutation ; reprise sans doublons ni rotation de clés ; octets et accès attendus ; sources manquantes/ambiguës refusées ; G1b avant historique. Pas d’archive/restore universel ou GC physique préalable |
+| F11 `U/chore-F11-release-ops` | F05, F07, F08, F09, F10 fonctionnel pour la migration | CI/release moteur/client, migrations D1, staging isolé, runbooks et retour arrière de code compatible avec l’état courant | SHA testé uniquement ; publisher incapable de déployer ; publication/lecture/révocation/liens ciblés ; Worker précédent compatible sur le même R2/D1. Préparation packaging/staging hors prod possible sans attendre l’import historique, sans contourner ses gates |
 | F12 `R/chore-F12-upstream` | F11 | Préparer la jonction de lignée sur une release upstream ; geler l'ancien writer, rendre Roxabi privé, ajouter upstream et merger la convergence sous contrôle | Ancêtre upstream vérifié ; moteur identique hors surcharges autorisées ; CI privée opérationnelle ; anciens publishers coupés ; lecture Pages conservée avant bascule |
 
 F09 et F10 sont parallélisables après la tranche de lecture/publication ; la préparation CI peut avancer sans déclencher d'effet de production. Les opérations de compte et de visibilité de F12 nécessitent une autorisation explicite au moment du passage.
@@ -317,7 +326,7 @@ Les 11 Go précédemment mesurés dans un hub Roxabi ne constituent pas la taill
 1. Sauvegarder le déploiement Pages de référence, son code/version, les artefacts sélectionnés et l'état KV/shortlinks/Access/DNS ; chiffrer les sauvegardes de secrets.
 2. Importer le corpus dans des bindings de staging distincts : objets avec empreintes, métadonnées privées par défaut, routes et grants conservés. Le domaine public ne bouge pas.
 3. Comparer contenu et comportements : bytes/hash pour les originaux, chemins d'assets, rendus dérivés justifiés, catalogue filtré et droits. Pas de « même nombre de fichiers » comme unique preuve.
-4. Rejouer l'import et les scénarios d'échec ; exporter puis restaurer dans un autre environnement de test. Vérifier les octets après restauration.
+4. Rejouer l’import après interruption et vérifier octets, routes, clés et accès source/cible. La plateforme nouvelle d’archive/restauration n’est pas un préalable à cette répétition.
 5. Produire un rapport go/no-go et le manifeste exact de cutover. Les preuves privées ne traversent ni logs Actions publics ni fichiers committés.
 
 **KV n'offre pas de snapshot transactionnel.** Le gel inclut le drainage des mutations en vol. L'export couvre toutes les pages et tous les noms de clés connus, avec pagination complète, valeurs **et métadonnées `v`** ; on ne déduit jamais la visibilité de l'existence d'un partage. F01/F10 établissent les délais de propagation/cache applicables et la méthode de lecture de l'état final. Des collectes identiques trop rapprochées ne prouvent pas la fraîcheur : si la dernière visibilité/révocation ne peut être établie, la bascule est bloquée, pas déclarée sûre après un `sleep` arbitraire.
@@ -337,11 +346,11 @@ Les 11 Go précédemment mesurés dans un hub Roxabi ne constituent pas la taill
 | Avant ouverture des nouveaux writes | Re-router vers le Pages figé, restaurer les règles d'accès connues ; données R2 conservées pour analyse | Réactiver des writers pendant une vérification incomplète |
 | Après nouvelles publications, ACL ou révocations | Préférer un Worker précédent compatible lisant le même R2/D1 ; migrations de schéma expand/contract | Re-router aveuglément vers Pages : contenu perdu et anciens partages potentiellement réactivés |
 | Retour nécessaire vers Pages après writes | Nouveau gel, export complet du nouvel état vers format legacy, restitution des ACL/grants/révocations et validation avant reprise | Ignorer une mutation parce qu'elle n'est « que de la visibilité » |
-| Incident de données | Geler les écritures et lectures concernées ; restaurer R2/D1 au point cohérent, réconcilier les mutations de sécurité postérieures depuis une source non écrasée, puis rouvrir | Restaurer le journal D1 à T0 puis supposer qu'il contient encore les révocations faites à T1 |
+| Incident de données | Fermer les accès et écritures concernés ; reconstruction opérateur avant réouverture, avec état courant des droits établi | Restaurer un ancien D1 puis rouvrir en supposant les révocations postérieures préservées |
 
-Le rollback vers Pages après ouverture des writes est **bloqué par défaut** tant que l'export de retour et sa fidélité n'ont pas été éprouvés au lot F10. On ne vend pas une simple bascule DNS comme garantie de réversibilité des données.
+Le rollback vers Pages après ouverture des writes reste **bloqué par défaut** : cette livraison ne garantit pas un export inverse de tout état nouveau vers le format legacy. Le retour normal est un Worker compatible sur le même état R2/D1 ; une bascule DNS seule n’est pas une réversibilité des données.
 
-**Reprise des décisions de sécurité :** F10/F11 définissent une sauvegarde du journal/état des ACL, grants, tombstones et habilitations hors de la base et du périmètre restaurés, avec un repère de complétude. Avant une restauration planifiée, exporter l'état courant et les mutations post-checkpoint vers cette source protégée. Un journal seulement présent dans D1, ou un export asynchrone sans preuve de fraîcheur, ne suffit pas. Si l'incident a détruit les événements nécessaires, les accès potentiellement concernés restent refusés jusqu'à reconstruction validée ; on n'autorise pas à partir d'un ancien snapshot « probablement correct ». L'exercice F11 inclut cette absence de preuve, en plus de la réconciliation réussie.
+**Pas de restauration de droits périmés :** le nouveau moteur ne livre pas de restaurateur générique, journal externe ou admission recovery globale. Une restauration future touchant les ACL/grants exige une opération distincte et un état courant de sécurité établi avant réouverture. Si cet état manque, les accès concernés restent fermés ; aucun ancien snapshot n’autorise implicitement la reprise. Les restaurations de révisions de contenu utilisent les droits courants et restent dans le périmètre.
 
 ## 7. Critères d'acceptation transversaux
 
@@ -364,7 +373,7 @@ Le rollback vers Pages après ouverture des writes est **bloqué par défaut** t
 ### Exploitation et développement
 
 - Une machine neuve sans `CLOUDFLARE_API_TOKEN`, Wrangler ni copie du hub peut publier via le client MCP après login.
-- Révocation utilisateur, restauration de révision, dépublication et restauration de sauvegarde ont été exercées sur de vraies ressources de test.
+- Révocation utilisateur, restauration d’une révision conservée et dépublication sont exercées sur de vraies ressources de test ; aucune restauration de sauvegarde universelle n’est revendiquée ou requise pour livrer le moteur.
 - Logs sans bearer tokens, cookies ni secrets de partage ; chaque mutation porte acteur, ressource et révision pour attribution minimale.
 - Moteur déployé uniquement par release approuvée ; un publish de contenu ne change ni code, ni bindings, ni schéma.
 - Tous les lots ont worktree/PR/preuves ; downstream aligné sur upstream ; aucun ancien chemin d'écriture restant après clôture.
@@ -374,7 +383,7 @@ Le rollback vers Pages après ouverture des writes est **bloqué par défaut** t
 | Sujet | Livraison attendue |
 |---|---|
 | Releases | Versions moteur/client/protocole explicites ; compatibilité déclarée ; pas de clone Git du moteur à chaque publish |
-| Données | Sauvegarde R2 + export D1 cohérent, preuve de restauration, rétention et seuils documentés avant GC |
+| Données | Sources/captures de migration conservées, import rapproché avec R2/D1 et droits/liens ; pas de GC physique automatique ni de garantie de restauration universelle dans cette livraison |
 | Santé | Publication/read/auth failures et révision active observables sans contenu privé ; limites de taille/quota mesurées au corpus F01 |
 | Documentation | Installation par harness, publication, partage, droits, restauration, déploiement, synchronisation upstream et migration des anciens plugins |
 | Suppressions finales | Snapshot global Pages, contournements de drift, env tokens CF des publishers, scripts/skills devenus inutiles ; ne pas effacer les dossiers de travail des utilisateurs |
@@ -394,7 +403,7 @@ Chaque gate exige ses preuves et, quand elle l'indique, l'autorisation opérateu
 | G1b — propriété historique | `UNRESOLVED_HISTORICAL_OWNERSHIP` : graphe historique vérifié ou rapprochement probant page/parcours/ressource, validation opérateur | Toute importation du corpus historique, acceptation F10 et toute migration de production ; F11/F12 bloqués transitivement |
 | G2 — OAuth et MCP | Managed OAuth + adapter local ; preuve sur les trois clients, sinon alternative OAuth arbitrée | Distribution client et politique d'accès |
 | G3 — héritage privé | Conservation de l'histoire Roxabi par jonction contrôlée ; sinon décision de reclone/archivage | F12 |
-| G4 — exploitation | Origines de gestion, rôles publishers, limites, rétention et capacité de restore confirmés | Staging final et cutover |
+| G4 — exploitation | Origines de gestion, rôles publishers, limites et retour de code compatible sur l’état courant confirmés ; aucune restauration générique présumée | Staging final et cutover |
 | G5 — production | Autorisation par instance du gel, de la visibilité GitHub, du routage et de l'ouverture des writes | F12–F15 |
 
 ## 10. Sources et niveau de preuve
