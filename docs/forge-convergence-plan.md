@@ -252,6 +252,12 @@ F03 et F06 sont parallélisables après F02. Le spike F06 livre une preuve de tr
 | F07 `U/feat-F07-remote-mcp` | F04, F06 | MCP distant avec outils de lecture/publication/état/visibilité/partage ; schémas compacts et erreurs stables | Les mêmes mutations HTTP/MCP donnent les mêmes transitions ; droits serveur indépendants des annotations MCP ; Origin invalide refusé |
 | F08 `U/feat-F08-client-publisher` | F04, F05, F06, F07 | Adapter local streamé, plugin public commun multi-host, configuration explicite des instances, migration des installations et catalogues | Claude Code/Codex/OMP publient un HTML de plusieurs Mo et un dossier sans corps au modèle ; octets, pages/assets servis et refus d'accès vérifiés, pas seulement un reçu |
 
+**Recadrage opérateur du 2026-11-16 — livrer le moteur, le déployer puis basculer.** La campagne cloud synthétique de quatre cas/20 020 appels, dont les cycles joints 10 000 fichiers/1 000 pages/20 000 edges, est retirée des critères bloquants de F04. Elle n'est pas déclarée réussie et ne sera pas relancée pour débloquer la livraison.
+
+L'acceptation F04 conserve les preuves natives de concurrence/reprise/révocation et d'intégrité, la revue indépendante du SHA final et les checks CI requis. Le smoke réel acquis couvre création puis mise à jour, upload et matérialisation serveur d'un asset de 32 Mio, avec rapprochement D1/manifeste et lecture physique R2 vérifiée. Ni ce smoke ni les limites configurées ne certifient la capacité jointe cloud, un pic mémoire ou des fichiers plus gros non exercés.
+
+Après merge F04, F05 et F07 avancent en parallèle dans leurs worktrees/PR distincts, puis F08 livre la publication réelle des trois clients. Le parcours est moteur utilisable → déploiement → vérification fonctionnelle ciblée publication/lecture/droits/liens → bascule approuvée. Ce recadrage ne retire aucun comportement produit ni la fidélité du corpus, des accès, des clés et des shortlinks ; il n'autorise pas une bascule avant livraison du lecteur/MCP, sauvegarde/retour arrière et confirmation de l'opération exacte.
+
 Pas de « tester uniquement que le tool appelle une fonction » : les tests permanents couvrent les transitions, autorisations, octets servis et conflits observables. La configuration/wiring peut être vérifiée par un smoke jetable.
 
 F08 comprend des PR consommateurs distinctes, en plus de la PR moteur : les 16 lots principaux ne signifient pas 16 worktrees au total.

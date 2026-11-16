@@ -1,6 +1,6 @@
 # Convergence Forge — état d'exécution
 
-Plan : [forge-convergence-plan.md](forge-convergence-plan.md). Dernière mise à jour : 2026-11-15. Ce suivi ne constitue pas une autorisation de mutation de production.
+Plan : [forge-convergence-plan.md](forge-convergence-plan.md). Dernière mise à jour : 2026-11-16. Ce suivi ne constitue pas une autorisation de mutation de production.
 
 ## Autorisations et invariants
 
@@ -12,6 +12,14 @@ Plan : [forge-convergence-plan.md](forge-convergence-plan.md). Dernière mise à
 - Toute écriture de code/documentation se fait en worktree dédié. Les inventaires de corpus et preuves privées restent hors Git ; aucune valeur de partage n'est publiée.
 - La fenêtre à froid retenue concerne F13 complet puis F14, après leurs prérequis et autorisations ; l'état final et la dernière mutation devront être vérifiés alors. Elle n'introduit aucun gel avant le nouveau moteur et ne vaut pas autorisation de mutation GitHub/Cloudflare.
 - Arbitrage explicite du 2026-11-13 : F04 peut démarrer après F03 mergé, uniquement pour Publication/Revision Store, `0002_*` et les preuves D1/R2 locales, en worktree et PR draft dédiés. `authenticateManage` reste le seul point d'entrée d'identité ; aucun code du spike ou contournement d'authentification. F06 accepté et mergé demeure requis avant adapter HTTP/configuration du manage Worker, acceptation, revue finale et merge F04. Les autres dépendances et les preuves réelles des trois clients restent inchangées ; cet arbitrage n'autorise aucune ressource Cloudflare ni mutation de production.
+
+## Recadrage opérateur du 2026-11-16 — livraison puis bascule
+
+- L'opérateur demande d'arrêter la campagne de capacité et de terminer le nouveau système pour le déployer puis basculer. Les quatre cycles synthétiques/20 020 appels ne sont plus un verrou F04. Aucun second essai joint n'est autorisé ou lancé par ce recadrage ; le cas interrompu et ses octets restent conservés, sans reset, abort ni suppression implicite.
+- Référence runtime courante `10e4022a74340170556fb2c1104bf70bbaee643f` : deux revues indépendantes du code CLEAR ; [CI43703791342](https://github.com/go-silex/unkillable-forge/actions/runs/43703791342) avec cinq jobs réussis,41 fichiers/384 Vitest et205 Python ; [secret scan43703791371](https://github.com/go-silex/unkillable-forge/actions/runs/43703791371) réussi. Les modifications présentes sont documentaires ; le nouveau SHA exige sa propre liaison, revue et CI avant merge. Les checkpoints plus bas restent historiques.
+- Le staging isolé a réellement exécuté création puis mise à jour avec un asset32Mio : états committed, versions1→2, mêmes pages/URL, upload puis matérialisation serveur. Neuf jeux D1 primaires par cycle concordent avec les manifestes ; quatre GET R2 physiques et quatre LIST couvrent les deux manifestes et les deux objets32Mio, tailles/SHA recalculés. Preuves privées `C1-C2.c3-semantic.json` SHA `c252a8011045ea6af19691dcb30d233283b63cfba33ac0e47c91233e2a91323d` et `C1-C2.physical-r2.json` SHA `e6f988ad8843f49a29950ac2828afa3484907efac2dacde23ac43f9f9baf9cb3`. Aucune valeur de credential ni octet d'artefact dans cette documentation.
+- Le cas joint est interrompu avant commit :3711fichiers stockés/6289en attente, cause de terminaison inconnue. Sa capacité complète, son historique exact d'appels, l'écho indépendant des versions R2 et un pic mémoire restent non prouvés. Les métriques natives du smoke sont des agrégats/quantiles, pas des maxima ni une preuve individuelle. R16 reste INCONCLUSIVE/non attribué ; aucun diagnostic n'est supprimé ou déclaré universellement bénin.
+- F04 reste non livré avant son merge épinglé, sa revue et ses checks requis. F05/F07 pourront alors avancer en parallèle, puis F08 livrera le vrai publisher des trois clients. Le backend HTTP seul n'est ni le lecteur HTML ni le MCP métier ; aucune bascule n'est faite avant ces fonctions et les contrôles ciblés d'accès/liens. Production, URLs, clés, assets et shortlinks restent inchangés ; sauvegarde/rollback et autorisation spécifique de bascule sont conservés.
 
 ## F01 — observations réalisées en lecture seule
 
@@ -247,7 +255,7 @@ Quatre lots sur seize livrés : F01, F02, F03 et F06.
 
 | Lot | État | Dépendances bloquantes |
 |---|---|---|
-| F04 | Correctif committed-only en cours, **non livré** ; `~/.omp/wt/unkillable-forge/feat-F04-publication`, `feat/F04-publication` | [PR #10](https://github.com/go-silex/unkillable-forge/pull/10). F03/F06 satisfaits. Les preuves et CI du baseline `96fe5e2` restent liées à ce SHA ; le correctif exige nouveau SHA, revues indépendantes et CI réelle. Témoin cloud joint et 32 Mio, inspection D1/R2/CPU et contrôles mémoire restent dus ; aucun grant Cloudflare F04 |
+| F04 | Runtime implémenté et smoke cloud acquis ; amendement documentaire en finalisation, **non livré avant merge** ; `~/.omp/wt/unkillable-forge/feat-F04-publication`, `feat/F04-publication` | [PR #10](https://github.com/go-silex/unkillable-forge/pull/10). F03/F06 satisfaits. Runtime10e4022 revu/CI verte, création+mise à jour32Mio et preuves D1/R2 acquises. Campagne jointe retirée du gate par le recadrage du16novembre ; sa réussite n'est pas revendiquée. Nouveau SHA documentaire, revue et CI requis avant merge ; aucune bascule de production autorisée ici |
 | F05 | Non démarré | F03, F04 |
 | F07 | Non démarré | F04, F06 |
 | F08 | Non démarré | F04, F05, F06, F07 ; worktrees consommateurs distincts |
