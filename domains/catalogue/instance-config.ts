@@ -17,6 +17,7 @@ export interface InstanceBase {
 }
 export interface ReadInstanceConfig extends InstanceBase {
   readonly surface: "read"
+  readonly manageHost: string
   readonly readAudiences: readonly string[]
   readonly login: LoginMode
   readonly shareCookie: boolean
@@ -174,7 +175,7 @@ async function parse(env: Readonly<Record<string, unknown>>, surface: "read" | "
     } else if (isReservedShellPath(path)) errors.push("shellPaths contains a reserved path")
   }
   if (errors.length) return { ok: false, errors }
-  if (surface === "read") return { ok: true, config: { ...base, surface, readAudiences, login: data.login as LoginMode, shareCookie: data.shareCookie as boolean, shellPaths } }
+  if (surface === "read") return { ok: true, config: { ...base, surface, manageHost: manageHost as string, readAudiences, login: data.login as LoginMode, shareCookie: data.shareCookie as boolean, shellPaths } }
   return { ok: true, config: { ...base, surface, manageHost: manageHost as string, manageAudiences, shellPaths, shareSealKey: sealKey } }
 }
 

@@ -1,6 +1,6 @@
 import type { ReadInstanceConfig, ShareVerifierKey } from './instance-config'
 import { isVerifiedIdentity, type VerifiedIdentity } from './identity'
-import type { SubtreeOrTree } from './routing/grammar'
+import { canonicalUrl, shareUrl, type SubtreeOrTree } from './routing/grammar'
 import { isShareKey, shareKeyDigests } from './share-secrets'
 import type { ManageDeps, PagePolicyView } from './commands'
 import { PolicyError } from './guard'
@@ -101,7 +101,7 @@ export interface ReadPlan {
   readonly cache: 'no-store'
 }
 export type ReadDecision =
-  | { readonly kind: 'allow'; readonly plan: ReadPlan }
+  | { readonly kind: 'allow'; readonly plan: ReadPlan; readonly shareMode?: 'follow_active' | 'pinned' }
   | { readonly kind: 'deny'; readonly reason: 'not_found' | 'login_required' | 'instance_mismatch' | 'unavailable' }
   | { readonly kind: 'alias'; readonly status: 301 | 302 | 307 | 308; readonly location: string }
 
@@ -213,7 +213,10 @@ async function decideReadAuthorized(db: D1Database, config: ReadInstanceConfig, 
       const revision = first.key_grant_mode === 'pinned' ? first.key_grant_revision_id : first.active_revision_id
       for (const path of candidates) {
         const row = rs.find(r => r.path === path && r.resource_revision_id === revision && (!image || r.content_type.startsWith('image/')))
-        if (row) return makePlan(config, row, revision, 'share_key', row.page_id, row.key_grant_id, row.policy_epoch, path)
+        if (row) {
+          const decision = makePlan(config, row, revision, 'share_key', row.page_id, row.key_grant_id, row.policy_epoch, path)
+          return decision.kind === 'allow' ? { ...decision, shareMode: first.key_grant_mode } : decision
+        }
       }
       return null
     }
@@ -258,7 +261,7 @@ export async function decideRead(db: D1Database, config: ReadInstanceConfig, sub
   try {
     const decision = await decideReadAuthorized(db, config, subject, credentials, aliasPath)
     if (decision.kind !== 'allow') return decision
-    return { kind: 'allow', plan: { ...decision.plan, pinnedProof: await mintPinnedProof(config, decision.plan, credentials.nowSeconds) } }
+    return { ...decision, plan: { ...decision.plan, pinnedProof: await mintPinnedProof(config, decision.plan, credentials.nowSeconds) } }
   } catch { return deny('unavailable') }
 }
 
@@ -314,12 +317,16 @@ export async function readPagePolicy(deps: ManageDeps, actor: ManageActor, pageI
     const results = await deps.db.batch([
       instanceStatement(deps.db),
       policyPrincipalStatement(deps.db, actor, [pageId]),
-      deps.db.prepare(`SELECT p.page_id, p.artifact_id, p.visibility, p.policy_epoch, a.content_version, g.grant_id, g.mode, g.pinned_revision_id, (g.sealed_key IS NOT NULL) AS revealable FROM pages p JOIN artifacts a ON a.artifact_id = p.artifact_id LEFT JOIN share_grants g ON g.page_id = p.page_id AND ${activeGrantSql('g')} WHERE p.page_id = ?1 AND p.tombstoned_at IS NULL`).bind(pageId),
+      deps.db.prepare(`SELECT p.page_id, p.artifact_id, p.visibility, p.policy_epoch, a.content_version, r.kind AS route_kind, r.route_key, g.grant_id, g.mode, g.pinned_revision_id, (g.sealed_key IS NOT NULL) AS revealable FROM pages p JOIN artifacts a ON a.artifact_id = p.artifact_id LEFT JOIN routes r ON r.page_id = p.page_id AND r.kind IN ('subtree', 'tree_page') LEFT JOIN share_grants g ON g.page_id = p.page_id AND ${activeGrantSql('g')} WHERE p.page_id = ?1 AND p.tombstoned_at IS NULL`).bind(pageId),
     ])
     assertPolicyPrincipal(results, deps, actor, 1)
     const row = results[2].results[0] as Row | undefined
     if (!row) return null
+    const route: SubtreeOrTree | null = row.route_kind === 'subtree' ? { kind: 'subtree', slug: row.route_key } : row.route_kind === 'tree_page' ? { kind: 'tree_page', pageRef: row.route_key } : null
+    const supportsShare = route && deps.config.shareGrammars.includes(route.kind === 'subtree' ? 'slug' : 'page')
     return { pageId: row.page_id, artifactId: row.artifact_id, visibility: row.visibility, policyEpoch: row.policy_epoch, contentVersion: row.content_version,
+      canonicalUrl: route ? `https://${deps.config.canonicalHost}${canonicalUrl(route)}` : null,
+      shareUrlPrefix: route && supportsShare ? shareUrl(deps.config, route, '').slice(0, -1) : null,
       grant: row.grant_id ? { grantId: row.grant_id, mode: row.mode, revisionId: row.pinned_revision_id, revealable: !!row.revealable } : null }
   } catch (error) { if (error instanceof PolicyError) throw error; throw new PolicyError('unavailable') }
 }

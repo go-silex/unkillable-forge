@@ -33,7 +33,7 @@ export default defineConfig({
         test: {
           name: "engine",
           include: ["tests/engine/**/*.test.ts"],
-          exclude: ["tests/engine/manage-http.*.test.ts", "tests/engine/native-jwks.test.ts"],
+          exclude: ["tests/engine/manage-http.*.test.ts", "tests/engine/manage-web.*.test.ts", "tests/engine/native-jwks.test.ts"],
           setupFiles: ["tests/engine/setup/apply-migrations.ts"],
           globals: true,
         },
@@ -56,7 +56,7 @@ export default defineConfig({
         }))],
         test: {
           name: "manage-http",
-          include: ["tests/engine/manage-http.*.test.ts"],
+          include: ["tests/engine/manage-http.*.test.ts", "tests/engine/manage-web.*.test.ts"],
           setupFiles: ["tests/engine/setup/apply-migrations.ts"],
           globals: true,
         },
