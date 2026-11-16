@@ -331,6 +331,21 @@ export async function readPagePolicy(deps: ManageDeps, actor: ManageActor, pageI
   } catch (error) { if (error instanceof PolicyError) throw error; throw new PolicyError('unavailable') }
 }
 
+/** Resolve an active revision only under fresh page authority and the observed policy version. */
+export async function readActivePageRevision(deps: ManageDeps, actor: ManageActor, target: { pageId: string; artifactId: string; expectedPolicyEpoch: number; expectedContentVersion: number }): Promise<string | null> {
+  try {
+    requireManageActor(actor, deps)
+    const results = await deps.db.batch([
+      instanceStatement(deps.db),
+      policyPrincipalStatement(deps.db, actor, [target.pageId]),
+      deps.db.prepare('SELECT a.active_revision_id FROM pages p JOIN artifacts a ON a.artifact_id = p.artifact_id WHERE p.page_id = ? AND p.artifact_id = ? AND p.tombstoned_at IS NULL AND p.policy_epoch = ? AND a.content_version = ?').bind(target.pageId, target.artifactId, target.expectedPolicyEpoch, target.expectedContentVersion),
+    ])
+    assertPolicyPrincipal(results, deps, actor, 1)
+    const row = results[2].results[0] as { active_revision_id: string | null } | undefined
+    return row?.active_revision_id ?? null
+  } catch (error) { if (error instanceof PolicyError) throw error; throw new PolicyError('unavailable') }
+}
+
 /** Authorize receipt reads on the primary, including pages retired by the original command. */
 export async function assertReplayAuthority(deps: ManageDeps, actor: ManageActor, input: { readonly artifactId: string; readonly pageIds: readonly string[]; readonly expectedActorAuthorityEpoch: number }): Promise<void> {
   requireManageActor(actor, deps)

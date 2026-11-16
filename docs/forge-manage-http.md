@@ -32,6 +32,49 @@ Typical flow: `begin` → upload client files and `materialize` each retained ba
 
 POST requires `Content-Type: application/json`, optionally `charset=utf-8`. PUT requires `application/octet-stream` without parameters; the resource's content type comes from its manifest, not this header. Content-Encoding must be absent or `identity`. A missing PUT body means zero bytes; a nonzero declared Content-Length with no body is invalid. JSON requires a body.
 
+## Request-driven previews and sharing
+
+After commit, the adapter awaits a best-effort enqueue of lightweight OG
+intents in bounded batches before responding. It does not render or change the
+publication receipt. An enqueue failure can leave a partial set while the
+successful receipt is still returned; an authorized replay of the same commit
+can repair it while that revision remains current. `forge_enrichments` is a
+read-only, freshly authorized status query.
+`forge_retry_enrichments` explicitly admits pending or retryable failed work
+for the specified page, revision, content version and policy epoch. If no OG
+job exists for that page and revision, an explicit OG retry can create the
+lightweight intent for a previously committed, currently authorized target in
+the same guarded transaction. It never replaces an existing stale or terminal
+job, nor reconstructs missing shortlink information. All requested kinds must
+be admissible or the transaction rolls back. Expired attempts may be reclaimed,
+but an unexpired lease is not reset. Execution uses the authenticated actor
+and the exact admitted job. There is no cron scheduler.
+
+Optional management Worker settings:
+
+| Variable | Purpose |
+|---|---|
+| `FORGE_BROWSER_ACCOUNT_ID` | Cloudflare account ID for the fixed Browser Run screenshot API |
+| `FORGE_BROWSER_API_TOKEN` | Secret with Browser Rendering Write permission, used only in the control request authorization header |
+| `SHLINK_API_URL`, `SHLINK_API_KEY`, `SHLINK_DOMAIN` | Optional HTTPS Shlink collection URL, secret API key and short domain for newly minted share enrichment |
+
+Missing or invalid Browser Run configuration leaves publication usable and
+explicit OG execution unavailable. The adapter supplies the admitted revision
+graph as inline content and injects no management cookies, bucket credentials
+or management URLs. Its early CSP and request filters bound remote imports;
+HTML authors are trusted, and this is not a hostile-content or all-protocol
+sandbox. Rendering, input and output are bounded; failures do not reverse a
+publication or overwrite an existing original image.
+
+Shlink creation is create-only. Reconciliation checks the exact provider,
+domain, code and destination; publishing, retry and grant rotation do not
+retarget existing or imported aliases. Actual destination URLs can contain
+share keys and are protected metadata, not ordinary status output.
+
+This request-driven path adds no autonomous recovery service or advanced
+backup/restore guarantee. A timed-out derived write may leave unselected bytes;
+selection still requires the current lease, target and graph assertions.
+
 ## Authentication and origin
 
 Configuration, effective HTTPS URL origin and any literal Host header are checked against the configured management host before authentication. Forwarded host and Referer are not trusted. Host and Origin checks precede Catalogue's possible principal self-registration. Route, method, selector and framing checks also precede authentication; authentication precedes reading or parsing either body.

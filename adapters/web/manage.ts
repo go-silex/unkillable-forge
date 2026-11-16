@@ -3,6 +3,7 @@ import { authenticateManage } from '../../domains/catalogue/principals'
 import { admitManageRequest, publicError } from '../http/manage-edge'
 import type { Runtime } from '../http/manage-config'
 import { cancelBody, InputError } from '../http/publication-input'
+import { triggerShareShortlink } from '../shlink/share-trigger'
 
 const headers = {
   'Cache-Control': 'no-store',
@@ -71,18 +72,18 @@ function exact(form: URLSearchParams, names: readonly string[]): void {
   form.forEach((_, key) => { count++; if (!names.includes(key)) throw new InputError('invalid_request') })
   if (count !== names.length || names.some(name => form.getAll(name).length !== 1)) throw new InputError('invalid_request')
 }
-function render(view: PagePolicyView | null, key?: string | null): string {
+function render(view: PagePolicyView | null, key?: string | null, enrichment?: string): string {
   const select = '<h1>Forge management</h1><form method="get" action="/manage"><label>Page ID <input name="pageId" required></label> <button>Select page</button></form>'
   if (!view) return select
   const hidden = `<input type="hidden" name="pageId" value="${escape(view.pageId)}"><input type="hidden" name="artifactId" value="${escape(view.artifactId)}"><input type="hidden" name="epoch" value="${view.policyEpoch}">`
   const action = (op: string, label: string, extra = '') => `<form method="post" action="/manage">${hidden}${extra}<button name="op" value="${op}">${label}</button></form>`
   const grant = view.grant ? `<input type="hidden" name="grantId" value="${escape(view.grant.grantId)}">` : ''
   const secret = key ? view.shareUrlPrefix ? `<p>Share link: <a href="${escape(view.shareUrlPrefix + encodeURIComponent(key) + '/')}">${escape(view.shareUrlPrefix + encodeURIComponent(key) + '/')}</a></p>` : `<p>Share key: <code>${escape(key)}</code> (no share URL is configured for this route)</p>` : ''
-  return `${select}<h2>Page ${escape(view.pageId)}</h2><p>Visibility: ${escape(view.visibility)} · Policy epoch: ${view.policyEpoch}</p>${view.canonicalUrl ? `<p><a href="${escape(view.canonicalUrl)}">Open page</a></p>` : ''}${secret}${action('private', 'Make private')}${action('public', 'Make public')}${action('share', 'Share (follow active revision)')}${view.grant ? `${action('rotate', 'Rotate share link', grant)}${action('revoke', 'Revoke share link', grant)}${view.grant.revealable ? action('reveal', 'Reveal share link', grant) : '<p>This share key cannot be revealed; rotate it to get a new link.</p>'}` : ''}`
+  return `${select}<h2>Page ${escape(view.pageId)}</h2><p>Visibility: ${escape(view.visibility)} · Policy epoch: ${view.policyEpoch}</p>${view.canonicalUrl ? `<p><a href="${escape(view.canonicalUrl)}">Open page</a></p>` : ''}${secret}${enrichment ? `<p>${escape(enrichment)}</p>` : ''}${action('private', 'Make private')}${action('public', 'Make public')}${action('share', 'Share (follow active revision)')}${view.grant ? `${action('rotate', 'Rotate share link', grant)}${action('revoke', 'Revoke share link', grant)}${view.grant.revealable ? action('reveal', 'Reveal share link', grant) : '<p>This share key cannot be revealed; rotate it to get a new link.</p>'}` : ''}`
 }
 
 /** Handle the browser management page, or return null for another route. */
-export async function handleManageWeb(request: Request, runtime: Runtime): Promise<Response | null> {
+export async function handleManageWeb(request: Request, runtime: Runtime, shortDomain?: string): Promise<Response | null> {
   const url = new URL(request.url)
   if (url.pathname !== '/manage') return null
   try {
@@ -111,10 +112,22 @@ export async function handleManageWeb(request: Request, runtime: Runtime): Promi
     const epoch = one(form, 'epoch')
     if (!/^(0|[1-9]\d*)$/.test(epoch) || !Number.isSafeInteger(Number(epoch))) throw new InputError('invalid_request')
     const target = { pageId: one(form, 'pageId'), artifactId: one(form, 'artifactId'), expectedPolicyEpoch: Number(epoch) }
-    let key: string | null = null
+    let key: string | null = null, enrichment: string | undefined
     switch (op) {
       case 'private': case 'public': await setVisibility(runtime.deps, actor, { ...target, visibility: op }); break
-      case 'share': key = (await share(runtime.deps, actor, { ...target, mode: 'follow_active' })).key; break
+      case 'share': {
+        const result = await share(runtime.deps, actor, { ...target, mode: 'follow_active' })
+        key = result.key
+        if (result.key && runtime.shlink && shortDomain) {
+          try {
+            await triggerShareShortlink(runtime.deps, actor, runtime.shlink, shortDomain, target, result)
+            enrichment = 'Shortlink enrichment was requested; check its status for the result.'
+          } catch {
+            enrichment = 'Share created, but shortlink enrichment could not be requested or completed.'
+          }
+        }
+        break
+      }
       case 'rotate': key = (await rotateShare(runtime.deps, actor, { ...target, grantId: one(form, 'grantId') })).key; break
       case 'revoke': await revokeShare(runtime.deps, actor, { ...target, grantId: one(form, 'grantId') }); break
       case 'reveal': key = (await revealShare(runtime.deps, actor, { ...target, grantId: one(form, 'grantId') })).key; break
@@ -122,7 +135,7 @@ export async function handleManageWeb(request: Request, runtime: Runtime): Promi
     }
     const view = await readPagePolicy(runtime.deps, actor, target.pageId)
     if (!view) return errorResponse(request, 404, 'not_found')
-    return response(request, 200, render(view, key))
+    return response(request, 200, render(view, key, enrichment))
   } catch (error) {
     const fault = publicError(error)
     return errorResponse(request, fault.status, fault.code)

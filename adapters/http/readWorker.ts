@@ -1,5 +1,5 @@
 import { parseReadConfig } from '../../domains/catalogue/instance-config'
-import { accessJwksSource, type JwksSource } from '../../domains/catalogue/identity'
+import { authenticate, accessJwksSource, type JwksSource } from '../../domains/catalogue/identity'
 import { resolveRead } from '../../domains/catalogue/resolve'
 import { accessLoginLocation, parseRequest } from '../../domains/catalogue/routing/grammar'
 import { listCatalogue } from '../../domains/catalogue/catalogue-list'
@@ -7,6 +7,34 @@ import type { ReadInstanceConfig } from '../../domains/catalogue/instance-config
 import { RevisionStore } from '../../domains/store/revision-store'
 import { securityHeaders, serve, textResponse, type PinNamespace } from '../../domains/delivery/serve'
 import { serveShellAsset, validateShellAssets, type FixedShellAssets } from '../../domains/delivery/shell'
+import { resolveHttpCard, resolveSharedPreview } from '../../domains/catalogue/preview-http'
+import { serveCard, unfurl } from '../../domains/delivery/unfurl'
+import type { CardSelection } from '../../domains/catalogue/preview-cards'
+
+async function derivedCard(request: Request, deps: ReadRuntime): Promise<Response | null> {
+  const url = new URL(request.url)
+  if (!url.pathname.startsWith('/_revisions/') || !url.pathname.includes('/_derived/')) return null
+  if (url.port || (url.hostname !== deps.config.canonicalHost && !deps.config.aliasHosts.includes(url.hostname))) return textResponse(403, 'Forbidden', request.method)
+  if (request.method !== 'GET' && request.method !== 'HEAD') return textResponse(405, 'Method not allowed', request.method)
+  const match = /^\/_revisions\/(pg_[a-z2-7]{26})\/(rv_[a-z2-7]{26})\/_derived\/(original|og\/([a-f0-9]{64})\/([a-f0-9]{64})\/([a-f0-9]{64})\.(jpg|png))$/.exec(url.pathname)
+  const keys = [...url.searchParams.keys()]
+  const key = url.searchParams.get('k')
+  if (!match || (key !== null && !/^[A-Za-z0-9_-]{8,128}$/.test(key)) || keys.filter(k => k === 'k').length > 1) return textResponse(404, 'Not found', request.method)
+  let selection: CardSelection
+  if (match[3] === 'original') {
+    const path = url.searchParams.get('path')
+    if (!path || keys.some(k => k !== 'k' && k !== 'path') || keys.filter(k => k === 'path').length !== 1) return textResponse(404, 'Not found', request.method)
+    selection = { kind: 'original', path }
+  } else {
+    if (keys.some(k => k !== 'k')) return textResponse(404, 'Not found', request.method)
+    selection = { kind: 'derived', recipeSha256: match[4], inputSha256: match[5], contentSha256: match[6], extension: match[7] as 'jpg' | 'png' }
+  }
+  const nowSeconds = deps.nowSeconds()
+  const authenticated = await authenticate(request, { teamDomain: deps.config.accessTeamDomain, audiences: deps.config.readAudiences, surface: 'read' }, deps.jwks, nowSeconds)
+  const credentials = { team: authenticated && nowSeconds < authenticated.expiresAt ? authenticated : null, shareKey: key, shareCookie: null, pinnedProof: null, nowSeconds }
+  const plan = await resolveHttpCard(deps.db, deps.config, match[1], match[2], credentials, selection)
+  return plan ? serveCard(request, plan, deps.store) : textResponse(404, 'Not found', request.method)
+}
 
 export interface ReadRuntime { db: D1Database; config: ReadInstanceConfig; jwks: JwksSource; nowSeconds: () => number; store: RevisionStore; readonly shellAssets?: FixedShellAssets }
 const EMPTY_SHELL_ASSETS: FixedShellAssets = Object.freeze({})
@@ -31,9 +59,21 @@ function pinCookie(request: Request): string | null {
 
 export async function handleRead(request: Request, deps: ReadRuntime): Promise<Response> {
   try {
+    const card = await derivedCard(request, deps)
+    if (card) return card
     const parsed = parseRequest(request, deps.config).parsed
     const pin: PinNamespace | null = parsed.kind === 'pinned' ? { pageId: parsed.pageId, revisionId: parsed.revisionId } : null
     const outcome = await resolveRead(request, { ...deps, pinnedProof: pin ? pinCookie(request) : null })
+    if (parsed.kind === 'share' && !parsed.browser && request.headers.get('sec-fetch-dest') !== 'document' && (outcome.kind === 'share_unfurl' || (outcome.kind === 'serve' && (outcome.plan.resource.kind === 'document' || outcome.plan.resource.kind === 'subdocument')))) {
+      const preview = await resolveSharedPreview(deps.db, deps.config, { route: parsed.route, candidates: [outcome.plan.resource.path], key: parsed.key, nowSeconds: deps.nowSeconds() })
+      if (!preview || preview.pageId !== outcome.plan.authority.pageId || preview.revisionId !== outcome.plan.revisionId) return textResponse(404, 'Not found', request.method)
+      return unfurl(request, preview, parsed.key)
+    }
+    if (parsed.kind === 'card' && outcome.kind === 'share_card') {
+      if (parsed.targets.length !== 1 || !outcome.plan.authority.pageId) return textResponse(404, 'Not found', request.method)
+      const cardPlan = await resolveHttpCard(deps.db, deps.config, outcome.plan.authority.pageId, outcome.plan.revisionId, { team: null, shareKey: parsed.key, shareCookie: null, pinnedProof: null, nowSeconds: deps.nowSeconds() }, { kind: 'original', path: parsed.targets[0].path })
+      return cardPlan ? await serveCard(request, cardPlan, deps.store) : textResponse(404, 'Not found', request.method)
+    }
     switch (outcome.kind) {
       case 'deny': return textResponse(outcome.status, outcome.status === 404 ? 'Not found' : outcome.status === 503 ? 'Unavailable' : 'Forbidden', request.method)
       case 'login': return redirect(outcome.location, 302)

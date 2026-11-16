@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { handleManageWeb } from '../../adapters/web/manage'
 import { runtimeFor } from '../../adapters/http/manage-config'
 import { assignRole, readPagePolicy } from '../../domains/catalogue/commands'
-import { actor, artifactId, authenticatedActor, configs, jwks, pageFixture, pageId } from './fixtures/catalogue'
+import { readActivePageRevision } from '../../domains/catalogue/read'
+import { actor, artifactId, authenticatedActor, configs, jwks, pageFixture, pageId, revisionId } from './fixtures/catalogue'
 import { manageHttpBindings } from './fixtures/manage-http-bindings'
 import { env, request, setupHttp, signed } from './fixtures/manage-http'
 
@@ -28,6 +29,39 @@ function form(jwt: string, op: string, epoch: number, grantId?: string, originHe
 }
 
 describe('management web', () => {
+  it('creates a shortlink for the exact newly minted share without retargeting', async () => {
+    await pageFixture()
+    const jwt = await signed()
+    const fetcher = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { longUrl: string; customSlug: string; domain: string }
+      return Response.json({ shortCode: body.customSlug, shortUrl: `https://${body.domain}/${body.customSlug}`, longUrl: body.longUrl })
+    })
+    const base = await runtime()
+    const result = await handleManageWeb(form(jwt, 'share', 0), { ...base, shlink: { collectionUrl: 'https://provider.example/rest/v3/short-urls', apiKey: 'test', fetch: fetcher as typeof fetch } }, 'short.example')
+    expect(result?.status).toBe(200)
+    const html = await result!.text()
+    const sent = JSON.parse(String(fetcher.mock.calls[0][1]?.body))
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(fetcher.mock.calls[0][1]?.method).toBe('POST')
+    expect(html).toContain(sent.longUrl)
+    const job = await env.DB.prepare('SELECT j.state,j.desired_grant_id,j.revision_id,j.expected_policy_epoch,j.requested_short_domain,j.requested_short_code,m.destination FROM enrichment_jobs j JOIN shortlink_mappings m ON m.mapping_id=j.desired_mapping_id WHERE j.page_id=?').bind(pageId).first<{ desired_grant_id: string }>()
+    expect(job).toMatchObject({ state: 'ready', revision_id: revisionId, expected_policy_epoch: 1, requested_short_domain: 'short.example', requested_short_code: sent.customSlug, destination: sent.longUrl })
+    expect(job?.desired_grant_id).toBe((await readPagePolicy(await deps(), actor, pageId))?.grant?.grantId)
+    expect(await readActivePageRevision(await deps(), actor, { pageId, artifactId, expectedPolicyEpoch: 0, expectedContentVersion: 0 })).toBeNull()
+  })
+
+  it('preserves a created share when shortlink configuration is invalid', async () => {
+    await pageFixture()
+    const jwt = await signed()
+    const fetcher = vi.fn()
+    const base = await runtime()
+    const result = await handleManageWeb(form(jwt, 'share', 0), { ...base, shlink: { collectionUrl: 'https://provider.example/rest/v3/short-urls', apiKey: 'test', fetch: fetcher as typeof fetch } }, 'bad/domain')
+    expect(result?.status).toBe(200)
+    expect(await result!.text()).toContain('Share created, but shortlink enrichment')
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(await readPagePolicy(await deps(), actor, pageId)).toMatchObject({ visibility: 'shared', policyEpoch: 1 })
+  })
+
   it('admits signed top-level navigation with a cookie without broadening native or mutation admission', async () => {
     await pageFixture()
     const jwt = await signed()

@@ -59,7 +59,7 @@ export function shareUrl(config: InstanceBase, route: SubtreeOrTree, key: string
   return `https://${config.canonicalHost}/s/${ref}/${encodeURIComponent(key)}/`
 }
 export function isReservedShellPath(path: string): boolean {
-  return path === "/s" || path.startsWith("/s/") || path === "/a" || path.startsWith("/a/") || path.startsWith("/_revisions") || path.startsWith("/api") || path === "/registry" || path.startsWith("/registry/") || path === "/manifest.json" || path === "/asset-owners.json" || path === "/cdn-cgi" || path.startsWith("/cdn-cgi/")
+  return path === "/s" || path.startsWith("/s/") || path === "/a" || path.startsWith("/a/") || path === "/_derived" || path.startsWith("/_derived/") || path.startsWith("/_revisions") || path.startsWith("/api") || path === "/registry" || path.startsWith("/registry/") || path === "/manifest.json" || path === "/asset-owners.json" || path === "/cdn-cgi" || path.startsWith("/cdn-cgi/")
 }
 export function isReservedPath(path: string, config: InstanceBase & { readonly shellPaths?: readonly string[] }): boolean {
   return isReservedShellPath(path) || !!config.shellPaths?.includes(path)
@@ -107,6 +107,7 @@ export function parseRequest(request: Request, config: ReadInstanceConfig): { re
   let path: string
   try { path = raw.split("/").map(decodeURIComponent).join("/") } catch { return deny(404, "malformed") }
   if (/[\\\u0000-\u001f\u007f]/.test(path) || path.split("/").some(s => s === "." || s === ".." || s.includes("/"))) return deny(404, "malformed")
+  if (path === "/_derived" || path.startsWith("/_derived/")) return deny(404, "internal")
   if (path === "/manifest.json" || path === "/asset-owners.json" || path === "/registry" || path.startsWith("/registry/") || (path !== "/api/catalogue" && (path === "/api" || path.startsWith("/api/")))) return deny(404, "internal")
   if (config.shellPaths.includes(path)) return result({ kind: "shell", path, login: path === "/login" || path === "/login.html" ? { next: safeNext(url.searchParams.get("next"), url.origin), host } : null })
   if (path === "/api/catalogue") return result({ kind: "catalogue" })
@@ -114,6 +115,7 @@ export function parseRequest(request: Request, config: ReadInstanceConfig): { re
     const parts = path.split("/")
     const pageId = parts[2] ?? "", revisionId = parts[3] ?? ""
     if (!idRe.test(pageId) || !pageId.startsWith("pg_") || !idRe.test(revisionId) || !revisionId.startsWith("rv_") || parts.length < 5 || !parts[4]) return deny(404, "malformed")
+    if (parts[4] === "_derived") return deny(404, "internal")
     return result({ kind: "pinned", pageId, revisionId, path: `/${parts.slice(4).join("/")}` })
   }
   if (path === "/s" || path.startsWith("/s/")) {
