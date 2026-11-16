@@ -112,7 +112,11 @@ Une suppression dépublie via une transition de métadonnées contrôlée ; elle
 
 L'idempotence est liée à l'acteur, l'instance et au digest de commande : même clé + mêmes paramètres = même reçu, paramètres différents = conflit. Le GC ferme d'abord la session en D1 pour empêcher un commit concurrent, puis respecte la marge d'upload en vol et revérifie toutes les références actives et retenues. Un PUT réussi suivi d'une réponse perdue se réconcilie sans réécrire l'objet.
 
-La vérification d'intégrité doit être assurée par le flux d'upload ou une primitive de checksum documentée, pas par le seul hash annoncé par le client, ni par l'hypothèse qu'un ETag multipart serait un SHA-256. F04 mesure les limites réelles de body/mémoire/CPU sur le plus gros fichier approuvé par F01. Si un flux simple ne suffit pas, le même contrat reçoit un upload découpé avec finalisation vérifiée ; jamais un échec tardif découvert pendant la migration de production.
+La vérification d'intégrité doit être assurée par le flux d'upload ou une primitive de checksum documentée, pas par le seul hash annoncé par le client, ni par l'hypothèse qu'un ETag multipart serait un SHA-256.
+
+**Amendement de preuve explicitement approuvé le 2026-11-14 :** F04 mesure les limites réelles de body/mémoire/CPU avec un fichier artificiel de **32 Mio (33 554 432 octets)**, sans attendre l'identification du plus gros fichier de l'historique Roxabi. Cet accord n'est ni un résultat de test ni une autorisation de création, déploiement ou suppression de ressources Cloudflare.
+
+Ce témoin ne fixe aucun plafond définitif dans le code et n'exclut aucun fichier. **Tout fichier réel plus gros doit être testé avant sa migration** ; si un flux simple ne suffit pas, le même contrat reçoit un upload découpé avec finalisation vérifiée avant cette migration. Les autres dimensions de capacité et les critères de concurrence/reprise restent exigés ; jamais un échec tardif découvert pendant la migration de production.
 
 #### Lecture cohérente pendant une publication
 
@@ -243,10 +247,18 @@ F03 et F06 sont parallélisables après F02. Le spike F06 livre une preuve de tr
 
 | Lot / worktree | Dépendances | Changement / livrable | Validation bloquante |
 |---|---|---|---|
-| F04 `U/feat-F04-publication` | F03, F06 | Flux HTTP begin/upload/commit/status, R2 immuable, CAS D1, restauration et dépublication, intégré au mode d'authentification prouvé | Deux writers concurrents, upload interrompu, reprise après réponse perdue, manifestes faux et droits révoqués : aucun écrasement ni état partiel visible |
+| F04 `U/feat-F04-publication` | **F03 accepté et mergé pour démarrer uniquement le domaine Publication/Revision Store, les migrations `0002_*` et les preuves D1/R2 strictement locales (bindings de test inclus)**, identité via `authenticateManage`, sans contournement ni import de code du spike ; aucune création/modification de ressource Cloudflare ni déploiement ; **F06 accepté et mergé avant l'adapter HTTP manage, la configuration du manage Worker, l'acceptation, la revue finale et le merge F04** — exception bornée à §4.1 règle 2, approuvée par l'opérateur le 2026-11-13 | Flux HTTP begin/upload/commit/status, R2 immuable, CAS D1, restauration et dépublication, intégré au mode d'authentification prouvé | Deux writers concurrents, upload interrompu, reprise après réponse perdue, manifestes faux et droits révoqués : aucun écrasement ni état partiel visible |
 | F05 `U/feat-F05-serving` | F03, F04 | Lecture Worker/R2, catalogue web, canonisation des chemins slug et tree, assets/onglets, grants, barre de gestion sûre | URLs existantes, accès anonyme/équipe/clé, refus du sibling privé, liens relatifs et onglets ; vraie vérification navigateur sur corpus témoin |
 | F07 `U/feat-F07-remote-mcp` | F04, F06 | MCP distant avec outils de lecture/publication/état/visibilité/partage ; schémas compacts et erreurs stables | Les mêmes mutations HTTP/MCP donnent les mêmes transitions ; droits serveur indépendants des annotations MCP ; Origin invalide refusé |
 | F08 `U/feat-F08-client-publisher` | F04, F05, F06, F07 | Adapter local streamé, plugin public commun multi-host, configuration explicite des instances, migration des installations et catalogues | Claude Code/Codex/OMP publient un HTML de plusieurs Mo et un dossier sans corps au modèle ; octets, pages/assets servis et refus d'accès vérifiés, pas seulement un reçu |
+
+**Recadrage opérateur du 2026-11-16 — livrer le moteur, le déployer puis basculer.** La campagne cloud synthétique de quatre cas/20 020 appels, dont les cycles joints 10 000 fichiers/1 000 pages/20 000 edges, est retirée des critères bloquants de F04. Elle n'est pas déclarée réussie et ne sera pas relancée pour débloquer la livraison.
+
+L'acceptation F04 conserve les preuves natives de concurrence/reprise/révocation et d'intégrité, la revue indépendante du SHA final et les checks CI requis. Le smoke réel acquis couvre création puis mise à jour, upload et matérialisation serveur d'un asset de 32 Mio, avec rapprochement D1/manifeste et lecture physique R2 vérifiée. Ni ce smoke ni les limites configurées ne certifient la capacité jointe cloud, un pic mémoire ou des fichiers plus gros non exercés.
+
+Un payload réellement sélectionné hors du périmètre démontré — notamment un fichier de plus de 32 Mio — ou un dépassement opérationnel observé exige son support et une vérification ciblée avant migration. Cette condition ne rétablit pas automatiquement la campagne synthétique maximale.
+
+Après merge F04, F05 et F07 avancent en parallèle dans leurs worktrees/PR distincts, puis F08 livre la publication réelle des trois clients. Le parcours est moteur utilisable → déploiement → vérification fonctionnelle ciblée publication/lecture/droits/liens → bascule approuvée. Ce recadrage ne retire aucun comportement produit ni la fidélité du corpus, des accès, des clés et des shortlinks ; il n'autorise pas une bascule avant livraison du lecteur/MCP, sauvegarde/retour arrière et confirmation de l'opération exacte.
 
 Pas de « tester uniquement que le tool appelle une fonction » : les tests permanents couvrent les transitions, autorisations, octets servis et conflits observables. La configuration/wiring peut être vérifiée par un smoke jetable.
 

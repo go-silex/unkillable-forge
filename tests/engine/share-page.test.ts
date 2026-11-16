@@ -3,9 +3,12 @@ import { env } from "cloudflare:workers"
 import { beforeEach, describe, expect, it } from "vitest"
 import { importShare } from "../../domains/catalogue/commands"
 import { resolveRead } from "../../domains/catalogue/resolve"
-import { actor, addOwnership, artifactId, bootstrap, configs, digest, jwks, pageFixture, pageId, revisionId } from "./fixtures/catalogue"
+import { actor, artifactId, bootstrap, configs, digest, jwks, pageFixture, pageId, revisionId } from "./fixtures/catalogue"
 
-beforeEach(async () => { await bootstrap(); await pageFixture({ route: { kind: "tree_page", pageRef: "docs/page.html" } }) })
+beforeEach(async () => { await bootstrap(); await pageFixture({
+  route: { kind: "tree_page", pageRef: "docs/page.html" },
+  ownership: [{ path: "/docs/page.og.jpg", providerArtifactId: artifactId }],
+}) })
 
 describe("page-key and card shares", () => {
   it("exchanges a browser share, unfurls non-browser requests and never falls through for wrong keys", async () => {
@@ -27,7 +30,6 @@ describe("page-key and card shares", () => {
       env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?, '/docs/page.og.jpg', 'asset', 'card', ?, 1, 'image/jpeg')").bind(revisionId, digest),
       env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES ('/docs/page.og.jpg',?,?,'asset')").bind(artifactId, revisionId),
     ])
-    await addOwnership("/docs/page.og.jpg", artifactId)
     const url = "https://forge.example.test/s/docs/page.og.jpg/history_key123"
     expect(await resolveRead(new Request(url), deps)).toMatchObject({ kind: "share_card", plan: { resource: { contentType: "image/jpeg" } } })
     expect(await resolveRead(new Request("https://forge.example.test/s/docs/page.og.jpg/wrong_key123"), deps)).toMatchObject({ kind: "deny", status: 404 })

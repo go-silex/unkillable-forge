@@ -2,14 +2,17 @@ import { env } from "cloudflare:workers"
 import { beforeEach, describe, expect, it } from "vitest"
 import { share, setVisibility } from "../../domains/catalogue/commands"
 import { decideRead, type ReadCredentials, type ReadSubject } from "../../domains/catalogue/read"
-import { actor, addOwnership, artifactId, bootstrap, configs, digest, jwks, pageFixture, pageId, revisionId, teamIdentity } from "./fixtures/catalogue"
+import { actor, artifactId, bootstrap, configs, digest, jwks, pageFixture, pageId, revisionId, teamIdentity } from "./fixtures/catalogue"
 
 const provider = `ar_${"b".repeat(26)}`, providerRevision = `rv_${"b".repeat(26)}`, providerPage = `pg_${"b".repeat(26)}`
 const path = "/shared/asset.js"
 const none: ReadCredentials = { team: null, shareKey: null, shareCookie: null, pinnedProof: null, nowSeconds: 1 }
 const page: ReadSubject = { kind: "page", route: { kind: "tree_page", pageRef: "docs/page.html" }, candidates: ["/docs/page.html"], fragmentPath: null }
 const pinned = (resource: string): ReadSubject => ({ kind: "pinned", pageId, revisionId, path: resource })
-beforeEach(async () => { await bootstrap(); await pageFixture({ route: { kind: "tree_page", pageRef: "docs/page.html" } }) })
+beforeEach(async () => { await bootstrap() })
+
+const ownerFixture = (ownership: readonly { path: string; providerArtifactId: string }[]) =>
+  pageFixture({ route: { kind: "tree_page", pageRef: "docs/page.html" }, ownership })
 
 async function proofForPage(): Promise<string> {
   const decision = await decideRead(env.DB, (await configs()).read, page, none, null)
@@ -19,12 +22,12 @@ async function proofForPage(): Promise<string> {
 
 describe("pinned ownership authority", () => {
   it("keeps old local bytes after the owner drops a path and another artefact claims it", async () => {
+    await ownerFixture([{ path, providerArtifactId: artifactId }])
     const { read, manage } = await configs()
     await env.DB.batch([
       env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?,?,'asset','local-r1',?,1,'application/javascript')").bind(revisionId, path, digest),
       env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES (?,?,?,'asset')").bind(path, artifactId, revisionId),
     ])
-    await addOwnership(path, artifactId)
     await setVisibility({ db: env.DB, config: manage, jwks, now: () => 10 }, actor, { pageId, artifactId, expectedPolicyEpoch: 0, visibility: "public" })
     const proof = await proofForPage()
     const next = `rv_${"c".repeat(26)}`
@@ -46,11 +49,11 @@ describe("pinned ownership authority", () => {
   it("follows the declared external provider's active revision but denies absent, stale or replaced mounts", async () => {
     const { read, manage } = await configs()
     await pageFixture({ artifact: provider, revision: providerRevision, page: providerPage, route: { kind: "tree_page", pageRef: "private/provider.html" } })
+    await ownerFixture([{ path, providerArtifactId: provider }])
     await env.DB.batch([
       env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?,?,'asset','provider-r1',?,1,'application/javascript')").bind(providerRevision, path, digest),
       env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES (?,?,?,'asset')").bind(path, provider, providerRevision),
     ])
-    await addOwnership(path, provider)
     await setVisibility({ db: env.DB, config: manage, jwks, now: () => 10 }, actor, { pageId, artifactId, expectedPolicyEpoch: 0, visibility: "public" })
     const proof = await proofForPage()
     const credentials = { ...none, pinnedProof: proof }
@@ -77,12 +80,14 @@ describe("pinned ownership authority", () => {
   it("never reads a sibling document or subdocument through a forged edge, even for team or a grant", async () => {
     const { read, manage } = await configs()
     await pageFixture({ artifact: provider, revision: providerRevision, page: providerPage, route: { kind: "tree_page", pageRef: "private/provider.html" } })
+    await ownerFixture([
+      { path: "/private/provider.html", providerArtifactId: provider },
+      { path: "/private/tab.html", providerArtifactId: provider },
+    ])
     await env.DB.batch([
       env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?,'/private/tab.html','subdocument','private-tab',?,1,'text/html')").bind(providerRevision, digest),
       env.DB.prepare("INSERT INTO mounts (path,artifact_id,revision_id,kind) VALUES ('/private/tab.html',?,?,'subdocument')").bind(provider, providerRevision),
     ])
-    await addOwnership("/private/provider.html", provider)
-    await addOwnership("/private/tab.html", provider)
     const deps = { db: env.DB, config: manage, jwks, now: () => 10 }
     const grant = await share(deps, actor, { pageId, artifactId, expectedPolicyEpoch: 0, mode: "follow_active" })
     const shared = await decideRead(env.DB, read, { kind: "share", route: { kind: "tree_page", pageRef: "docs/page.html" }, candidates: ["/docs/page.html"] }, { ...none, shareKey: grant.key }, null)

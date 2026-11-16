@@ -4,6 +4,7 @@ import type { ManageInstanceConfig, ReadInstanceConfig } from "../../../domains/
 import { authenticateManage, type ManageActor } from "../../../domains/catalogue/principals"
 import { authenticate, type JwksSource, type VerifiedIdentity } from "../../../domains/catalogue/identity"
 import { executeGuarded } from "../../../domains/catalogue/guard"
+import { newId } from "../../../domains/catalogue/ids"
 
 export const instanceId = "test-forge"
 export const principalId = `pr_${"a".repeat(26)}`
@@ -62,24 +63,42 @@ export async function bootstrap(): Promise<void> {
   teamIdentity = await authenticatedReader()
 }
 
-export async function pageFixture(options: { artifact?: string; revision?: string; page?: string; route?: { kind: "subtree"; slug: string } | { kind: "tree_page"; pageRef: string }; visibility?: "private" | "shared" | "public" } = {}): Promise<void> {
+export async function pageFixture(options: { artifact?: string; revision?: string; page?: string; route?: { kind: "subtree"; slug: string } | { kind: "tree_page"; pageRef: string }; visibility?: "private" | "shared" | "public"; ownership?: readonly { path: string; providerArtifactId: string }[] } = {}): Promise<void> {
   const artifact = options.artifact ?? artifactId
   const revision = options.revision ?? revisionId
   const page = options.page ?? pageId
   const route = options.route ?? { kind: "subtree" as const, slug: "sample" }
   const path = route.kind === "subtree" ? `/a/${route.slug}/index.html` : `/${route.pageRef}`
+  const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 1 }
   await env.DB.batch([
     env.DB.prepare("INSERT INTO artifacts (artifact_id, origin, created_at) VALUES (?, 'published', 1)").bind(artifact),
     env.DB.prepare("INSERT INTO revisions (revision_id, artifact_id, origin, manifest_sha256, manifest_object_key, sealed_at) VALUES (?, ?, 'published', ?, 'manifest', 1)").bind(revision, artifact, digest),
     env.DB.prepare("INSERT INTO revision_resources (revision_id, path, kind, object_key, sha256, size, content_type) VALUES (?, ?, 'document', 'document', ?, 1, 'text/html')").bind(revision, path, digest),
     env.DB.prepare("INSERT INTO mounts (path, artifact_id, revision_id, kind) VALUES (?, ?, ?, 'document')").bind(path, artifact, revision),
-    ...claimPageStatements(env.DB, { pageId: page, artifactId: artifact, route, actorPrincipalId: principalId, at: 1 }),
-    env.DB.prepare("INSERT INTO revision_pages (revision_id, page_id, document_path, metadata_json) VALUES (?, ?, ?, '{}')").bind(revision, page, path),
-    env.DB.prepare("UPDATE artifacts SET active_revision_id = ? WHERE artifact_id = ?").bind(revision, artifact),
   ])
+  const effects = [
+    ...claimPageStatements(deps, actor, { pageId: page, artifactId: artifact, route, at: 1 }),
+    env.DB.prepare("INSERT INTO revision_pages (revision_id, page_id, document_path, metadata_json) VALUES (?, ?, ?, '{}')").bind(revision, page, path),
+  ]
+  const activate = env.DB.prepare("UPDATE artifacts SET active_revision_id = ? WHERE artifact_id = ?").bind(revision, artifact)
+  if (options.ownership) {
+    await executeGuarded(deps, actor, [{ action: "create_page", pageId: page, artifactId: artifact, revisionId: revision, requestDigest: digest, occurredAt: 1 }], effects,
+      { revisionId: revision, edges: options.ownership.map(edge => ({ ownerPageId: page, ...edge })) }, [activate])
+  } else {
+    await env.DB.batch([...effects, activate])
+  }
   if (options.visibility === "public") {
     await setVisibility({ db: env.DB, config: (await configs()).manage, jwks, now: () => 2 }, actor, { pageId: page, artifactId: artifact, expectedPolicyEpoch: 0, visibility: "public" })
   }
+}
+
+// Synthetic Publication history for policy-only Catalogue fixtures; not a native publication receipt, byte, capacity or F10 import proof.
+export async function syntheticCommitHistory({ revision, artifact, at, instance = instanceId }: { revision: string; artifact: string; at: number; instance?: string }): Promise<void> {
+  const session = newId("ps")
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO publication_sessions (session_id,instance_id,actor_principal_id,actor_authority_epoch,idempotency_key,request_digest,artifact_id,artifact_is_new,revision_id,base_revision_id,base_content_version,created_at,expires_at) VALUES (?,?,?,0,?,?,?,0,?,NULL,0,?,?)").bind(session, instance, principalId, `synthetic-commit-${revision}`, digest, artifact, revision, at, at + 1),
+    env.DB.prepare("INSERT INTO publication_events (event_id,action,session_id,instance_id,idempotency_key,artifact_id,revision_id,actor_principal_id,request_digest,occurred_at,receipt_json,verdict) VALUES (?,'commit',?,?,NULL,?,?,?,?,?,NULL,'ok')").bind(newId("pe"), session, instance, artifact, revision, principalId, digest, at),
+  ])
 }
 
 export async function mountedSubdocument(path: string): Promise<void> {
@@ -89,7 +108,3 @@ export async function mountedSubdocument(path: string): Promise<void> {
   ])
 }
 
-export async function addOwnership(path: string, providerArtifactId: string): Promise<void> {
-  const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
-  await executeGuarded(deps, actor, [{ action: "stage", pageId, artifactId, revisionId, requestDigest: digest, occurredAt: 10 }], [], { revisionId, edges: [{ ownerPageId: pageId, path, providerArtifactId }] })
-}

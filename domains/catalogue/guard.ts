@@ -53,11 +53,13 @@ CASE
   WHEN ?3 IN ('create_page', 'restore_page') AND NOT EXISTS (SELECT 1 FROM role_grants WHERE principal_id = ?4 AND revoked_at IS NULL AND (role = 'admin' OR (role = 'publisher' AND scope_kind = 'installation'))) THEN 'forbidden'
   WHEN ?3 IN ('stage', 'publish', 'unpublish', 'set_visibility', 'share', 'rotate_share', 'revoke_share', 'reveal_share')
     AND NOT EXISTS (SELECT 1 FROM role_grants WHERE principal_id = ?4 AND revoked_at IS NULL AND (role = 'admin' OR (role = 'publisher' AND scope_kind = 'installation') OR (role = 'publisher' AND scope_kind = 'page' AND scope_page_id = ?6))) THEN 'forbidden'
+  WHEN ?3 = 'stage' AND EXISTS (SELECT 1 FROM pages WHERE page_id = ?6 AND artifact_id = ?7 AND tombstoned_at IS NOT NULL)
+    AND NOT EXISTS (SELECT 1 FROM role_grants WHERE principal_id = ?4 AND revoked_at IS NULL AND (role = 'admin' OR (role = 'publisher' AND scope_kind = 'installation'))) THEN 'forbidden'
   WHEN ?3 = 'create_page' AND EXISTS (SELECT 1 FROM pages WHERE page_id = ?6) THEN 'conflict'
   WHEN ?3 IN ('publish', 'unpublish', 'set_visibility', 'share', 'rotate_share', 'revoke_share', 'reveal_share', 'import_share')
     AND NOT EXISTS (SELECT 1 FROM pages WHERE page_id = ?6 AND artifact_id = ?7 AND tombstoned_at IS NULL) THEN 'not_found'
-  WHEN ?3 = 'stage' AND ?6 IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pages WHERE page_id = ?6 AND artifact_id = ?7 AND tombstoned_at IS NULL) THEN 'not_found'
-  WHEN ?3 IN ('create_page', 'publish', 'restore_page') AND NOT EXISTS (SELECT 1 FROM revisions WHERE revision_id = ?17 AND artifact_id = ?7) THEN 'not_found'
+  WHEN ?3 = 'stage' AND ?6 IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pages WHERE page_id = ?6 AND artifact_id = ?7) THEN 'not_found'
+  WHEN ?3 IN ('create_page', 'publish', 'restore_page') AND (NOT EXISTS (SELECT 1 FROM revisions WHERE revision_id = ?17 AND artifact_id = ?7) OR EXISTS (SELECT 1 FROM revision_discards WHERE revision_id = ?17)) THEN 'not_found'
   WHEN ?3 = 'restore_page' AND NOT EXISTS (SELECT 1 FROM pages WHERE page_id = ?6 AND artifact_id = ?7) THEN 'not_found'
   WHEN ?3 = 'restore_page' AND NOT EXISTS (SELECT 1 FROM revision_pages WHERE revision_id = ?17 AND page_id = ?6) THEN 'not_found'
   WHEN ?3 = 'set_alias' AND ?6 IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pages WHERE page_id = ?6 AND tombstoned_at IS NULL) THEN 'not_found'
@@ -67,16 +69,40 @@ CASE
   WHEN ?3 = 'revoke_role' AND NOT EXISTS (SELECT 1 FROM role_grants WHERE role_grant_id = ?10 AND principal_id = ?9 AND revoked_at IS NULL) THEN 'not_found'
   WHEN ?3 = 'restore_page' AND EXISTS (SELECT 1 FROM pages WHERE page_id = ?6 AND tombstoned_at IS NULL) THEN 'conflict'
   WHEN ?3 IN ('publish', 'unpublish', 'set_visibility', 'share', 'rotate_share', 'revoke_share', 'reveal_share', 'import_share') AND (SELECT policy_epoch FROM pages WHERE page_id = ?6) IS NOT ?12 THEN 'conflict'
+  WHEN ?3 = 'stage' AND EXISTS (SELECT 1 FROM pages WHERE page_id = ?6 AND artifact_id = ?7 AND tombstoned_at IS NOT NULL AND policy_epoch IS NOT ?12) THEN 'conflict'
   WHEN ?3 IN ('publish', 'unpublish', 'restore_page') AND (SELECT content_version FROM artifacts WHERE artifact_id = ?7) IS NOT ?13 THEN 'conflict'
   WHEN ?3 IN ('assign_role', 'revoke_role', 'disable_principal') AND (SELECT authority_epoch FROM principals WHERE principal_id = ?9) IS NOT ?14 THEN 'conflict'
   WHEN ?3 = 'disable_principal' AND EXISTS (SELECT 1 FROM principals WHERE principal_id = ?9 AND status = 'disabled') THEN 'invalid_state'
-  WHEN ?3 IN ('create_page', 'publish', 'restore_page') AND ?17 IS NOT NULL AND EXISTS (SELECT 1 FROM revision_resources rr JOIN mounts m ON m.path = rr.path WHERE rr.revision_id = ?17 AND m.artifact_id IS NOT ?7) THEN 'conflict'
-  WHEN ?3 IN ('create_page', 'publish', 'restore_page') AND ?17 IS NOT NULL AND EXISTS (
-    SELECT 1 FROM revision_resources rr JOIN routes r ON r.kind = 'subtree' AND r.artifact_id <> ?7
-      AND substr(rr.path, 1, length('/a/' || r.route_key || '/')) = '/a/' || r.route_key || '/'
-    WHERE rr.revision_id = ?17
+  WHEN ?19 = 1 AND ?3 IN ('create_page', 'publish', 'restore_page') AND ?17 IS NOT NULL AND EXISTS (SELECT 1 FROM revision_resources rr JOIN mounts m ON m.path = rr.path WHERE rr.revision_id = ?17 AND m.artifact_id IS NOT ?7) THEN 'conflict'
+  WHEN ?19 = 1 AND ?3 IN ('create_page', 'publish', 'restore_page') AND ?17 IS NOT NULL AND EXISTS (
+    SELECT 1 FROM routes r CROSS JOIN revision_resources rr
+    WHERE r.kind = 'subtree' AND r.artifact_id <> ?7
+      AND rr.revision_id = ?17
+      AND rr.path >= '/a/' || r.route_key || '/'
+      AND rr.path < '/a/' || r.route_key || '0'
   ) THEN 'conflict'
-  WHEN ?3 IN ('share', 'rotate_share') AND ?17 IS NOT NULL AND NOT EXISTS (SELECT 1 FROM revisions WHERE revision_id = ?17 AND artifact_id = ?7) THEN 'invalid_state'
+  WHEN ?19 = 1 AND ?3 IN ('create_page', 'publish', 'restore_page') AND EXISTS (
+    SELECT 1 FROM revision_resources d CROSS JOIN mounts m
+    WHERE d.revision_id = ?17 AND d.kind = 'document'
+      AND d.path GLOB '/a/*/index.html' AND d.path NOT GLOB '/a/*/*/*'
+      AND m.path >= substr(d.path, 1, length(d.path) - 10)
+      AND m.path < substr(d.path, 1, length(d.path) - 11) || '0'
+      AND m.artifact_id IS NOT ?7
+  ) THEN 'conflict'
+  WHEN ?3 IN ('publish', 'restore_page', 'share', 'rotate_share') AND ?17 IS NOT NULL AND ?6 IS NOT NULL
+    AND NOT EXISTS (SELECT 1 FROM role_grants WHERE principal_id = ?4 AND revoked_at IS NULL AND (role = 'admin' OR (role = 'publisher' AND scope_kind = 'installation')))
+    AND EXISTS (SELECT 1 FROM resource_owners o WHERE o.owner_revision_id = ?17 AND o.owner_page_id = ?6 AND o.provider_artifact_id IS NOT ?7
+      AND NOT EXISTS (SELECT 1 FROM resource_owners k JOIN artifacts a ON a.artifact_id = ?7 AND a.active_revision_id = k.owner_revision_id
+        WHERE k.owner_page_id = ?6 AND k.path = o.path AND k.provider_artifact_id = o.provider_artifact_id)) THEN 'forbidden'
+  WHEN ?18 = 1 AND (?3 NOT IN ('stage','create_page') OR ?6 IS NULL OR ?17 IS NULL
+    OR EXISTS (SELECT 1 FROM revision_pages WHERE revision_id = ?17 AND page_id = ?6)
+    OR EXISTS (SELECT 1 FROM artifacts WHERE active_revision_id = ?17)
+    OR EXISTS (SELECT 1 FROM revision_discards WHERE revision_id = ?17)) THEN 'invalid_state'
+  WHEN ?3 IN ('share', 'rotate_share') AND ?17 IS NOT NULL AND (
+    NOT EXISTS (SELECT 1 FROM revisions WHERE revision_id = ?17 AND artifact_id = ?7)
+    OR EXISTS (SELECT 1 FROM revision_discards WHERE revision_id = ?17)
+    OR NOT EXISTS (SELECT 1 FROM publication_events WHERE action = 'commit' AND instance_id = ?2 AND artifact_id = ?7 AND revision_id = ?17)
+  ) THEN 'invalid_state'
   WHEN ?3 = 'reveal_share' AND (SELECT sealed_key FROM share_grants WHERE grant_id = ?8) IS NULL THEN 'invalid_state'
   WHEN ?3 = 'revoke_role' AND (SELECT role FROM role_grants WHERE role_grant_id = ?10) = 'admin' AND NOT EXISTS (SELECT 1 FROM role_grants g JOIN principals p ON p.principal_id = g.principal_id WHERE g.role = 'admin' AND g.revoked_at IS NULL AND p.status = 'active' AND g.role_grant_id <> ?10) THEN 'last_admin'
   WHEN ?3 = 'disable_principal' AND EXISTS (SELECT 1 FROM role_grants WHERE principal_id = ?9 AND role = 'admin' AND revoked_at IS NULL) AND NOT EXISTS (SELECT 1 FROM role_grants g JOIN principals p ON p.principal_id = g.principal_id WHERE g.role = 'admin' AND g.revoked_at IS NULL AND p.status = 'active' AND g.principal_id <> ?9) THEN 'last_admin'
@@ -84,13 +110,13 @@ CASE
 
 const GUARD_ACTIONS: readonly string[] = ["create_page", "stage", "publish", "restore_page", "unpublish", "set_visibility", "share", "rotate_share", "revoke_share", "reveal_share", "import_share", "set_alias", "assign_role", "revoke_role", "disable_principal"]
 
-function guardStatement(db: D1Database, instanceId: string, input: GuardInput): D1PreparedStatement {
+function guardStatement(db: D1Database, instanceId: string, input: GuardInput, hasEdges: boolean, checkNamespace: boolean): D1PreparedStatement {
   if (!GUARD_ACTIONS.includes(input.action)) throw new PolicyError("forbidden")
   return db.prepare(GUARD_SQL).bind(newId("ev"), instanceId, input.action, input.actor.principalId, input.actor.surface,
     input.pageId ?? null, input.artifactId ?? null, input.grantId ?? null, input.targetPrincipalId ?? null,
     input.roleGrantId ?? null, input.actor.expectedAuthorityEpoch, input.expectedPolicyEpoch ?? null,
     input.expectedContentVersion ?? null, input.expectedTargetAuthorityEpoch ?? null,
-    input.requestDigest, input.occurredAt, input.revisionId ?? null)
+    input.requestDigest, input.occurredAt, input.revisionId ?? null, hasEdges ? 1 : 0, checkNamespace ? 1 : 0)
 }
 
 export function mapPolicyError(error: unknown): PolicyError {
@@ -115,6 +141,12 @@ export function mapPolicyError(error: unknown): PolicyError {
   const message = messages.join("\n")
   const named = message.match(/CHECK constraint failed: guard_(instance_mismatch|unauthenticated|forbidden|not_found|conflict|invalid_state|last_admin)\b/)
   if (named) return new PolicyError(named[1] as PolicyErrorCode)
+  const publication = message.match(/CHECK constraint failed: ((?:publication_(?:not_found|closed|expired|incomplete|not_sealed|never_committed|conflict)|discard_(?:not_found|revision_active|revision_pinned|revision_staged|revision_retained)))\b/)
+  if (publication) {
+    const detail = publication[1]
+    const code = detail.endsWith("_not_found") ? "not_found" : detail === "publication_conflict" ? "conflict" : "invalid_state"
+    return new PolicyError(code, detail)
+  }
   const unique = message.match(/UNIQUE constraint failed:\s*([^\s,:]+(?:\.[^\s,:]+)?)/)
   if (unique) return new PolicyError("conflict", unique[1])
   if (/constraint failed/i.test(message) || /SQLITE_CONSTRAINT/i.test(message)) return new PolicyError("invariant_violation")
@@ -128,7 +160,11 @@ function ownershipStatements(db: D1Database, actor: ManageActor, ownership: { re
     statements.push(db.prepare(`WITH e(rev,page,path,provider) AS (VALUES ${chunk.map(() => '(?,?,?,?)').join(',')})
       INSERT INTO resource_owners (owner_revision_id,owner_page_id,path,provider_artifact_id,admission)
       SELECT e.rev,e.page,e.path,e.provider,CASE
+        WHEN EXISTS (SELECT 1 FROM artifacts WHERE active_revision_id = e.rev) OR EXISTS (SELECT 1 FROM revision_discards WHERE revision_id = e.rev) THEN 'forbidden'
         WHEN NOT EXISTS (SELECT 1 FROM pages pg JOIN revisions rv ON rv.artifact_id = pg.artifact_id WHERE pg.page_id = e.page AND rv.revision_id = e.rev) THEN 'forbidden'
+        WHEN EXISTS (SELECT 1 FROM revision_pages rp JOIN revisions rv ON rv.revision_id = rp.revision_id
+          WHERE rp.revision_id = e.rev AND rp.page_id = e.page AND substr(rp.document_path,1,3) = '/a/'
+          AND (e.provider <> rv.artifact_id OR substr(e.path,1,length(rp.document_path)-10) <> substr(rp.document_path,1,length(rp.document_path)-10))) THEN 'forbidden'
         WHEN e.provider = (SELECT artifact_id FROM revisions WHERE revision_id = e.rev) THEN 'local'
         WHEN EXISTS (SELECT 1 FROM role_grants g JOIN principals pr ON pr.principal_id = g.principal_id
           WHERE g.principal_id = ? AND g.revoked_at IS NULL AND pr.status = 'active'
@@ -146,7 +182,7 @@ export async function executeGuarded(deps: ManageDeps, actor: ManageActor, guard
   if (guards.length === 0) throw new PolicyError("invalid_state")
   if (ownership?.edges.some(edge => !guards.some(guard =>
     guard.pageId === edge.ownerPageId &&
-    (guard.action === "stage" || guard.action === "create_page" || guard.action === "publish") &&
+    (guard.action === "stage" || guard.action === "create_page") &&
     guard.revisionId === ownership.revisionId
   ))) throw new PolicyError("invalid_state")
   if (guards.length !== 1 && guards.some(g => g.action === "assign_role" || g.action === "revoke_role" || g.action === "disable_principal")) {
@@ -165,9 +201,20 @@ export async function executeGuarded(deps: ManageDeps, actor: ManageActor, guard
     }
   }
   try {
-    return await deps.db.batch([...guards.map(g => guardStatement(deps.db, deps.config.instanceId, {
-      ...g, actor: { principalId: actor.principalId, surface: "manage", expectedAuthorityEpoch: actor.authorityEpoch },
-    })), ...effects, ...(ownership ? ownershipStatements(deps.db, actor, ownership) : []), ...finalEffects])
+    const claims = new Map<string | null, Set<string | null>>()
+    const statements = guards.map(g => {
+      let checkNamespace = false
+      if (g.action === "create_page" || g.action === "publish" || g.action === "restore_page") {
+        const artifact = g.artifactId ?? null, revision = g.revisionId ?? null
+        let revisions = claims.get(artifact)
+        if (!revisions) { revisions = new Set(); claims.set(artifact, revisions) }
+        if (!revisions.has(revision)) { revisions.add(revision); checkNamespace = true }
+      }
+      return guardStatement(deps.db, deps.config.instanceId, {
+        ...g, actor: { principalId: actor.principalId, surface: "manage", expectedAuthorityEpoch: actor.authorityEpoch },
+      }, !!ownership?.edges.some(edge => edge.ownerPageId === g.pageId), checkNamespace)
+    })
+    return await deps.db.batch([...statements, ...effects, ...(ownership ? ownershipStatements(deps.db, actor, ownership) : []), ...finalEffects])
   } catch (error) {
     throw mapPolicyError(error)
   }

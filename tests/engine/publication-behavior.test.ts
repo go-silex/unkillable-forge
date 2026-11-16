@@ -1,0 +1,402 @@
+import { env } from "cloudflare:workers"
+import { beforeEach, describe, expect, it } from "vitest"
+import { assignRole, disablePrincipal, readPagePolicy, revokeRole, revokeShare, setVisibility, share } from "../../domains/catalogue/commands"
+import { PolicyError } from "../../domains/catalogue/guard"
+import { newId } from "../../domains/catalogue/ids"
+import type { ReadInstanceConfig } from "../../domains/catalogue/instance-config"
+import { decideRead, type ReadCredentials } from "../../domains/catalogue/read"
+import { PublicationService } from "../../domains/publication"
+import { collectRevision } from "../../domains/publication/collection"
+import type { BeginCommand, PublicationDeps, PublicationReceipt } from "../../domains/publication/types"
+import { RevisionStore } from "../../domains/store/revision-store"
+import { actor, authenticatedActor, bootstrap, configs, instanceId, jwks, teamIdentity } from "./fixtures/catalogue"
+import { body, clock, content, documentCommand, publishDocument, storedBytes } from "./fixtures/publication"
+
+const path = "/a/sample/index.html"
+const route = { kind: "subtree" as const, slug: "sample" }
+const anonymous: ReadCredentials = { team: null, shareKey: null, shareCookie: null, pinnedProof: null, nowSeconds: 1 }
+
+beforeEach(async () => { await bootstrap() })
+
+async function setup() {
+  const time = clock(10_000)
+  const { manage, read } = await configs()
+  const store = new RevisionStore(env.REVISION_BYTES, instanceId)
+  const deps: PublicationDeps = { db: env.DB, config: manage, jwks, now: time.now, store, publication: { sessionTtlMs: 60_000, maxUploadTimeoutMs: 1000, retainMs: 900_000, marginMs: 1000, manageClockSkewMs: 0, readClockSkewMs: 0 } }
+  return { publication: new PublicationService(deps), deps, store, time, read }
+}
+
+async function update(receipt: PublicationReceipt, pageId: string, key: string, text: string, source: "client" | "base" = "client"): Promise<{ command: BeginCommand; bytes: Uint8Array<ArrayBuffer> }> {
+  const file = await content(text)
+  return { bytes: file.bytes, command: { idempotencyKey: key, artifactId: receipt.artifactId, expectedRevisionId: receipt.revisionId, expectedContentVersion: receipt.contentVersion, files: [{ path, kind: "document", sha256: file.sha256, size: file.size, contentType: "text/html", source }], pages: [{ pageId, disposition: "keep", documentPath: path, metadata: {}, expectedPolicyEpoch: 0 }], edges: [] } }
+}
+async function visible(read: ReadInstanceConfig) {
+  return decideRead(env.DB, read, { kind: "page", route, candidates: [path], fragmentPath: null }, { ...anonymous, team: teamIdentity }, null)
+}
+
+function collection(deps: PublicationDeps) {
+  return { db: deps.db, store: deps.store, now: deps.now, retainMs: deps.publication.retainMs, marginMs: deps.publication.marginMs, maxUploadTimeoutMs: deps.publication.maxUploadTimeoutMs, manageClockSkewMs: deps.publication.manageClockSkewMs, readClockSkewMs: deps.publication.readClockSkewMs }
+}
+
+function controlledGate() {
+  let arrive!: () => void, resume!: () => void
+  const reached = new Promise<void>(resolve => { arrive = resolve })
+  const resumed = new Promise<void>(resolve => { resume = resolve })
+  return { reached, arrive, resumed, resume }
+}
+
+// Forward every native operation; pause only after the collector's revision lookup
+// (its second `first`) has actually completed, immediately before its claim.
+function gateAfterRevisionLookup(db: D1Database) {
+  const gate = controlledGate()
+  let reads = 0
+  let revisionLookup: unknown
+  const wrap = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement, {
+    get(target, property) {
+      if (property === "bind") return (...values: unknown[]) => wrap(target.bind(...values))
+      const value = Reflect.get(target, property, target)
+      if (property === "first") return async (...args: unknown[]) => {
+        const result: unknown = await Reflect.apply(value, target, args)
+        if (++reads === 2) {
+          revisionLookup = result
+          gate.arrive()
+          await gate.resumed
+        }
+        return result
+      }
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  })
+  const observed = new Proxy(db, {
+    get(target, property) {
+      if (property === "prepare") return (query: string) => wrap(target.prepare(query))
+      const value = Reflect.get(target, property, target)
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  })
+  return { db: observed, gate, lookup: () => revisionLookup }
+}
+
+// The actual discard write and read finish before this pass-through reaches
+// the Store; native deletion still runs unchanged after the gate is released.
+function gateBeforeNativeDelete(store: RevisionStore) {
+  const gate = controlledGate()
+  const observed = new Proxy(store, {
+    get(target, property) {
+      if (property === "deleteRevision") return async (ref: Parameters<RevisionStore["deleteRevision"]>[0]) => {
+        gate.arrive()
+        await gate.resumed
+        return target.deleteRevision(ref)
+      }
+      const value = Reflect.get(target, property, target)
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  })
+  return { store: observed, gate }
+}
+
+describe("publication against local D1 and R2", () => {
+  it("allows one of two same-base commits and retains the loser's staging bytes", async () => {
+    const { publication, store, read } = await setup()
+    const first = await documentCommand("initial", path, "original")
+    const initial = await publishDocument(publication, actor, first.command, first.bytes)
+    const left = await update(initial.receipt, first.pageId, "left", "left bytes")
+    const right = await update(initial.receipt, first.pageId, "right", "right bytes")
+    const a = await publication.begin(actor, left.command)
+    const b = await publication.begin(actor, right.command)
+    await publication.upload(actor, a.sessionId, path, body(left.bytes))
+    await publication.upload(actor, b.sessionId, path, body(right.bytes))
+    await publication.seal(actor, a.sessionId)
+    await publication.seal(actor, b.sessionId)
+    const results = await Promise.allSettled([publication.commit(actor, a.sessionId), publication.commit(actor, b.sessionId)])
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1)
+    expect(results.filter(result => result.status === "rejected")).toEqual([expect.objectContaining({ status: "rejected", reason: expect.objectContaining({ code: "conflict" }) })])
+    expect(results.find(result => result.status === "rejected")).toMatchObject({ reason: expect.any(PolicyError) })
+    const winner = results[0].status === "fulfilled" ? a : b
+    const loser = winner === a ? b : a
+    expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: winner.revisionId } })
+    expect(await publication.status(actor, loser.sessionId)).toMatchObject({ state: "sealed", revisionId: loser.revisionId })
+    expect(await storedBytes(store, { artifactId: loser.artifactId, revisionId: loser.revisionId, kind: "resource", path })).toEqual(winner === a ? right.bytes : left.bytes)
+  })
+
+  it("reconciles a lost reply and rejects changed parameters without replacing bytes", async () => {
+    const { publication, store } = await setup()
+    const first = await documentCommand("replay", path, "unchanged")
+    const session = await publication.begin(actor, first.command)
+    await publication.upload(actor, session.sessionId, path, body(first.bytes))
+    const again = await publication.begin(actor, first.command)
+    expect(again.sessionId).toBe(session.sessionId)
+    await publication.upload(actor, session.sessionId, path, body(first.bytes))
+    const changed = { ...first.command, pages: first.command.pages.map(page => ({ ...page, metadata: { title: "changed" } })) }
+    await expect(publication.begin(actor, changed)).rejects.toMatchObject({ code: "conflict" })
+    expect(await publication.status(actor, session.sessionId)).toMatchObject({ state: "open", revisionId: session.revisionId, files: [{ path, stored: true }] })
+    expect(await storedBytes(store, { artifactId: session.artifactId, revisionId: session.revisionId, kind: "resource", path })).toEqual(first.bytes)
+    await publication.seal(actor, session.sessionId)
+    const receipt = await publication.commit(actor, session.sessionId)
+    expect(receipt).toMatchObject({ revisionId: session.revisionId, contentVersion: 1 })
+    expect(await publication.commit(actor, session.sessionId)).toEqual(receipt)
+    expect(await publication.status(actor, session.sessionId)).toMatchObject({ state: "committed", revisionId: receipt.revisionId })
+    expect(await storedBytes(store, { artifactId: session.artifactId, revisionId: session.revisionId, kind: "resource", path })).toEqual(first.bytes)
+  })
+
+  it("keeps the old revision readable after incomplete and bad-checksum uploads", async () => {
+    const { publication, store, read } = await setup()
+    const first = await documentCommand("old", path, "old bytes")
+    const initial = await publishDocument(publication, actor, first.command, first.bytes)
+    const next = await update(initial.receipt, first.pageId, "incomplete", "valid new bytes")
+    const session = await publication.begin(actor, next.command)
+    await expect(publication.seal(actor, session.sessionId)).rejects.toMatchObject({ code: "invalid_state", detail: "incomplete" })
+    await expect(publication.upload(actor, session.sessionId, path, body((await content("wrong payload")).bytes))).rejects.toMatchObject({ code: "integrity_error" })
+    await expect(publication.seal(actor, session.sessionId)).rejects.toMatchObject({ code: "invalid_state", detail: "incomplete" })
+    expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: initial.receipt.revisionId } })
+    expect(await storedBytes(store, { artifactId: initial.session.artifactId, revisionId: initial.session.revisionId, kind: "resource", path })).toEqual(first.bytes)
+  })
+
+  it("materializes unchanged base bytes server-side and preserves private visibility", async () => {
+    const { publication, store, deps } = await setup()
+    const first = await documentCommand("base", path, "same bytes")
+    const initial = await publishDocument(publication, actor, first.command, first.bytes)
+    const next = await update(initial.receipt, first.pageId, "copy", "same bytes", "base")
+    const session = await publication.begin(actor, next.command)
+    expect(session.files).toContainEqual({ path, source: "base", stored: false })
+    await publication.materialize(actor, session.sessionId, path)
+    await publication.seal(actor, session.sessionId)
+    const receipt = await publication.commit(actor, session.sessionId)
+    expect(receipt.revisionId).not.toBe(initial.receipt.revisionId)
+    expect(await storedBytes(store, { artifactId: session.artifactId, revisionId: session.revisionId, kind: "resource", path })).toEqual(first.bytes)
+    expect(await readPagePolicy(deps, actor, first.pageId)).toMatchObject({ visibility: "private" })
+  })
+
+  it("refuses commit after a policy change, without changing the active revision", async () => {
+    const { publication, deps, read } = await setup()
+    const first = await documentCommand("acl-old", path, "old")
+    const initial = await publishDocument(publication, actor, first.command, first.bytes)
+    const next = await update(initial.receipt, first.pageId, "acl-new", "new")
+    const session = await publication.begin(actor, next.command)
+    await publication.upload(actor, session.sessionId, path, body(next.bytes))
+    await publication.seal(actor, session.sessionId)
+    await setVisibility(deps, actor, { pageId: first.pageId, artifactId: initial.receipt.artifactId, expectedPolicyEpoch: 0, visibility: "public" })
+    await expect(publication.commit(actor, session.sessionId)).rejects.toMatchObject({ code: "conflict" })
+    expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: initial.receipt.revisionId } })
+    expect(await readPagePolicy(deps, actor, first.pageId)).toMatchObject({ visibility: "public", policyEpoch: 1 })
+  })
+
+  it("restores the original page privately without reviving its former share", async () => {
+    const { publication, deps, read } = await setup()
+    const first = await documentCommand("restore-original", path, "original")
+    const initial = await publishDocument(publication, actor, first.command, first.bytes)
+    const grant = await share(deps, actor, { pageId: first.pageId, artifactId: initial.receipt.artifactId, expectedPolicyEpoch: 0, mode: "follow_active" })
+    const removed = await publication.unpublish(actor, { idempotencyKey: "remove", artifactId: initial.receipt.artifactId, expectedContentVersion: initial.receipt.contentVersion })
+    const restored = await publication.restore(actor, { idempotencyKey: "restore", artifactId: initial.receipt.artifactId, revisionId: initial.session.revisionId, expectedContentVersion: removed.contentVersion })
+    expect(restored.pages).toEqual(expect.arrayContaining([expect.objectContaining({ pageId: first.pageId })]))
+    expect(await readPagePolicy(deps, actor, first.pageId)).toMatchObject({ pageId: first.pageId, visibility: "private", grant: null })
+    expect(await decideRead(env.DB, read, { kind: "share", route, candidates: [path] }, { ...anonymous, shareKey: grant.key }, null)).toEqual({ kind: "deny", reason: "not_found" })
+  })
+  it("protects active and base-copy revisions, then collects only after closure and retention", async () => {
+    const { publication, deps, store, time } = await setup()
+    const first = await documentCommand("gc-base", path, "base bytes")
+    const initial = await publishDocument(publication, actor, first.command, first.bytes)
+    const ref = { artifactId: initial.session.artifactId, revisionId: initial.session.revisionId }
+    const resource = { ...ref, kind: "resource" as const, path }
+    await expect(collectRevision(collection(deps), ref)).rejects.toThrow(/discard_revision_active/)
+    expect(await storedBytes(store, resource)).toEqual(first.bytes)
+    const next = await update(initial.receipt, first.pageId, "gc-copy", "base bytes", "base")
+    const longSession = new PublicationService({ ...deps, publication: { ...deps.publication, sessionTtlMs: 2_000_000 } })
+    const staged = await longSession.begin(actor, next.command)
+    await publication.unpublish(actor, { idempotencyKey: "gc-remove", artifactId: ref.artifactId, expectedContentVersion: initial.receipt.contentVersion })
+    time.advance(900_001)
+    await expect(collectRevision(collection(deps), ref)).rejects.toThrow(/discard_revision_staged/)
+    expect(await storedBytes(store, resource)).toEqual(first.bytes)
+    await longSession.abort(actor, staged.sessionId)
+    await expect(collectRevision(collection(deps), ref)).rejects.toThrow(/discard_revision_staged/)
+    expect(await storedBytes(store, resource)).toEqual(first.bytes)
+    time.advance(1001)
+    expect(await collectRevision(collection(deps), ref)).toBe("purged")
+    expect(await storedBytes(store, resource)).toBeNull()
+    expect(await collectRevision(collection(deps), ref)).toBe("already_purged")
+    await expect(publication.restore(actor, { idempotencyKey: "gc-restore", artifactId: ref.artifactId, revisionId: ref.revisionId, expectedContentVersion: initial.receipt.contentVersion + 1 })).rejects.toMatchObject({ code: "not_found" })
+  })
+  it.each(["role", "principal"] as const)("refuses a %s revoked after staging, even with a freshly authenticated actor", async (revocation) => {
+    const { publication, deps, read } = await setup()
+    const first = await documentCommand(`revoke-base-${revocation}`, path, "old")
+    const initial = await publishDocument(publication, actor, first.command, first.bytes)
+    const person = await authenticatedActor(`publisher-${revocation}`)
+    const role = await assignRole(deps, actor, { targetPrincipalId: person.principalId, expectedTargetAuthorityEpoch: 0, role: "publisher", scope: { kind: "installation" } })
+    const publisher = await authenticatedActor(`publisher-${revocation}`)
+    const next = await update(initial.receipt, first.pageId, `revoke-next-${revocation}`, "new")
+    const session = await publication.begin(publisher, next.command)
+    await publication.upload(publisher, session.sessionId, path, body(next.bytes))
+    await publication.seal(publisher, session.sessionId)
+    if (revocation === "role") {
+      await revokeRole(deps, actor, { targetPrincipalId: person.principalId, expectedTargetAuthorityEpoch: 1, roleGrantId: role.roleGrantId })
+    } else {
+      await disablePrincipal(deps, actor, { targetPrincipalId: person.principalId, expectedTargetAuthorityEpoch: 1 })
+    }
+    const refreshed = await authenticatedActor(`publisher-${revocation}`)
+    await expect(publication.commit(refreshed, session.sessionId)).rejects.toMatchObject({ code: revocation === "role" ? "forbidden" : "unauthenticated" })
+    expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: initial.receipt.revisionId } })
+  })
+  it("keeps a pinned revision until its grant ends, even after retention expires", async () => {
+    const { publication, deps, store, time } = await setup()
+    const first = await documentCommand("pinned-base", path, "old pinned bytes")
+    const initial = await publishDocument(publication, actor, first.command, first.bytes)
+    const grant = await share(deps, actor, { pageId: first.pageId, artifactId: initial.receipt.artifactId, expectedPolicyEpoch: 0, mode: "pinned", revisionId: initial.session.revisionId })
+    const next = await update(initial.receipt, first.pageId, "pinned-next", "new bytes")
+    const command = { ...next.command, pages: next.command.pages.map(page => ({ ...page, expectedPolicyEpoch: 1 })) }
+    await publishDocument(publication, actor, command, next.bytes)
+    time.advance(900_001)
+    const ref = { artifactId: initial.session.artifactId, revisionId: initial.session.revisionId }
+    const resource = { ...ref, kind: "resource" as const, path }
+    await expect(collectRevision(collection(deps), ref)).rejects.toThrow(/discard_revision_pinned/)
+    expect(await storedBytes(store, resource)).toEqual(first.bytes)
+    await revokeShare(deps, actor, { pageId: first.pageId, artifactId: ref.artifactId, expectedPolicyEpoch: 1, grantId: grant.grantId })
+    expect(await collectRevision(collection(deps), ref)).toBe("purged")
+    expect(await storedBytes(store, resource)).toBeNull()
+  })
+
+  it("does not let a page-scoped publisher widen a two-page publication", async () => {
+    const { publication, deps, read } = await setup()
+    const first = await documentCommand("multi-base", path, "first")
+    const secondPath = "/a/other/index.html"
+    const second = await content("second")
+    const secondPage = newId("pg")
+    const command: BeginCommand = { ...first.command, files: [...first.command.files, { path: secondPath, kind: "document", sha256: second.sha256, size: second.size, contentType: "text/html", source: "client" }], pages: [...first.command.pages, { pageId: secondPage, disposition: "new", documentPath: secondPath, metadata: {}, expectedPolicyEpoch: null }] }
+    const session = await publication.begin(actor, command)
+    await publication.upload(actor, session.sessionId, path, body(first.bytes))
+    await publication.upload(actor, session.sessionId, secondPath, body(second.bytes))
+    await publication.seal(actor, session.sessionId)
+    const initial = await publication.commit(actor, session.sessionId)
+    const person = await authenticatedActor("scoped-publisher")
+    await assignRole(deps, actor, { targetPrincipalId: person.principalId, expectedTargetAuthorityEpoch: 0, role: "publisher", scope: { kind: "page", pageId: first.pageId } })
+    const scoped = await authenticatedActor("scoped-publisher")
+    const next: BeginCommand = { ...command, idempotencyKey: "multi-scoped", artifactId: initial.artifactId, expectedRevisionId: initial.revisionId, expectedContentVersion: initial.contentVersion, pages: command.pages.map(page => ({ ...page, disposition: "keep", expectedPolicyEpoch: 0 })) }
+    await expect((async () => {
+      const staged = await publication.begin(scoped, next)
+      await publication.upload(scoped, staged.sessionId, path, body(first.bytes))
+      await publication.upload(scoped, staged.sessionId, secondPath, body(second.bytes))
+      await publication.seal(scoped, staged.sessionId)
+      await publication.commit(scoped, staged.sessionId)
+    })()).rejects.toMatchObject({ code: "forbidden" })
+    expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: initial.revisionId } })
+    expect(await readPagePolicy(deps, actor, secondPage)).toMatchObject({ visibility: "private" })
+  })
+  it("rejects a manifest whose declared page has no document without changing the old read", async () => {
+    const { publication, read, store } = await setup()
+    const first = await documentCommand("manifest-base", path, "good")
+    const initial = await publishDocument(publication, actor, first.command, first.bytes)
+    const next = await update(initial.receipt, first.pageId, "false-manifest", "bad")
+    await expect((async () => {
+      const staged = await publication.begin(actor, { ...next.command, files: [] })
+      await publication.seal(actor, staged.sessionId)
+      await publication.commit(actor, staged.sessionId)
+    })()).rejects.toMatchObject({ code: "invalid_state" })
+    expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: initial.receipt.revisionId } })
+    expect(await storedBytes(store, { artifactId: initial.session.artifactId, revisionId: initial.session.revisionId, kind: "resource", path })).toEqual(first.bytes)
+  })
+
+  it("rejects a competing artefact claiming an occupied route without disturbing its owner", async () => {
+    const { publication, read, store } = await setup()
+    const first = await documentCommand("route-owner", path, "owner bytes")
+    const initial = await publishDocument(publication, actor, first.command, first.bytes)
+    const competing = await documentCommand("route-contender", path, "contender bytes")
+    await expect((async () => {
+      const staged = await publication.begin(actor, competing.command)
+      await publication.upload(actor, staged.sessionId, path, body(competing.bytes))
+      await publication.seal(actor, staged.sessionId)
+      await publication.commit(actor, staged.sessionId)
+    })()).rejects.toMatchObject({ code: "conflict" })
+    expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: initial.receipt.revisionId, artifactId: initial.receipt.artifactId } })
+    expect(await storedBytes(store, { artifactId: initial.session.artifactId, revisionId: initial.session.revisionId, kind: "resource", path })).toEqual(first.bytes)
+  })
+  it.each(["pin", "restore"] as const)("protects a %s that wins after collection's revision lookup but before its claim", async winner => {
+    const { publication, deps, store, time, read } = await setup()
+    const first = await documentCommand(`preclaim-${winner}`, path, "retained old bytes")
+    const initial = await publishDocument(publication, actor, first.command, first.bytes)
+    const next = await update(initial.receipt, first.pageId, `preclaim-next-${winner}`, "current bytes")
+    const active = await publishDocument(publication, actor, next.command, next.bytes)
+    expect(active.receipt.contentVersion).toBe(initial.receipt.contentVersion + 1)
+    time.advance(900_001)
+    const ref = { artifactId: initial.session.artifactId, revisionId: initial.session.revisionId }
+    const resource = { ...ref, kind: "resource" as const, path }
+    let shareKey: string | null = null
+    const observed = gateAfterRevisionLookup(env.DB)
+    const pending = collectRevision({ ...collection(deps), db: observed.db }, ref)
+      .then(value => ({ ok: true as const, value }), error => ({ ok: false as const, error }))
+    let outcome!: Awaited<typeof pending>
+    let failure: unknown
+    try {
+      await Promise.race([observed.gate.reached, pending.then(() => { throw new Error("collector completed before the revision-lookup gate") })])
+      expect(observed.lookup()).toEqual({ artifact_id: ref.artifactId })
+      expect(await env.DB.prepare("SELECT discarded_at FROM revision_discards WHERE revision_id = ?").bind(ref.revisionId).first()).toBeNull()
+      expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: active.session.revisionId } })
+      expect(await readPagePolicy(deps, actor, first.pageId)).toMatchObject({ contentVersion: active.receipt.contentVersion })
+      expect(await storedBytes(store, resource)).toEqual(first.bytes)
+      if (winner === "pin") {
+        const grant = await share(deps, actor, { artifactId: ref.artifactId, pageId: first.pageId, expectedPolicyEpoch: 0, mode: "pinned", revisionId: ref.revisionId })
+        expect(grant.key).toEqual(expect.any(String))
+        shareKey = grant.key
+        expect(await decideRead(env.DB, read, { kind: "share", route, candidates: [path] }, { ...anonymous, shareKey: grant.key }, null)).toMatchObject({ kind: "allow", plan: { revisionId: ref.revisionId } })
+      } else {
+        const restored = await publication.restore(actor, { idempotencyKey: "preclaim-restore-operation", ...ref, expectedContentVersion: active.receipt.contentVersion })
+        expect(restored).toMatchObject({ revisionId: ref.revisionId, contentVersion: active.receipt.contentVersion + 1 })
+        expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: ref.revisionId } })
+      }
+    } catch (error) {
+      failure = error
+    } finally {
+      observed.gate.resume()
+      outcome = await pending
+    }
+    if (failure !== undefined) throw new AggregateError([failure, outcome.ok ? new Error(`collector resolved: ${outcome.value}`) : outcome.error], "Pre-claim race failed; collector outcome attached")
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error(`Expected collector refusal, got ${outcome.value}`)
+    expect(outcome.error).toBeInstanceOf(Error)
+    expect(outcome.error.message).toMatch(winner === "pin" ? /discard_revision_pinned/ : /discard_revision_active/)
+    expect(await env.DB.prepare("SELECT discarded_at FROM revision_discards WHERE revision_id = ?").bind(ref.revisionId).first()).toBeNull()
+    expect(await storedBytes(store, resource)).toEqual(first.bytes)
+    expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: winner === "pin" ? active.session.revisionId : ref.revisionId } })
+    if (winner === "pin") {
+      expect(await decideRead(env.DB, read, { kind: "share", route, candidates: [path] }, { ...anonymous, shareKey }, null)).toMatchObject({ kind: "allow", plan: { revisionId: ref.revisionId } })
+    }
+  })
+
+  it.each(["pin", "restore"] as const)("refuses a late %s after the discard claim and before native deletion", async loser => {
+    const { publication, deps, store, time, read } = await setup()
+    const first = await documentCommand(`postclaim-${loser}`, path, "retained old bytes")
+    const initial = await publishDocument(publication, actor, first.command, first.bytes)
+    const next = await update(initial.receipt, first.pageId, `postclaim-next-${loser}`, "current bytes")
+    const active = await publishDocument(publication, actor, next.command, next.bytes)
+    time.advance(900_001)
+    const ref = { artifactId: initial.session.artifactId, revisionId: initial.session.revisionId }
+    const resource = { ...ref, kind: "resource" as const, path }
+    const observed = gateBeforeNativeDelete(store)
+    const pending = collectRevision({ ...collection(deps), store: observed.store }, ref)
+      .then(value => ({ ok: true as const, value }), error => ({ ok: false as const, error }))
+    let outcome!: Awaited<typeof pending>
+    let failure: unknown
+    try {
+      await Promise.race([observed.gate.reached, pending.then(() => { throw new Error("collector completed before the deletion gate") })])
+      expect(await env.DB.prepare("SELECT discarded_at, purged_at FROM revision_discards WHERE revision_id = ?").bind(ref.revisionId).first()).toEqual({ discarded_at: time.now(), purged_at: null })
+      expect(await storedBytes(store, resource)).toEqual(first.bytes)
+      expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: active.session.revisionId } })
+      const attempt = loser === "pin"
+        ? share(deps, actor, { artifactId: ref.artifactId, pageId: first.pageId, expectedPolicyEpoch: 0, mode: "pinned", revisionId: ref.revisionId })
+        : publication.restore(actor, { idempotencyKey: "postclaim-restore", ...ref, expectedContentVersion: active.receipt.contentVersion })
+      await expect(attempt).rejects.toBeInstanceOf(PolicyError)
+      await expect(attempt).rejects.toMatchObject({ code: loser === "pin" ? "invalid_state" : "not_found" })
+      expect(await readPagePolicy(deps, actor, first.pageId)).toMatchObject({ visibility: "private", grant: null, contentVersion: active.receipt.contentVersion })
+      expect(await storedBytes(store, resource)).toEqual(first.bytes)
+    } catch (error) {
+      failure = error
+    } finally {
+      observed.gate.resume()
+      outcome = await pending
+    }
+    if (failure !== undefined) throw new AggregateError([failure, outcome.ok ? new Error(`collector resolved: ${outcome.value}`) : outcome.error], "Post-claim race failed; collector outcome attached")
+    expect(outcome).toEqual({ ok: true, value: "purged" })
+    expect(await storedBytes(store, resource)).toBeNull()
+    expect(await visible(read)).toMatchObject({ kind: "allow", plan: { revisionId: active.session.revisionId } })
+    expect(await storedBytes(store, { artifactId: active.session.artifactId, revisionId: active.session.revisionId, kind: "resource", path })).toEqual(next.bytes)
+    expect(await readPagePolicy(deps, actor, first.pageId)).toMatchObject({ visibility: "private", grant: null, contentVersion: active.receipt.contentVersion })
+  })
+})

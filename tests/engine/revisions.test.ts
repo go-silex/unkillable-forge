@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest"
 import { revokeShare, rotateShare, setVisibility, share } from "../../domains/catalogue/commands"
 import { decideRead, type ReadCredentials, type ReadSubject } from "../../domains/catalogue/read"
 import { resolveRead } from "../../domains/catalogue/resolve"
-import { actor, artifactId, authenticatedReader, bootstrap, configs, digest, jwks, pageFixture, pageId, revisionId } from "./fixtures/catalogue"
+import { actor, artifactId, authenticatedReader, bootstrap, configs, digest, jwks, pageFixture, pageId, revisionId, syntheticCommitHistory } from "./fixtures/catalogue"
 
 const nextRevision = `rv_${"b".repeat(26)}`
 const path = "/a/sample/index.html"
@@ -11,7 +11,7 @@ const none: ReadCredentials = { team: null, shareKey: null, shareCookie: null, p
 const shareSubject: ReadSubject = { kind: "share", route: { kind: "subtree", slug: "sample" }, candidates: [path] }
 const page: ReadSubject = { kind: "page", route: { kind: "subtree", slug: "sample" }, candidates: [path], fragmentPath: null }
 const pinned: ReadSubject = { kind: "pinned", pageId, revisionId, path }
-beforeEach(async () => { await bootstrap(); await pageFixture() })
+beforeEach(async () => { await bootstrap(); await pageFixture(); await syntheticCommitHistory({ artifact: artifactId, revision: revisionId, at: 1 }) })
 
 async function publishNext(): Promise<void> {
   await env.DB.batch([

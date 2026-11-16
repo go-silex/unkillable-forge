@@ -1,4 +1,4 @@
-export type IdPrefix = "pg" | "ar" | "rv" | "gr" | "pr" | "rg" | "ev"
+export type IdPrefix = "pg" | "ar" | "rv" | "gr" | "pr" | "rg" | "ev" | "ps" | "pe"
 
 /** Encode 128 random bits as unpadded lowercase RFC 4648 base32. */
 export function newId(prefix: IdPrefix): string {

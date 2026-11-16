@@ -13,7 +13,7 @@ export interface AccessVerifier {
   readonly surface: "read" | "manage"
 }
 
-export type JwksSource = (teamDomain: string) => Promise<readonly JsonWebKey[]>
+export type JwksSource = (teamDomain: string, kid?: string) => Promise<readonly JsonWebKey[]>
 
 const verifiedIdentities = new WeakSet<object>()
 
@@ -23,31 +23,60 @@ export function isVerifiedIdentity(value: unknown): value is VerifiedIdentity {
 
 const TEAM_DOMAIN = /^[a-z0-9-]+\.cloudflareaccess\.com$/
 const JWKS_TTL_MS = 60 * 60 * 1000
+// Per source/isolate and team, not a fleet-wide limit. A random kid can consume
+// the refresh opportunity and delay a genuine rotation until this interval ends.
+const JWKS_RETRY_MS = 30 * 1000
 const CLOCK_SKEW_SECONDS = 30
 
 type AccessKey = JsonWebKey & { readonly kid?: string }
 
 /** The only network key source is the configured Access team's certificate endpoint. */
-export function accessJwksSource(fetcher: typeof fetch = fetch): JwksSource {
-  const cache = new Map<string, { readonly at: number; readonly keys: readonly JsonWebKey[] }>()
-  return async (teamDomain) => {
+export function accessJwksSource(fetcher: typeof fetch = fetch, nowMs: () => number = Date.now): JwksSource {
+  const cache = new Map<string, {
+    at: number
+    keys: readonly JsonWebKey[]
+    retryAt: number
+    pending?: Promise<readonly JsonWebKey[] | null>
+  }>()
+  return async (teamDomain, kid) => {
     if (!TEAM_DOMAIN.test(teamDomain)) return []
-    const now = Date.now()
-    const cached = cache.get(teamDomain)
-    if (cached && now >= cached.at && now - cached.at < JWKS_TTL_MS) return cached.keys
-    try {
-      const response = await fetcher(`https://${teamDomain}/cdn-cgi/access/certs`, { redirect: "error" })
-      if (!response.ok) return []
-      const body: unknown = await response.json()
-      if (!body || typeof body !== "object" || !("keys" in body) || !Array.isArray(body.keys)) return []
-      const keys: unknown[] = body.keys
-      if (!keys.every((key) => key !== null && typeof key === "object" && !Array.isArray(key))) return []
-      const jwks = keys as JsonWebKey[]
-      cache.set(teamDomain, { at: now, keys: jwks })
-      return jwks
-    } catch {
-      return []
+    let entry = cache.get(teamDomain)
+    if (!entry) {
+      entry = { at: 0, keys: [], retryAt: 0 }
+      cache.set(teamDomain, entry)
     }
+    const now = nowMs()
+    const valid = entry.at > 0 && now >= entry.at && now - entry.at < JWKS_TTL_MS
+    const missingKid = valid && kid !== undefined && !entry.keys.some(key => (key as AccessKey).kid === kid)
+    if (valid && !missingKid) return entry.keys
+    if (!entry.pending && now >= entry.retryAt) {
+      const current = entry
+      if (missingKid) current.retryAt = now + JWKS_RETRY_MS
+      current.pending = (async () => {
+        try {
+          // workerd does not support redirect: "error"; never follow a key-source redirect.
+          const response = await fetcher(`https://${teamDomain}/cdn-cgi/access/certs`, { redirect: "manual" })
+          if (!response.ok) return null
+          const body: unknown = await response.json()
+          if (!body || typeof body !== "object" || !("keys" in body) || !Array.isArray(body.keys)) return null
+          const keys: unknown[] = body.keys
+          if (!keys.every(key => key !== null && typeof key === "object" && !Array.isArray(key))) return null
+          current.at = nowMs()
+          current.keys = keys as JsonWebKey[]
+          return current.keys
+        } catch {
+          return null
+        }
+      })().then(keys => {
+        if (!keys) current.retryAt = Math.max(current.retryAt, now + JWKS_RETRY_MS)
+        current.pending = undefined
+        return keys
+      })
+    }
+    const fetched = await entry.pending
+    if (fetched) return fetched
+    const after = nowMs()
+    return entry.at > 0 && after >= entry.at && after - entry.at < JWKS_TTL_MS ? entry.keys : []
   }
 }
 
@@ -106,7 +135,7 @@ export async function authenticate(
     const subject = typeof payload.sub === "string" && payload.sub.length > 0 ? payload.sub : null
     if (payload.sub !== undefined && typeof payload.sub !== "string") return null
     if (verifier.surface === "manage" && !subject) return null
-    const keys = await jwks(verifier.teamDomain)
+    const keys = await jwks(verifier.teamDomain, header.kid as string | undefined)
     if (!Array.isArray(keys)) return null
     const data = new TextEncoder().encode(`${parts[0]}.${parts[1]}`)
     for (const jwk of keys as readonly AccessKey[]) {

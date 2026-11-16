@@ -44,6 +44,12 @@ _Avoid_: latest, live deploy
 Making a sealed revision the active one.
 _Avoid_: deploy, upload
 
+**Publication session**:
+A bounded, actor-bound staging operation that records the intended files, pages and ownership before a revision is sealed and committed. It does not itself make content active.
+
+**Discard claim**:
+Publication's permanent record that a revision is eligible for collection. A claimed revision cannot become active or acquire a new pinned grant. Byte cleanup is repeatable: a completed sweep does not prove that a late upload cannot leave more bytes.
+
 **Page**:
 A navigable document with its own address, visibility and grants. The unit of access.
 _Avoid_: file, HTML, slug
@@ -99,6 +105,7 @@ The instance's fixed public files: landing, login and icons.
 
 **Pinned read**:
 Reading the resources of one named revision of a page. It needs a read right that holds now; a pinned-read token only makes that revision reachable for a short time.
+A new pinned grant can name only a revision previously activated by Publication.
 
 ### Access
 
