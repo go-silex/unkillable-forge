@@ -41,6 +41,8 @@ Use absolute paths for Node, the bundle, profile and private state; select one n
 
 The state directory must already exist and be owned by the operator with mode `0700`. The configured root may be an operator-selected alias; it is resolved once and its target is bound using no-follow directory handles. Stable private lock files coordinate cooperating local processes and are retained after use; a process exit releases its kernel locks. These locks do not provide cross-machine or network-filesystem guarantees.
 
+On macOS, private state directories and their credential, operation, spool, temporary and lock files must have no extended ACL, including inherited and deny-only entries. Filesystems without proven extended-security support are rejected. The publisher never automatically strips ACLs from operator files. This requirement does not apply to source-root input files.
+
 ## Publishing
 
 Discover `forge_publish` in the configured native client and follow its advertised schema. Select only configured roots. Updates require the caller's explicit working baseline or protected checkpoint; a newer server revision is a conflict, not an automatic rebase. Unselected live resources and pages are preserved; removals are explicit. Local source bytes are streamed by the adapter rather than supplied in MCP tool arguments. A disappeared source is an error, not a deletion.

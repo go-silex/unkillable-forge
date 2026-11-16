@@ -89,6 +89,51 @@ describe('portable descriptor-relative filesystem', () => {
     } finally { await root.close(); await privateRoot.close(); await rm(dir, { recursive: true, force: true }) }
   })
 
+  it.skipIf(process.platform !== 'darwin')('refuses Darwin private state with an exploitable inherited foreign-user ACL', async () => {
+    const dir = await mkdtemp('/private/tmp/forge-acl-')
+    const clean = await mkdtemp('/private/tmp/forge-acl-file-')
+    const root = await bindPrivateRoot(dir, false)
+    const fileRoot = await bindPrivateRoot(clean, false)
+    try {
+      const ace = 'nobody allow read,execute,file_inherit,directory_inherit'
+      const configured = await run('/bin/chmod', ['+a', ace, dir])
+      expect(configured, configured.stderr).toMatchObject({ code: 0 })
+      const probe = join(dir, 'probe')
+      await writeFile(probe, 'synthetic-grant-value', { mode: 0o600 })
+      await chmod(probe, 0o600)
+      expect((await stat(dir)).mode & 0o777).toBe(0o700)
+      expect((await stat(probe)).mode & 0o777).toBe(0o600)
+      const foreign = await run('/usr/bin/sudo', ['-n', '-u', 'nobody', '/bin/cat', probe])
+      expect(foreign, foreign.stderr).toMatchObject({ code: 0, stdout: 'synthetic-grant-value' })
+
+      await expect(bindPrivateRoot(dir, false)).rejects.toThrow()
+      await expect(root.open('probe', 'read')).rejects.toThrow()
+      await expect(root.child('inherited', true)).rejects.toThrow()
+      await expect(root.open('new-grant', 'exclusive')).rejects.toThrow()
+      await expect(root.replace('grant', Buffer.from('synthetic-not-written'))).rejects.toThrow()
+
+      const file = join(clean, 'record')
+      await writeFile(file, 'synthetic-only', { mode: 0o600 })
+      const fileAce = await run('/bin/chmod', ['+a', 'nobody allow read', file])
+      expect(fileAce, fileAce.stderr).toMatchObject({ code: 0 })
+      expect((await stat(file)).mode & 0o777).toBe(0o600)
+      await expect(fileRoot.open('record', 'read')).rejects.toThrow()
+
+      const deniedFile = join(clean, 'deny-only')
+      await writeFile(deniedFile, 'synthetic-only', { mode: 0o600 })
+      const fileDeny = await run('/bin/chmod', ['+a', 'nobody deny read', deniedFile])
+      expect(fileDeny, fileDeny.stderr).toMatchObject({ code: 0 })
+      await expect(fileRoot.open('deny-only', 'read')).rejects.toThrow()
+      const directoryDeny = await run('/bin/chmod', ['+a', 'nobody deny read', clean])
+      expect(directoryDeny, directoryDeny.stderr).toMatchObject({ code: 0 })
+      await expect(bindPrivateRoot(clean, false)).rejects.toThrow()
+    } finally {
+      try { await root.close(); await fileRoot.close() } finally {
+        await rm(dir, { recursive: true, force: true }); await rm(clean, { recursive: true, force: true })
+      }
+    }
+  })
+
   it('rejects use after close while an already returned file handle remains independently usable', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'forge-capability-life-'))
     await writeFile(join(dir, 'record'), 'held', { mode: 0o600 })
