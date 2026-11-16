@@ -1,6 +1,7 @@
 import type { ManageDeps } from '../catalogue/commands'
 import type { ManageActor } from '../catalogue/principals'
 import type { RevisionStore } from '../store/revision-store'
+import type { ArtifactState, ArtifactTarget, ManifestInput, ManifestState, RevisionInventory, StatePaging } from './state'
 
 export interface PublicationOptions {
   readonly sessionTtlMs: number
@@ -82,4 +83,7 @@ export interface Publication {
   abort(actor: ManageActor, sessionId: string): Promise<void>
   restore(actor: ManageActor, command: RestoreCommand): Promise<PublicationReceipt>
   unpublish(actor: ManageActor, command: PromotionCommand): Promise<PublicationReceipt>
+  readArtifactState(actor: ManageActor, input: ArtifactTarget): Promise<ArtifactState>
+  readManifest(actor: ManageActor, input: ManifestInput): Promise<ManifestState>
+  readRevisions(actor: ManageActor, input: ArtifactTarget & StatePaging): Promise<RevisionInventory>
 }

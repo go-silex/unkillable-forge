@@ -4,6 +4,7 @@ import type { PublicationReceipt, PublicationStatus, PublicationUploadStatus } f
 import { runtimeFor } from './manage-config'
 import { cancelBody, checkFraming, InputError, readCommand, uploadStream } from './publication-input'
 import { admitManageRequest, publicError } from './manage-edge'
+import { handleMcp } from '../mcp/handler'
 
 const headers = {
   'Cache-Control': 'no-store',
@@ -35,6 +36,7 @@ async function fetchManage(request: Request, env: Record<string, unknown>): Prom
     if (!runtime) return errorResponse(request, 503, 'configuration_error')
     const { deps, service, transport } = runtime
     const url = new URL(request.url)
+    if (url.pathname === '/mcp') return await handleMcp(request, runtime)
     const admission = admitManageRequest(request, url, deps.config.manageHost)
     if (admission) return errorResponse(request, admission.status, admission.code)
     const isCommand = url.pathname === '/api/publication'
