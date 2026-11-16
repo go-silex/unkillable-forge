@@ -2,6 +2,9 @@ import type { ManageActor } from '../catalogue/principals'
 import type { BeginCommand, Publication, PublicationDeps, PromotionCommand, RestoreCommand } from './types'
 import * as staging from './staging'
 import * as promotion from './promotion'
+import * as state from './state'
+import type { ArtifactTarget, ManifestInput, StatePaging } from './state'
+export * from './state'
 export * from './types'
 
 export class PublicationService implements Publication {
@@ -24,4 +27,7 @@ export class PublicationService implements Publication {
   abort(actor: ManageActor, sessionId: string) { return staging.abort(this.deps, actor, sessionId) }
   restore(actor: ManageActor, command: RestoreCommand) { return promotion.restore(this.deps, actor, command) }
   unpublish(actor: ManageActor, command: PromotionCommand) { return promotion.unpublish(this.deps, actor, command) }
+  readArtifactState(actor: ManageActor, input: ArtifactTarget) { return state.readArtifactState(this.deps, actor, input) }
+  readManifest(actor: ManageActor, input: ManifestInput) { return state.readManifest(this.deps, actor, input) }
+  readRevisions(actor: ManageActor, input: ArtifactTarget & StatePaging) { return state.readRevisions(this.deps, actor, input) }
 }
