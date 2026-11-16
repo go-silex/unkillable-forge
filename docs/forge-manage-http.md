@@ -57,6 +57,7 @@ Optional management Worker settings:
 | `FORGE_BROWSER_ACCOUNT_ID` | Cloudflare account ID for the fixed Browser Run screenshot API |
 | `FORGE_BROWSER_API_TOKEN` | Secret with Browser Rendering Write permission, used only in the control request authorization header |
 | `SHLINK_API_URL`, `SHLINK_API_KEY`, `SHLINK_DOMAIN` | Optional HTTPS Shlink collection URL, secret API key and short domain for newly minted share enrichment |
+| `FORGE_SHARE_SEAL_KEY` | Optional share-sealing key required for a newly minted share to be revealable and eligible for automatic shortlink enrichment |
 
 Missing or invalid Browser Run configuration leaves publication usable and
 explicit OG execution unavailable. The adapter supplies the admitted revision
@@ -66,10 +67,20 @@ HTML authors are trusted, and this is not a hostile-content or all-protocol
 sandbox. Rendering, input and output are bounded; failures do not reverse a
 publication or overwrite an existing original image.
 
+Automatic shortlink enrichment requires valid Shlink configuration, a freshly
+minted revealable share and a current eligible revision. Without a sealing key,
+the primary share still works, but the adapter creates no shortlink intent:
+there is no pending shortlink job to retry, and adding a sealing key later
+cannot reconstruct the original key. Provider errors do not undo the share.
+
 Shlink creation is create-only. Reconciliation checks the exact provider,
 domain, code and destination; publishing, retry and grant rotation do not
 retarget existing or imported aliases. Actual destination URLs can contain
 share keys and are protected metadata, not ordinary status output.
+
+Native transport regressions construct Worker `Request` objects with simulated
+providers; they do not prove a real Browser Run or Shlink call. Visual screenshot
+fidelity and actual provider configuration remain unverified.
 
 This request-driven path adds no autonomous recovery service or advanced
 backup/restore guarantee. A timed-out derived write may leave unselected bytes;

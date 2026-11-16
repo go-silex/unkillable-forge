@@ -143,6 +143,7 @@ export function mapPolicyError(error: unknown): PolicyError {
   const message = messages.join("\n")
   const named = message.match(/CHECK constraint failed: guard_(instance_mismatch|unauthenticated|forbidden|not_found|conflict|invalid_state|last_admin)\b/)
   if (named) return new PolicyError(named[1] as PolicyErrorCode)
+  if (/CHECK constraint failed: enrichment_assertion\b/.test(message)) return new PolicyError("conflict")
   const publication = message.match(/CHECK constraint failed: ((?:publication_(?:not_found|closed|expired|incomplete|not_sealed|never_committed|conflict)|discard_(?:not_found|revision_active|revision_pinned|revision_staged|revision_retained)))\b/)
   if (publication) {
     const detail = publication[1]

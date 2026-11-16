@@ -57,14 +57,26 @@ function pinCookie(request: Request): string | null {
   return null
 }
 
+// User-Agent selects a presentation, never an authorization path.
+const unfurlAgent = /(?:Slackbot|Discordbot|Twitterbot|facebookexternalhit|Facebot|LinkedInBot|TelegramBot|WhatsApp|SkypeUriPreview|Google-InspectionTool)/i
+
 export async function handleRead(request: Request, deps: ReadRuntime): Promise<Response> {
+  const response = await handleReadResponse(request, deps)
+  if (new URL(request.url).pathname.startsWith('/s/')) {
+    response.headers.append('vary', 'User-Agent')
+    response.headers.append('vary', 'Sec-Fetch-Dest')
+  }
+  return response
+}
+
+async function handleReadResponse(request: Request, deps: ReadRuntime): Promise<Response> {
   try {
     const card = await derivedCard(request, deps)
     if (card) return card
     const parsed = parseRequest(request, deps.config).parsed
     const pin: PinNamespace | null = parsed.kind === 'pinned' ? { pageId: parsed.pageId, revisionId: parsed.revisionId } : null
     const outcome = await resolveRead(request, { ...deps, pinnedProof: pin ? pinCookie(request) : null })
-    if (parsed.kind === 'share' && !parsed.browser && request.headers.get('sec-fetch-dest') !== 'document' && (outcome.kind === 'share_unfurl' || (outcome.kind === 'serve' && (outcome.plan.resource.kind === 'document' || outcome.plan.resource.kind === 'subdocument')))) {
+    if (parsed.kind === 'share' && !parsed.browser && request.headers.get('sec-fetch-dest') !== 'document' && unfurlAgent.test(request.headers.get('user-agent') ?? '') && (outcome.kind === 'share_unfurl' || (outcome.kind === 'serve' && (outcome.plan.resource.kind === 'document' || outcome.plan.resource.kind === 'subdocument')))) {
       const preview = await resolveSharedPreview(deps.db, deps.config, { route: parsed.route, candidates: [outcome.plan.resource.path], key: parsed.key, nowSeconds: deps.nowSeconds() })
       if (!preview || preview.pageId !== outcome.plan.authority.pageId || preview.revisionId !== outcome.plan.revisionId) return textResponse(404, 'Not found', request.method)
       return unfurl(request, preview, parsed.key)

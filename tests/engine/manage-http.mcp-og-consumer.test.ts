@@ -42,6 +42,23 @@ async function retry(p: Published, og?: Runtime['og'], assertion = p.jwt) {
   return { isError: !!envelope.result.isError, text, value: JSON.parse(text), store: base.deps.store }
 }
 
+it('renders a published page through a native workerd Request', async () => {
+  const p = await published()
+  const requests: Request[] = []
+  const fetcher: typeof fetch = async (url, init) => {
+    const outbound = new Request(url, init)
+    requests.push(outbound)
+    return new Response(jpeg, { headers: { 'content-type': 'image/jpeg' } })
+  }
+  const result = await retry(p, { accountId, apiToken: credential, fetch: fetcher })
+  expect(result.isError).toBe(false)
+  expect(result.value.result.og).toEqual({ state: 'ready', source: 'generated' })
+  expect(requests).toHaveLength(1)
+  expect(requests[0].url).toBe(`https://api.cloudflare.com/client/v4/accounts/${accountId}/browser-rendering/screenshot?cacheTTL=0`)
+  expect(requests[0].method).toBe('POST')
+  expect(requests[0].redirect).toBe('manual')
+})
+
 it('prepares the pending graph, reads the committed document and selects immutable derived bytes', async () => {
   const p = await published()
   const fetcher = vi.fn(async () => new Response(jpeg))
@@ -52,7 +69,7 @@ it('prepares the pending graph, reads the committed document and selects immutab
   expect(fetcher).toHaveBeenCalledTimes(1)
   const [url, init] = fetcher.mock.calls[0] as unknown as [string, RequestInit]
   expect(url).toBe(`https://api.cloudflare.com/client/v4/accounts/${accountId}/browser-rendering/screenshot?cacheTTL=0`)
-  expect(init.redirect).toBe('error')
+  expect(init.redirect).toBe('manual')
   const payload = JSON.parse(init.body as string)
   expect(payload.html).toContain('Published from R2')
   expect(payload.html.indexOf('Content-Security-Policy')).toBeLessThan(payload.html.indexOf('<script>'))

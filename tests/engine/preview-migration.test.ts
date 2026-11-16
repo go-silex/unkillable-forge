@@ -57,15 +57,17 @@ describe("preview namespace migration on native D1", () => {
 
   it("preserves existing events and transactional policy guards after migration while reserving the namespace", async () => {
     const next = await preMigration()
+    await env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?,'/_derived.html','document','tree-document',?,1,'text/html')").bind(revisionId, digest).run()
     const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
     await executeGuarded(deps, actor, [originalGuard], [])
     const events = (await env.DB.prepare("SELECT * FROM mutation_events ORDER BY event_id").all()).results
     await applyD1Migrations(env.DB, next)
     expect((await env.DB.prepare("SELECT * FROM mutation_events ORDER BY event_id").all()).results).toEqual(events)
     await guardedBehavior()
-    for (const path of ["/_derived", "/_derived/new.png"]) {
+    for (const path of ["/_derived/new.png"]) {
       await expect(env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?,?,'asset','new',?,1,'image/png')").bind(revisionId, path, digest).run()).rejects.toThrow()
     }
     await env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?,'/_derived-other.png','asset','allowed',?,1,'image/png')").bind(revisionId, digest).run()
+    await env.DB.prepare("INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type) VALUES (?,'/_derived','asset','allowed-root',?,1,'image/png')").bind(revisionId, digest).run()
   })
 })

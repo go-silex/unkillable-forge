@@ -35,7 +35,15 @@ export async function resolvePagePreview(db: D1Database, config: ReadInstanceCon
   const { pageId, grantId, policyEpoch, basis } = plan.authority
   if (!pageId || policyEpoch === null || !['team', 'public', 'share_key', 'share_cookie'].includes(basis)) return null
   if ((basis === 'share_key' || basis === 'share_cookie') && !grantId) return null
-  const row = await db.prepare(`SELECT rp.metadata_json, s.original_path, rr.sha256 AS original_sha256,
+  const base = input.route.kind === 'subtree'
+    ? `/a/${input.route.slug}/og`
+    : `/${input.route.pageRef.slice(0, -5)}.og`
+  const indexBase = input.route.kind === 'tree_page' && (input.route.pageRef === 'index.html' || input.route.pageRef.endsWith('/index.html'))
+    ? `/${input.route.pageRef.slice(0, -'index.html'.length)}og`
+    : null
+  const imagePaths = [indexBase, base].filter((value): value is string => value !== null)
+    .flatMap(value => ['jpg', 'jpeg', 'png'].map(extension => `${value}.${extension}`))
+  const row = await db.prepare(`SELECT rp.metadata_json, rr.path AS original_path, rr.sha256 AS original_sha256,
       rr.size AS original_size, rr.content_type AS original_content_type, rr.object_key AS original_object_key,
       rr.object_version AS original_object_version, s.recipe_sha256, s.input_sha256, s.content_sha256, s.extension,
       o.size AS derived_size, o.object_version AS derived_version
@@ -46,18 +54,21 @@ export async function resolvePagePreview(db: D1Database, config: ReadInstanceCon
     LEFT JOIN share_grants g ON g.grant_id = ?6 AND g.page_id = p.page_id AND g.revoked_at IS NULL
     JOIN revision_pages rp ON rp.page_id = p.page_id AND rp.revision_id = ?4
     LEFT JOIN preview_selections s ON s.page_id = rp.page_id AND s.revision_id = rp.revision_id
-    LEFT JOIN revision_resources rr ON rr.revision_id = s.revision_id AND rr.path = s.original_path
-      AND rr.content_type IN ('image/jpeg','image/png')
-      AND (rr.path = rp.document_path OR
-        (r.kind = 'subtree' AND substr(rr.path, 1, length('/a/' || r.route_key || '/')) = '/a/' || r.route_key || '/') OR
-        EXISTS (SELECT 1 FROM resource_owners ro WHERE ro.owner_revision_id = rp.revision_id AND ro.owner_page_id = rp.page_id AND ro.path = rr.path AND ro.provider_artifact_id = p.artifact_id))
+    LEFT JOIN revision_resources rr ON rr.revision_id = rp.revision_id AND rr.path = (
+      SELECT candidate.path FROM revision_resources candidate
+      WHERE candidate.revision_id = rp.revision_id
+        AND (candidate.path IN (SELECT value FROM json_each(?10)) OR candidate.path = s.original_path)
+        AND candidate.content_type IN ('image/jpeg','image/png')
+        AND ((r.kind = 'subtree' AND substr(candidate.path, 1, length('/a/' || r.route_key || '/')) = '/a/' || r.route_key || '/')
+          OR EXISTS (SELECT 1 FROM resource_owners ro WHERE ro.owner_revision_id = rp.revision_id AND ro.owner_page_id = rp.page_id AND ro.path = candidate.path AND ro.provider_artifact_id = p.artifact_id))
+      ORDER BY coalesce((SELECT CAST(key AS INTEGER) FROM json_each(?10) WHERE value = candidate.path), 1000) LIMIT 1)
     LEFT JOIN preview_objects o ON o.page_id = s.page_id AND o.revision_id = s.revision_id AND o.recipe_sha256 = s.recipe_sha256 AND o.input_sha256 = s.input_sha256 AND o.content_sha256 = s.content_sha256 AND o.extension = s.extension AND o.artifact_id = p.artifact_id
     WHERE i.singleton = 1 AND i.instance_id = ?1 AND NOT EXISTS (SELECT 1 FROM revision_discards d WHERE d.revision_id = rp.revision_id)
       AND ((?7 = 'team' AND a.active_revision_id = ?4)
         OR (?7 = 'public' AND p.visibility = 'public' AND a.active_revision_id = ?4)
         OR (?7 IN ('share_key','share_cookie') AND p.visibility = 'shared' AND g.grant_id IS NOT NULL
           AND ((g.mode = 'follow_active' AND a.active_revision_id = ?4) OR (?7 = 'share_key' AND g.mode = 'pinned' AND g.pinned_revision_id = ?4))))`)
-    .bind(config.instanceId, pageId, plan.artifactId, plan.revisionId, policyEpoch, grantId, basis, input.route.kind, input.route.kind === 'subtree' ? input.route.slug : input.route.pageRef).first<Record<string, unknown>>()
+    .bind(config.instanceId, pageId, plan.artifactId, plan.revisionId, policyEpoch, grantId, basis, input.route.kind, input.route.kind === 'subtree' ? input.route.slug : input.route.pageRef, JSON.stringify(imagePaths)).first<Record<string, unknown>>()
   if (!row) return null
   let metadata: unknown
   try { metadata = JSON.parse(String(row.metadata_json)) } catch { return null }

@@ -1,16 +1,16 @@
 -- Refuse conflicting existing originals and staged paths before introducing the reserved namespace.
 CREATE TABLE preview_namespace_assertion (verdict TEXT NOT NULL CONSTRAINT preview_namespace_collision CHECK (verdict = 'ok'));
 INSERT INTO preview_namespace_assertion (verdict)
-SELECT CASE WHEN EXISTS (SELECT 1 FROM revision_resources WHERE path = '/_derived' OR path GLOB '/_derived/*')
- OR EXISTS (SELECT 1 FROM publication_files WHERE path = '/_derived' OR path GLOB '/_derived/*')
- OR EXISTS (SELECT 1 FROM publication_edges WHERE path = '/_derived' OR path GLOB '/_derived/*')
- OR EXISTS (SELECT 1 FROM publication_pages WHERE document_path = '/_derived' OR document_path GLOB '/_derived/*')
+SELECT CASE WHEN EXISTS (SELECT 1 FROM revision_resources WHERE path GLOB '/_derived/*')
+ OR EXISTS (SELECT 1 FROM publication_files WHERE path GLOB '/_derived/*')
+ OR EXISTS (SELECT 1 FROM publication_edges WHERE path GLOB '/_derived/*')
+ OR EXISTS (SELECT 1 FROM publication_pages WHERE document_path GLOB '/_derived/*')
  THEN 'collision' ELSE 'ok' END;
 DROP TABLE preview_namespace_assertion;
-ALTER TABLE revision_resources ADD COLUMN preview_path_guard INTEGER NOT NULL DEFAULT 1 CONSTRAINT revision_resource_preview_path CHECK (path <> '/_derived' AND path NOT GLOB '/_derived/*');
-ALTER TABLE publication_files ADD COLUMN preview_path_guard INTEGER NOT NULL DEFAULT 1 CONSTRAINT publication_file_preview_path CHECK (path <> '/_derived' AND path NOT GLOB '/_derived/*');
-ALTER TABLE publication_edges ADD COLUMN preview_path_guard INTEGER NOT NULL DEFAULT 1 CONSTRAINT publication_edge_preview_path CHECK (path <> '/_derived' AND path NOT GLOB '/_derived/*');
-ALTER TABLE publication_pages ADD COLUMN preview_path_guard INTEGER NOT NULL DEFAULT 1 CONSTRAINT publication_page_preview_path CHECK (document_path IS NULL OR (document_path <> '/_derived' AND document_path NOT GLOB '/_derived/*'));
+ALTER TABLE revision_resources ADD COLUMN preview_path_guard INTEGER NOT NULL DEFAULT 1 CONSTRAINT revision_resource_preview_path CHECK (path NOT GLOB '/_derived/*');
+ALTER TABLE publication_files ADD COLUMN preview_path_guard INTEGER NOT NULL DEFAULT 1 CONSTRAINT publication_file_preview_path CHECK (path NOT GLOB '/_derived/*');
+ALTER TABLE publication_edges ADD COLUMN preview_path_guard INTEGER NOT NULL DEFAULT 1 CONSTRAINT publication_edge_preview_path CHECK (path NOT GLOB '/_derived/*');
+ALTER TABLE publication_pages ADD COLUMN preview_path_guard INTEGER NOT NULL DEFAULT 1 CONSTRAINT publication_page_preview_path CHECK (document_path IS NULL OR document_path NOT GLOB '/_derived/*');
 
 
 -- Rebuild the event table without changing the contract version or refusal domains.

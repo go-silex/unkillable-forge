@@ -48,7 +48,7 @@ function clock(deps: PublicationDeps): number {
   return n
 }
 function validPath(p: unknown): p is string {
-  return typeof p === 'string' && p.length >= 2 && p.length <= 1024 && p.startsWith('/') && !p.endsWith('/') && !p.includes('\\') && !p.includes('//') && !p.split('/').some(x => x === '.' || x === '..') && !/[\u0000-\u001f\u007f?#]/.test(p) && !/%(?:2f|2e|5c|25|0[0-9a-f]|1[0-9a-f]|7f)/i.test(p) && !/^\/(?:s|_derived|_revisions|api|registry)(?:\/|$)/.test(p) && p !== '/manifest.json' && p !== '/asset-owners.json'
+  return typeof p === 'string' && p.length >= 2 && p.length <= 1024 && p.startsWith('/') && !p.endsWith('/') && !p.includes('\\') && !p.includes('//') && !p.split('/').some(x => x === '.' || x === '..') && !/[\u0000-\u001f\u007f?#]/.test(p) && !/%(?:2f|2e|5c|25|0[0-9a-f]|1[0-9a-f]|7f)/i.test(p) && !/^\/(?:s|_revisions|api|registry)(?:\/|$)/.test(p) && !p.startsWith('/_derived/') && p !== '/manifest.json' && p !== '/asset-owners.json'
 }
 function validate(command: BeginCommand): void {
   if (!command || typeof command.idempotencyKey !== 'string' || !/^[!-~]{1,128}$/.test(command.idempotencyKey) || !(command.artifactId === null || id(command.artifactId, 'ar')) || !(command.expectedRevisionId === null || id(command.expectedRevisionId, 'rv')) || !Number.isSafeInteger(command.expectedContentVersion) || command.expectedContentVersion < 0 || !Array.isArray(command.files) || !Array.isArray(command.pages) || !Array.isArray(command.edges) || command.files.length > 10000 || command.pages.length > 1000 || command.edges.length > 20000 || command.pages.length === 0 || (command.artifactId === null && (command.expectedRevisionId !== null || command.expectedContentVersion !== 0))) fail()

@@ -1,5 +1,7 @@
 import { PolicyError } from '../catalogue/guard'
 import { assertManagedAuthority, managedAuthorityStatements } from '../catalogue/managed-state'
+import { assertPolicyPrincipal, policyPrincipalStatement } from '../catalogue/read'
+import { requireManageActor } from '../catalogue/principals'
 import type { ManageActor } from '../catalogue/principals'
 import type { ManageDeps } from '../catalogue/commands'
 import type { EnrichmentErrorCode } from './enrichments'
@@ -50,14 +52,16 @@ export async function readEnrichments(deps: ManageDeps, actor: ManageActor, inpu
 export async function readPageEnrichment(deps: ManageDeps, actor: ManageActor, input: { artifactId: string; revisionId: string; pageId: string }): Promise<EnrichmentPage['items'][number]> {
   if (!/^ar_[a-z2-7]{26}$/.test(input.artifactId) || !/^rv_[a-z2-7]{26}$/.test(input.revisionId) || !/^pg_[a-z2-7]{26}$/.test(input.pageId)) throw new PolicyError('invalid_state')
   try {
+    requireManageActor(actor, deps)
     const results = await deps.db.batch([
-      ...managedAuthorityStatements(deps, actor, input.artifactId, input.revisionId),
-      deps.db.prepare('SELECT rp.page_id FROM revision_pages rp JOIN revisions r ON r.revision_id=rp.revision_id WHERE r.artifact_id=? AND rp.revision_id=? AND rp.page_id=?').bind(input.artifactId,input.revisionId,input.pageId),
+      deps.db.prepare('SELECT instance_id FROM instance_meta WHERE singleton=1'),
+      policyPrincipalStatement(deps.db, actor, [input.pageId]),
+      deps.db.prepare('SELECT rp.page_id FROM revision_pages rp JOIN revisions r ON r.revision_id=rp.revision_id JOIN pages p ON p.page_id=rp.page_id AND p.artifact_id=r.artifact_id WHERE r.artifact_id=? AND rp.revision_id=? AND rp.page_id=?').bind(input.artifactId,input.revisionId,input.pageId),
       deps.db.prepare(`SELECT j.page_id,j.kind,j.state,j.attempt,j.result_source,j.error_code,j.retryable FROM enrichment_jobs j WHERE j.artifact_id=? AND j.revision_id=? AND j.page_id=? AND j.job_id=(SELECT k.job_id FROM enrichment_jobs k WHERE k.page_id=j.page_id AND k.revision_id=j.revision_id AND k.kind=j.kind ORDER BY k.created_at DESC,k.job_id DESC LIMIT 1)`).bind(input.artifactId,input.revisionId,input.pageId),
     ])
-    assertManagedAuthority(results, deps, actor)
-    if (!results[3].results[0]) throw new PolicyError('not_found')
-    const jobs = results[4].results as Job[]
+    assertPolicyPrincipal(results, deps, actor, 1)
+    if (!results[2].results[0]) throw new PolicyError('not_found')
+    const jobs = results[3].results as Job[]
     return { pageId: input.pageId, revisionId: input.revisionId, og: decode(jobs.find(j => j.kind === 'og')), shortlink: decode(jobs.find(j => j.kind === 'shortlink')) }
   } catch (error) { if (error instanceof PolicyError) throw error; throw new PolicyError('unavailable') }
 }

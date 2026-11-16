@@ -51,7 +51,7 @@ export async function runShortlinkEnrichment(deps: ManageDeps, actor: ManageActo
     } else {
       await setShortlinkMapping(deps, actor, { artifactId:job.artifact_id, revisionId:job.revision_id, pageId:job.page_id, expectedContentVersion:job.expected_content_version, expectedPolicyEpoch:job.expected_policy_epoch }, { op:'create', mapping: { mappingId:job.desired_mapping_id, providerOrigin:result.mapping.providerOrigin, providerId:result.mapping.providerId, shortDomain:job.requested_short_domain, shortCode:result.mapping.shortCode, shortUrl:result.mapping.shortUrl, pageId:job.page_id, grantId:job.desired_grant_id, destination:result.mapping.destination, source:'created', observedAt:deps.now(), destinationDigest:job.destination_sha256 } })
     }
-    await finalizeShortlink(deps.db, deps.config.instanceId, attempt, deps.now())
+    await finalizeShortlink(deps, actor, attempt)
   } catch (error) {
     try { await failEnrichment(deps.db, deps.config.instanceId, attempt, deps.now(), error instanceof PolicyError && error.code === 'conflict' ? 'shortlink_conflict' : 'shortlink_unavailable', !(error instanceof PolicyError && error.code === 'conflict')) } catch { /* A later lease or policy transition owns the job. */ }
     throw error

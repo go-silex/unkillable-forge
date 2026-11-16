@@ -44,14 +44,16 @@ export async function createShortlink(config: ShlinkConfig, input: { readonly sh
       ? { state: 'ready', mapping, source }
       : conflict()
   try {
-    const response = await request(base, { method: 'POST', headers, body: JSON.stringify({ longUrl: input.destination, customSlug: input.shortCode, domain: input.shortDomain, findIfExists: false }) })
+    const response = await request(base, { method: 'POST', headers, body: JSON.stringify({ longUrl: input.destination, customSlug: input.shortCode, domain: input.shortDomain, findIfExists: false }), redirect: 'manual' })
+    if (response.status >= 300 && response.status < 400) return unavailable()
     if (response.ok) {
       const mapping = await parse(response)
       if (mapping) return classify(mapping, 'created')
     }
   } catch { /* The provider may have committed before the response was lost. */ }
   try {
-    const response = await request(`${base}/${encodeURIComponent(input.shortCode)}?domain=${encodeURIComponent(input.shortDomain)}`, { method: 'GET', headers })
+    const response = await request(`${base}/${encodeURIComponent(input.shortCode)}?domain=${encodeURIComponent(input.shortDomain)}`, { method: 'GET', headers, redirect: 'manual' })
+    if (response.status >= 300 && response.status < 400) return unavailable()
     if (!response.ok) return unavailable()
     const mapping = await parse(response)
     return mapping ? classify(mapping, 'preserved') : unavailable()

@@ -20,7 +20,7 @@ describe('Browser Run screenshot', () => {
     expect(await renderOgScreenshot({ accountId, apiToken: 'control-secret', fetch: transport as typeof fetch }, input)).toEqual(jpeg)
     const [url, init] = transport.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe(`https://api.cloudflare.com/client/v4/accounts/${accountId}/browser-rendering/screenshot?cacheTTL=0`)
-    expect(init.redirect).toBe('error')
+    expect(init.redirect).toBe('manual')
     expect(init.headers).toEqual({ Authorization: 'Bearer control-secret', 'Content-Type': 'application/json' })
     const payload = JSON.parse(init.body as string)
     expect(payload.html).not.toContain('secret')

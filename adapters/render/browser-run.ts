@@ -155,8 +155,9 @@ export async function renderOgScreenshot(config: BrowserRunConfig, graph: Render
   const timer = setTimeout(() => controller.abort(), 90000)
   try {
     const response = await (config.fetch ?? fetch)(`https://api.cloudflare.com/client/v4/accounts/${config.accountId}/browser-rendering/screenshot?cacheTTL=0`, {
-      method: 'POST', headers: { Authorization: `Bearer ${config.apiToken}`, 'Content-Type': 'application/json' }, body, signal: controller.signal, redirect: 'error',
+      method: 'POST', headers: { Authorization: `Bearer ${config.apiToken}`, 'Content-Type': 'application/json' }, body, signal: controller.signal, redirect: 'manual',
     })
+    if (response.status >= 300 && response.status < 400) throw new RenderError('render_unavailable', 'Browser Run redirected')
     if (!response.ok) throw new RenderError(response.status === 408 || response.status === 504 ? 'render_timeout' : response.status < 500 && response.status !== 429 ? 'render_rejected' : 'render_unavailable', `Browser Run HTTP ${response.status}`)
     const jpeg = await boundedResponse(response)
     if (!hasOgJpegDimensions(jpeg)) throw new RenderError('render_unavailable', 'Browser Run returned invalid JPEG or dimensions')

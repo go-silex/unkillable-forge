@@ -174,38 +174,44 @@ export async function putEnrichmentOg(db: D1Database, instanceId: string, attemp
 }
 
 /** Select only bytes already verified by Store; stale attempts cannot select them. */
-export async function finalizeOg(db: D1Database, instanceId: string, attempt: EnrichmentAttempt, store: DerivedStore, descriptor: DerivedDescriptor, now: number): Promise<void> {
+export async function finalizeOg(deps: ManageDeps, actor: ManageActor, attempt: EnrichmentAttempt, store: DerivedStore, descriptor: DerivedDescriptor, signal?: AbortSignal): Promise<void> {
+  const { db, config } = deps, instanceId = config.instanceId
   const lease = handle(attempt)
-  if (!Number.isSafeInteger(now) || now < 0 || descriptor.ref.extension !== 'jpg') throw new PolicyError('invalid_state')
+  if (descriptor.ref.extension !== 'jpg') throw new PolicyError('invalid_state')
   const stored = await store.head(descriptor.ref)
   if (!stored || stored.objectVersion !== descriptor.objectVersion || stored.objectKey !== descriptor.objectKey || stored.size !== descriptor.size || stored.sha256 !== descriptor.sha256) throw new PolicyError('invalid_state')
   const r = descriptor.ref, assertion = crypto.randomUUID()
   const graph = await loadEnrichmentOgGraph(db, instanceId, lease.jobId)
   const graphAssertions = renderGraphAssertionStatements(db, graph)
-  try { await db.batch([
+  const now = nowValue(deps.now)
+  if (signal?.aborted) throw new PolicyError('conflict')
+  await executeGuarded(deps, actor, [{ action:'enrich_page', artifactId:graph.artifactId, revisionId:graph.revisionId, pageId:graph.pageId, expectedContentVersion:graph.contentVersion, expectedPolicyEpoch:graph.policyEpoch, requestDigest:graph.inputSha256, occurredAt:now }], [
     assertStatement(db, assertion, `EXISTS (SELECT 1 FROM enrichment_jobs j JOIN instance_meta i ON i.singleton=1 AND i.instance_id=? WHERE j.job_id=? AND j.state='running' AND j.attempt=? AND j.lease_token=? AND j.lease_expires_at>? AND j.kind='og' AND j.page_id=? AND j.artifact_id=? AND j.revision_id=? AND j.input_sha256=? AND j.recipe_sha256=? AND ${validTarget})`, [instanceId,lease.jobId,lease.attempt,lease.token,now,r.pageId,r.artifactId,r.revisionId,r.inputSha256,r.recipeSha256]),
     ...graphAssertions.assertions,
     assertStatement(db, `${assertion}-object`, `NOT EXISTS (SELECT 1 FROM preview_objects o WHERE o.page_id=? AND o.revision_id=? AND o.recipe_sha256=? AND o.input_sha256=? AND o.content_sha256=? AND o.extension=? AND (o.artifact_id<>? OR o.size<>? OR o.object_version<>?))`, [r.pageId,r.revisionId,r.recipeSha256,r.inputSha256,r.contentSha256,r.extension,r.artifactId,descriptor.size,descriptor.objectVersion]),
     db.prepare('INSERT INTO preview_objects (page_id,revision_id,artifact_id,recipe_sha256,input_sha256,content_sha256,extension,size,object_version) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING').bind(r.pageId,r.revisionId,r.artifactId,r.recipeSha256,r.inputSha256,r.contentSha256,r.extension,descriptor.size,descriptor.objectVersion),
     db.prepare(`INSERT INTO preview_selections (page_id,revision_id,recipe_sha256,input_sha256,content_sha256,extension) VALUES (?,?,?,?,?,?) ON CONFLICT(page_id,revision_id) DO UPDATE SET recipe_sha256=excluded.recipe_sha256,input_sha256=excluded.input_sha256,content_sha256=excluded.content_sha256,extension=excluded.extension WHERE preview_selections.original_path IS NULL`).bind(r.pageId,r.revisionId,r.recipeSha256,r.inputSha256,r.contentSha256,r.extension),
-    db.prepare("UPDATE enrichment_jobs SET state='ready',result_source=CASE WHEN EXISTS (SELECT 1 FROM preview_selections s WHERE s.page_id=enrichment_jobs.page_id AND s.revision_id=enrichment_jobs.revision_id AND s.original_path IS NOT NULL) THEN 'preserved' ELSE 'generated' END,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE job_id=?").bind(now,lease.jobId),
+    db.prepare(`UPDATE enrichment_jobs SET state='ready',result_source=CASE WHEN EXISTS (SELECT 1 FROM preview_selections s WHERE s.page_id=enrichment_jobs.page_id AND s.revision_id=enrichment_jobs.revision_id AND s.original_path IS NOT NULL) OR EXISTS (SELECT 1 FROM routes r JOIN revision_resources rr ON rr.revision_id=enrichment_jobs.revision_id JOIN pages p ON p.page_id=r.page_id WHERE r.page_id=enrichment_jobs.page_id AND rr.content_type IN ('image/jpeg','image/png') AND ((r.kind='subtree' AND rr.path IN ('/a/'||r.route_key||'/og.jpg','/a/'||r.route_key||'/og.jpeg','/a/'||r.route_key||'/og.png')) OR (r.kind='tree_page' AND (rr.path IN ('/'||substr(r.route_key,1,length(r.route_key)-5)||'.og.jpg','/'||substr(r.route_key,1,length(r.route_key)-5)||'.og.jpeg','/'||substr(r.route_key,1,length(r.route_key)-5)||'.og.png') OR ((r.route_key='index.html' OR r.route_key LIKE '%/index.html') AND rr.path IN ('/'||substr(r.route_key,1,length(r.route_key)-10)||'og.jpg','/'||substr(r.route_key,1,length(r.route_key)-10)||'og.jpeg','/'||substr(r.route_key,1,length(r.route_key)-10)||'og.png'))) AND EXISTS (SELECT 1 FROM resource_owners ro WHERE ro.owner_revision_id=rr.revision_id AND ro.owner_page_id=p.page_id AND ro.path=rr.path AND ro.provider_artifact_id=p.artifact_id)))) THEN 'preserved' ELSE 'generated' END,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE job_id=?`).bind(now,lease.jobId),
     db.prepare("UPDATE enrichment_attempts SET completed_at=?,outcome='ready' WHERE job_id=? AND attempt=? AND lease_token=?").bind(now,lease.jobId,lease.attempt,lease.token),
     db.prepare('DELETE FROM enrichment_assertions WHERE assertion_id=?').bind(assertion),
     ...graphAssertions.cleanups,
     db.prepare('DELETE FROM enrichment_assertions WHERE assertion_id=?').bind(`${assertion}-object`),
-  ]); leases.delete(attempt) } catch { throw new PolicyError('conflict') }
+  ]); leases.delete(attempt)
 }
 
 /** Finalize only the exact provider identity and destination admitted in the job. */
-export async function finalizeShortlink(db: D1Database, instanceId: string, attempt: EnrichmentAttempt, now: number): Promise<void> {
+export async function finalizeShortlink(deps: ManageDeps, actor: ManageActor, attempt: EnrichmentAttempt): Promise<void> {
+  const { db, config } = deps, instanceId = config.instanceId
   const lease = handle(attempt), assertion = crypto.randomUUID()
-  if (!Number.isSafeInteger(now) || now < 0) throw new PolicyError('invalid_state')
-  try { await db.batch([
+  const job = await db.prepare("SELECT artifact_id,revision_id,page_id,expected_content_version,expected_policy_epoch,input_sha256 FROM enrichment_jobs WHERE job_id=? AND kind='shortlink'").bind(lease.jobId).first<{ artifact_id: string; revision_id: string; page_id: string; expected_content_version: number; expected_policy_epoch: number; input_sha256: string }>()
+  if (!job) throw new PolicyError('not_found')
+  const now = nowValue(deps.now)
+  await executeGuarded(deps, actor, [{ action:'enrich_page', artifactId:job.artifact_id, revisionId:job.revision_id, pageId:job.page_id, expectedContentVersion:job.expected_content_version, expectedPolicyEpoch:job.expected_policy_epoch, requestDigest:job.input_sha256, occurredAt:now }], [
     assertStatement(db, assertion, `EXISTS (SELECT 1 FROM enrichment_jobs j JOIN instance_meta i ON i.singleton=1 AND i.instance_id=? JOIN shortlink_mappings m ON m.mapping_id=j.desired_mapping_id AND m.provider_origin=j.provider_origin AND m.short_domain=j.requested_short_domain AND m.short_code=j.requested_short_code AND m.destination_digest=j.destination_sha256 AND m.page_id=j.page_id AND m.grant_id IS j.desired_grant_id WHERE j.job_id=? AND j.state='running' AND j.kind='shortlink' AND j.attempt=? AND j.lease_token=? AND j.lease_expires_at>? AND ${validTarget})`, [instanceId,lease.jobId,lease.attempt,lease.token,now]),
     db.prepare("UPDATE enrichment_jobs SET state='ready',result_source=(SELECT CASE source WHEN 'created' THEN 'created' ELSE 'preserved' END FROM shortlink_mappings WHERE mapping_id=enrichment_jobs.desired_mapping_id),lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE job_id=?").bind(now,lease.jobId),
     db.prepare("UPDATE enrichment_attempts SET completed_at=?,outcome='ready' WHERE job_id=? AND attempt=? AND lease_token=?").bind(now,lease.jobId,lease.attempt,lease.token),
     db.prepare('DELETE FROM enrichment_assertions WHERE assertion_id=?').bind(assertion),
-  ]); leases.delete(attempt) } catch { throw new PolicyError('conflict') }
+  ]); leases.delete(attempt)
 }
 
 export type EnrichmentErrorCode = 'render_timeout' | 'render_rejected' | 'render_unavailable' | 'integrity_error' | 'shortlink_unavailable' | 'shortlink_conflict' | 'target_changed'
