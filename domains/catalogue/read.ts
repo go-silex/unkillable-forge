@@ -262,16 +262,22 @@ export async function decideRead(db: D1Database, config: ReadInstanceConfig, sub
   } catch { return deny('unavailable') }
 }
 
-function policyPrincipalStatement(db: D1Database, actor: ManageActor, pageIds: readonly string[]): D1PreparedStatement {
-  return db.prepare(`SELECT p.status, p.authority_epoch,
+/** Catalogue-owned SQL expressions only; client values stay in D1 bindings.
+ * The caller binds ?1 to the authenticated principal ID. */
+export function policyPrincipalSql(pageIdsSql: string): string {
+  return `SELECT p.status, p.authority_epoch,
     EXISTS (SELECT 1 FROM role_grants g WHERE g.principal_id = p.principal_id AND g.revoked_at IS NULL AND (g.role = 'admin' OR (g.role = 'publisher' AND g.scope_kind = 'installation'))) AS global_authority,
-    NOT EXISTS (SELECT 1 FROM json_each(?2) j WHERE NOT EXISTS
+    NOT EXISTS (SELECT 1 FROM json_each(${pageIdsSql}) j WHERE NOT EXISTS
       (SELECT 1 FROM role_grants g WHERE g.principal_id = p.principal_id AND g.revoked_at IS NULL
         AND (g.role = 'admin' OR (g.role = 'publisher' AND (g.scope_kind = 'installation' OR (g.scope_kind = 'page' AND g.scope_page_id = j.value)))))) AS page_authority
-    FROM principals p WHERE p.principal_id = ?1`).bind(actor.principalId, JSON.stringify(pageIds))
+    FROM principals p WHERE p.principal_id = ?1`
 }
 
-function assertPolicyPrincipal(results: D1Result[], deps: ManageDeps, actor: ManageActor, pageCount: number): void {
+export function policyPrincipalStatement(db: D1Database, actor: ManageActor, pageIds: readonly string[]): D1PreparedStatement {
+  return db.prepare(policyPrincipalSql('?2')).bind(actor.principalId, JSON.stringify(pageIds))
+}
+
+export function assertPolicyPrincipal(results: D1Result[], deps: ManageDeps, actor: ManageActor, pageCount: number): void {
   if (!instanceMatches(results, deps.config.instanceId)) throw new PolicyError('instance_mismatch')
   const principal = results[1].results[0] as Row | undefined
   if (!principal || principal.status !== 'active') throw new PolicyError('unauthenticated')

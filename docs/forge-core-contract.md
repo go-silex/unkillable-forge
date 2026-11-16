@@ -995,6 +995,15 @@ Header and body bytes (`cache-control`, `content-type`, `Set-Cookie`, the `Not f
 | F10 Import | `claimPageStatements`, `importShare`, `setAlias`, `executeGuarded` ownership admission, `validateRevisionPaths`, schema checks | pages, routes, aliases from `site/_redirects`, revisions from the corpus, exact keys for pages whose legacy visibility is `shared` (a key without `vis:shared` is reported, not imported), visibility unknown → private with report, explicit fragment/asset typing and ownership (G1b), reserved-path collisions reported, public or shared visibility records without bytes reported (OR-1 counterexample) rather than dropped or turned into pages, historical tree URL and access fidelity acceptance before F13; preserve I-CV through Publication activation, persist versions from verified native PUTs, and implement budgeted non-starving cursor resweeps of all discarded/closed-session residue |
 | F11 Release operations | migration, config schema, error codes, F10 maintenance cursor contract | per-instance Worker configurations and measured capacity profiles, secrets, `instance_meta` and first-admin bootstrap, staging guard-message confirmation, backups including verifier keys, alias-host edge rule, and scheduling the F10 collector; local-only Wrangler bindings never authorize deployment |
 
+### 15.1 F07 managed metadata interface
+
+`Publication` adds `readArtifactState(actor, { artifactId })`, `readManifest(actor, { artifactId, revisionId?, section, cursor?, limit? })` and `readRevisions(actor, { artifactId, cursor?, limit? })`. Their typed DTOs live in `domains/publication/state.ts`; the MCP transport and exact tool schemas are documented in [forge-remote-mcp.md](forge-remote-mcp.md). They disclose metadata, never resource bodies.
+
+Catalogue owns scoped discovery, page membership and authorization selectors. Its `policyPrincipalSql(pageIdsSql)` composes only Catalogue-owned SQL expressions with the existing principal/role logic; client values remain D1 bindings, and `?1` is the authenticated principal. Publication combines those selectors with active-version, manifest and retention statements in one primary batch and validates authorization before releasing any result. No fake D1 capture, SQL-text substitution, adapter SQL or separate precheck is an authorization snapshot.
+
+Manifest sections are files, revision pages and ownership edges, with deterministic keyset pagination. Every page rechecks current principal status/authority epoch and the current/selected revision's page scope; zero membership requires global authority. Cursors bind instance, principal/epoch, artefact, active revision/version, selected manifest and relevant policy/discard context. Drift is a typed conflict; cursors are selectors, not capabilities. Tombstones do not acquire a current route. Retention/discard/purge and the exact prior activation fact remain distinct: sealing or import origin never establishes restore eligibility. Existing mutation CAS guards remain authoritative.
+
+
 ## 16. Provenance and licenses
 
 - This repository: MIT, "Copyright (c) 2026 Silex" (`LICENSE`).
