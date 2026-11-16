@@ -683,10 +683,10 @@ export type RouteOutcome =
   | { readonly kind: "redirect"; readonly status: 301 | 302 | 307 | 308; readonly location: string }
   | { readonly kind: "shell"; readonly path: string }
   | { readonly kind: "catalogue"; readonly viewer: "anonymous" | "team" }
-  | { readonly kind: "serve"; readonly plan: ReadPlan }
+  | { readonly kind: "serve"; readonly plan: ReadPlan; readonly shareContext: { readonly canonicalPrefix: string; readonly sharePrefix: string } | null; readonly unlisted: boolean }
   | { readonly kind: "share_exchange"; readonly plan: ReadPlan; readonly cookie: { readonly pageRef: string; readonly key: string }; readonly location: string }
-  | { readonly kind: "share_unfurl"; readonly plan: ReadPlan; readonly pageRef: string; readonly key: string }
-  | { readonly kind: "share_card"; readonly plan: ReadPlan }
+  | { readonly kind: "share_unfurl"; readonly plan: ReadPlan; readonly pageRef: string; readonly key: string; readonly unlisted: true }
+  | { readonly kind: "share_card"; readonly plan: ReadPlan; readonly unlisted: true }
 export function toOutcome(parsed: ParsedRequest, decision: ReadDecision, identity: VerifiedIdentity | null, config: ReadInstanceConfig): RouteOutcome
 
 // domains/catalogue/resolve.ts (S3)
@@ -811,7 +811,7 @@ export interface ReadPlan {
   readonly cache: "no-store"
 }
 export type ReadDecision =
-  | { readonly kind: "allow"; readonly plan: ReadPlan }
+  | { readonly kind: "allow"; readonly plan: ReadPlan; readonly shareMode?: "follow_active" | "pinned" }
   | { readonly kind: "deny"; readonly reason: "not_found" | "login_required" | "instance_mismatch" | "unavailable" }
   | { readonly kind: "alias"; readonly status: 301 | 302 | 307 | 308; readonly location: string }
 export function decideRead(db: D1Database, config: ReadInstanceConfig, subject: ReadSubject, credentials: ReadCredentials, aliasPath: string | null): Promise<ReadDecision>

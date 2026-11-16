@@ -11,11 +11,11 @@ import { body, content, documentCommand, publishDocument } from "./fixtures/publ
 
 beforeEach(async () => { await bootstrap() })
 
-async function setup() {
+async function setup(shareCookie = true) {
   const config = await configs()
   const store = new RevisionStore(env.REVISION_BYTES, instanceId)
   const publication = new PublicationService({ db: env.DB, config: config.manage, jwks, now: () => 10_000, store, publication: { sessionTtlMs: 60_000, maxUploadTimeoutMs: 1000, retainMs: 900_000, marginMs: 1000, manageClockSkewMs: 0, readClockSkewMs: 0 } })
-  const deps = { db: env.DB, config: config.read, jwks, nowSeconds: () => 10, store }
+  const deps = { db: env.DB, config: { ...config.read, shareCookie }, jwks, nowSeconds: () => 10, store }
   const request = (path: string, init?: RequestInit) => handleRead(new Request(`https://forge.example.test${path}`, init), deps)
   return { config, store, publication, request }
 }
@@ -309,24 +309,49 @@ describe("read HTTP with native D1 and R2", () => {
   })
 
   it.each(["no base", "existing base"])("preserves slug share authority for relative navigation with %s", async variant => {
-    const s = await setup()
+    const s = await setup(false)
     const base = variant === "existing base" ? '<base href="nested/">' : ""
     const next = variant === "existing base" ? "nested/next/" : "next/"
-    const first = await documentCommand(`slug-navigation-${variant.replaceAll(" ", "-")}`, "/a/navshare/index.html", `<!doctype html>${base}<a href="next/">Continue</a><a href="/a/private-sibling/">Sibling</a>`)
+    const first = await documentCommand(`slug-navigation-${variant.replaceAll(" ", "-")}`, "/a/navshare/index.html", `<!doctype html>${base}<link rel="stylesheet" href="/a/navshare/style.css"><img src="/a/navshare/icon.svg"><a href="next/">Continue</a><a href="/a/private-sibling/">Sibling</a>`)
     const nextPath = `/a/navshare/${next}index.html`
     const child = await content("<p>shared child document</p>")
-    const command = { ...first.command, files: [...first.command.files, { path: nextPath, kind: "subdocument" as const, size: child.size, sha256: child.sha256, contentType: "text/html", source: "client" as const }] }
+    const css = await content('.mark{background:url("/a/navshare/icon.svg")}')
+    const icon = await content('<svg xmlns="http://www.w3.org/2000/svg"><text>shared icon</text></svg>')
+    const assets = [
+      { path: "/a/navshare/style.css", data: css, contentType: "text/css" },
+      { path: "/a/navshare/icon.svg", data: icon, contentType: "image/svg+xml" },
+    ]
+    const command = { ...first.command, files: [
+      ...first.command.files,
+      { path: nextPath, kind: "subdocument" as const, size: child.size, sha256: child.sha256, contentType: "text/html", source: "client" as const },
+      ...assets.map(({ path, data, contentType }) => ({ path, kind: "asset" as const, size: data.size, sha256: data.sha256, contentType, source: "client" as const })),
+    ], edges: assets.map(({ path }) => ({ ownerPageId: first.pageId, path, providerArtifactId: null })) }
     const session = await s.publication.begin(actor, command)
     await s.publication.upload(actor, session.sessionId, "/a/navshare/index.html", body(first.bytes))
     await s.publication.upload(actor, session.sessionId, nextPath, body(child.bytes))
+    for (const { path, data } of assets) await s.publication.upload(actor, session.sessionId, path, body(data.bytes))
     await s.publication.seal(actor, session.sessionId)
     const receipt = await s.publication.commit(actor, session.sessionId)
-    await publishPage(s.publication, "/a/private-sibling/index.html", "<p>private sibling content</p>")
-    await importShare({ db: env.DB, config: s.config.manage, jwks, now: () => 10_000 }, actor, { pageId: first.pageId, artifactId: receipt.artifactId, expectedPolicyEpoch: 0, key: "slug_share_123", mode: "follow_active" })
+    const privatePage = await documentCommand("slug-private-sibling", "/a/private-sibling/index.html", "<p>private sibling content</p>")
+    const privateAsset = await content("private sibling secret asset")
+    const privatePath = "/a/private-sibling/secret.svg"
+    const privateCommand = { ...privatePage.command, files: [...privatePage.command.files, { path: privatePath, kind: "asset" as const, size: privateAsset.size, sha256: privateAsset.sha256, contentType: "image/svg+xml", source: "client" as const }], edges: [{ ownerPageId: privatePage.pageId, path: privatePath, providerArtifactId: null }] }
+    const privateSession = await s.publication.begin(actor, privateCommand)
+    await s.publication.upload(actor, privateSession.sessionId, privateCommand.files[0].path, body(privatePage.bytes))
+    await s.publication.upload(actor, privateSession.sessionId, privatePath, body(privateAsset.bytes))
+    await s.publication.seal(actor, privateSession.sessionId)
+    await s.publication.commit(actor, privateSession.sessionId)
+    const management = { db: env.DB, config: s.config.manage, jwks, now: () => 10_000 }
+    const grant = await importShare(management, actor, { pageId: first.pageId, artifactId: receipt.artifactId, expectedPolicyEpoch: 0, key: "slug_share_123", mode: "follow_active" })
 
     const startUrl = "https://forge.example.test/s/navshare/slug_share_123/"
     const start = await s.request(new URL(startUrl).pathname)
     expect(start.status).toBe(200)
+    const setCookie = start.headers.get("set-cookie")
+    expect(setCookie).toContain("forge_pin=")
+    expect(setCookie).not.toContain("forge_share=")
+    if (!setCookie) throw new Error("slug share pin missing")
+    const cookie = setCookie.split(";", 1)[0]
     const html = await start.text()
     const baseHref = html.match(/<base\b[^>]*href="([^"]+)"/i)?.[1]
     const link = html.match(/<a\b[^>]*href="([^"]+)"[^>]*>Continue<\/a>/i)?.[1]
@@ -340,6 +365,45 @@ describe("read HTTP with native D1 and R2", () => {
     const sibling = await s.request("/a/private-sibling/")
     expect([200, 206, 304]).not.toContain(sibling.status)
     expect(await sibling.text()).not.toContain("private sibling content")
+    const effectiveBase = baseHref ? new URL(baseHref, startUrl) : new URL(startUrl)
+    const stylesheetRef = html.match(/<link\b[^>]*href="([^"]+)"/i)?.[1]
+    const imageRef = html.match(/<img\b[^>]*src="([^"]+)"/i)?.[1]
+    if (!stylesheetRef || !imageRef) throw new Error("rewritten slug resources missing")
+    const stylesheetUrl = new URL(stylesheetRef, effectiveBase)
+    const imageUrl = new URL(imageRef, effectiveBase)
+    const headers = { Cookie: cookie }
+    const stylesheet = await s.request(stylesheetUrl.pathname + stylesheetUrl.search, { headers })
+    expect(stylesheet.status).toBe(200)
+    const stylesheetBody = await stylesheet.text()
+    const cssImageRef = /url\(["']?([^"')]+)["']?\)/.exec(stylesheetBody)?.[1]
+    if (!cssImageRef) throw new Error("rewritten CSS image missing")
+    const cssImageUrl = new URL(cssImageRef, stylesheetUrl)
+    let etag: string | null = null
+    for (const url of [imageUrl, cssImageUrl]) {
+      const image = await s.request(url.pathname + url.search, { headers })
+      expect(image.status).toBe(200)
+      etag = image.headers.get("etag")
+      expect(new Uint8Array(await image.arrayBuffer())).toEqual(icon.bytes)
+    }
+    if (!etag) throw new Error("slug asset etag missing")
+    expect((await s.request("/s/navshare/wrong_key_123/icon.svg")).status).toBe(404)
+    const namespace = `/_revisions/${first.pageId}/${receipt.revisionId}`
+    const siblingConditions: Record<string, string>[] = [{}, { Range: "bytes=0-4" }, { "If-None-Match": "*" }]
+    for (const path of [privatePath, `${namespace}${privatePath}`]) {
+      for (const conditional of siblingConditions) {
+        const denied = await s.request(path, { headers: { ...headers, ...conditional } })
+        expect([200, 206, 304]).not.toContain(denied.status)
+        expect(new Uint8Array(await denied.arrayBuffer())).not.toEqual(privateAsset.bytes)
+      }
+    }
+    await revokeShare(management, actor, { pageId: first.pageId, artifactId: receipt.artifactId, expectedPolicyEpoch: 1, grantId: grant.grantId })
+    expect((await s.request("/s/navshare/slug_share_123/icon.svg")).status).toBe(404)
+    const revokedCases: [string, Record<string, string>][] = [["GET", {}], ["HEAD", {}], ["GET", { Range: "bytes=0-4" }], ["GET", { "If-None-Match": etag }]]
+    for (const [method, conditional] of revokedCases) {
+      const denied = await s.request(imageUrl.pathname + imageUrl.search, { method, headers: { ...headers, ...conditional } })
+      expect(denied.status).toBe(404)
+      expect(new Uint8Array(await denied.arrayBuffer())).not.toEqual(icon.bytes)
+    }
   })
 
   it.each(["marked", "unmarked"])("preserves benign script marker mentions while removing the %s legacy toolbar", async variant => {
