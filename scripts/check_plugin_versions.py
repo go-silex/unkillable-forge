@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""Assert one SemVer across Claude / Grok / OMP / Codex plugin manifests + CHANGELOG.
-
-Canon: plugins/silex-forge/plugin.json  (Agent Plugins root — OMP marketplace).
-Codex catalog (.agents/plugins/marketplace.json) has no version field.
-
-Usage:
-  python3 scripts/check-plugin-versions.py
-  python3 scripts/check-plugin-versions.py --print-version
-  python3 scripts/check-plugin-versions.py --print-notes
-"""
+"""Validate independently versioned local plugin components and catalogues."""
 from __future__ import annotations
 
 import argparse
@@ -16,116 +7,124 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Callable
 
 SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 HEADING = re.compile(r"^## \[([^\]]+)\]")
-
-Extract = Callable[[object], list[tuple[str, str]]]
-
-
-def _load_json(path: Path) -> object:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _plugin_version(data: object) -> list[tuple[str, str]]:
-    if not isinstance(data, dict):
-        return [("(root)", f"expected object, got {type(data).__name__}")]
-    v = data.get("version")
-    if not isinstance(v, str) or not v:
-        return [("version", "missing")]
-    return [("version", v)]
-
-
-def _catalog_claude_grok(data: object) -> list[tuple[str, str]]:
-    out: list[tuple[str, str]] = []
-    if not isinstance(data, dict):
-        return [("(root)", f"expected object, got {type(data).__name__}")]
-    v = data.get("version")
-    out.append(("version", v if isinstance(v, str) and v else "missing"))
-    plugins = data.get("plugins")
-    if not isinstance(plugins, list) or not plugins:
-        out.append(("plugins[]", "missing"))
-        return out
-    for i, row in enumerate(plugins):
-        if not isinstance(row, dict):
-            out.append((f"plugins[{i}]", "not an object"))
-            continue
-        pv = row.get("version")
-        label = row.get("name") or i
-        out.append(
-            (f"plugins[{label}].version", pv if isinstance(pv, str) and pv else "missing")
-        )
-    return out
-
-
-def _catalog_omp(data: object) -> list[tuple[str, str]]:
-    out: list[tuple[str, str]] = []
-    if not isinstance(data, dict):
-        return [("(root)", f"expected object, got {type(data).__name__}")]
-    meta = data.get("metadata")
-    mv = meta.get("version") if isinstance(meta, dict) else None
-    out.append(
-        ("metadata.version", mv if isinstance(mv, str) and mv else "missing")
-    )
-    plugins = data.get("plugins")
-    if not isinstance(plugins, list) or not plugins:
-        out.append(("plugins[]", "missing"))
-        return out
-    for i, row in enumerate(plugins):
-        if not isinstance(row, dict):
-            out.append((f"plugins[{i}]", "not an object"))
-            continue
-        pv = row.get("version")
-        label = row.get("name") or i
-        out.append(
-            (f"plugins[{label}].version", pv if isinstance(pv, str) and pv else "missing")
-        )
-    return out
-
-
-SOURCES: list[tuple[str, Extract]] = [
-    ("plugins/silex-forge/plugin.json", _plugin_version),
-    ("plugins/silex-forge/.claude-plugin/plugin.json", _plugin_version),
-    ("plugins/silex-forge/.grok-plugin/plugin.json", _plugin_version),
-    ("plugins/silex-forge/.omp-plugin/plugin.json", _plugin_version),
-    ("plugins/silex-forge/.codex-plugin/plugin.json", _plugin_version),
-    ("plugins/silex-forge/package.json", _plugin_version),
-    (".claude-plugin/marketplace.json", _catalog_claude_grok),
-    (".grok-plugin/marketplace.json", _catalog_claude_grok),
-    (".omp-plugin/marketplace.json", _catalog_omp),
-]
-
+LEGACY = "silex-forge"
+COMPONENTS = {
+    LEGACY: "CHANGELOG.md",
+    "unkillable-forge": "plugins/unkillable-forge/CHANGELOG.md",
+}
+MANIFESTS = (
+    "plugin.json",
+    ".claude-plugin/plugin.json",
+    ".grok-plugin/plugin.json",
+    ".omp-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+    "package.json",
+)
+CATALOGS = (
+    (".claude-plugin/marketplace.json", "version"),
+    (".grok-plugin/marketplace.json", "version"),
+    (".omp-plugin/marketplace.json", "metadata.version"),
+    (".agents/plugins/marketplace.json", None),
+)
 CANON = "plugins/silex-forge/plugin.json"
 
 
-def collect(root: Path) -> tuple[str, list[str]]:
+def _collect(root: Path) -> tuple[dict[str, str], list[str]]:
     errors: list[str] = []
-    found: list[tuple[str, str, str]] = []
-    for rel, extract in SOURCES:
+    advertised = {LEGACY}
+    found: list[tuple[str, str, str, object]] = []
+
+    def load(rel: str) -> object:
         path = root / rel
         if not path.is_file():
             errors.append(f"{rel}: missing file")
-            continue
+            return None
         try:
-            data = _load_json(path)
-        except json.JSONDecodeError as e:
-            errors.append(f"{rel}: invalid JSON ({e})")
-            continue
-        for field, value in extract(data):
-            found.append((rel, field, value))
-            if value == "missing" or not SEMVER.match(value):
-                errors.append(f"{rel} {field}={value!r} (need X.Y.Z)")
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                errors.append(f"{rel}: expected object")
+                return None
+            return data
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            errors.append(f"{rel}: invalid JSON ({exc})")
+            return None
 
-    canon_vals = [v for rel, _, v in found if rel == CANON]
-    if not canon_vals:
-        errors.append(f"{CANON}: no version (canon)")
-        return "", errors
-    canon = canon_vals[0]
-    for rel, field, value in found:
-        if SEMVER.match(value) and value != canon:
-            errors.append(f"{rel} {field}={value} ≠ canon {canon}")
-    return canon, errors
+    def owner(rel: str, field: str, value: object) -> str | None:
+        if not isinstance(value, str) or not value:
+            errors.append(f"{rel} {field}: missing or invalid component name")
+            return None
+        if value not in COMPONENTS:
+            errors.append(f"{rel} {field}: unknown component {value!r}")
+            return None
+        advertised.add(value)
+        return value
+
+    for rel, version_field in CATALOGS:
+        if version_field is None and not (root / rel).exists():
+            continue
+        data = load(rel)
+        if not isinstance(data, dict):
+            if data is not None:
+                errors.append(f"{rel}: expected object")
+            continue
+        name = owner(rel, "name", data.get("name"))
+        if version_field and name:
+            if version_field == "metadata.version":
+                meta = data.get("metadata")
+                value = meta.get("version") if isinstance(meta, dict) else None
+            else:
+                value = data.get("version")
+            found.append((rel, version_field, name, value))
+        rows = data.get("plugins")
+        if not isinstance(rows, list) or not rows:
+            errors.append(f"{rel} plugins: missing or invalid list")
+            continue
+        for i, row in enumerate(rows):
+            if not isinstance(row, dict):
+                errors.append(f"{rel} plugins[{i}]: expected object")
+                continue
+            name = owner(rel, f"plugins[{i}].name", row.get("name"))
+            if name and version_field:
+                found.append((rel, f"plugins[{i}].version", name, row.get("version")))
+
+    advertised.update(name for name in COMPONENTS if (root / "plugins" / name).exists())
+    if "unkillable-forge" in advertised and not (root / CATALOGS[-1][0]).is_file():
+        errors.append(f"{CATALOGS[-1][0]}: missing file")
+    versions: dict[str, str] = {}
+    for name in sorted(advertised):
+        for manifest in MANIFESTS:
+            rel = f"plugins/{name}/{manifest}"
+            data = load(rel)
+            if not isinstance(data, dict):
+                if data is not None:
+                    errors.append(f"{rel}: expected object")
+                continue
+            actual_name = data.get("name")
+            if actual_name != name:
+                errors.append(f"{rel} name: expected {name!r}, got {actual_name!r}")
+            value = data.get("version")
+            found.append((rel, "version", name, value))
+            if manifest == "plugin.json" and isinstance(value, str) and SEMVER.fullmatch(value):
+                versions[name] = value
+
+    for rel, field, name, value in found:
+        if not isinstance(value, str) or not SEMVER.fullmatch(value):
+            errors.append(f"{rel} {field}={value!r} (need X.Y.Z)")
+        elif name in versions and value != versions[name]:
+            errors.append(f"{rel} {field}={value} ≠ {name} canon {versions[name]}")
+    return versions, errors
+
+
+def collect(root: Path, component: str = LEGACY) -> tuple[str, list[str]]:
+    versions, errors = _collect(root)
+    if component not in COMPONENTS:
+        errors.append(f"unknown component {component!r}")
+    elif component not in versions:
+        errors.append(f"{component}: missing or invalid canonical version")
+    return versions.get(component, ""), errors
 
 
 def changelog_has_version(text: str, version: str) -> bool:
@@ -151,20 +150,24 @@ def changelog_notes(text: str, version: str) -> str | None:
     return body + "\n"
 
 
-def check(root: Path) -> tuple[str, list[str]]:
-    version, errors = collect(root)
-    cl = root / "CHANGELOG.md"
-    if not cl.is_file():
-        errors.append("CHANGELOG.md: missing file")
-    elif version:
+def check(root: Path, component: str = LEGACY) -> tuple[str, list[str]]:
+    versions, errors = _collect(root)
+    if component not in COMPONENTS:
+        errors.append(f"unknown component {component!r}")
+    elif component not in versions:
+        errors.append(f"{component}: missing or invalid canonical version")
+    for name, version in versions.items():
+        rel = COMPONENTS[name]
+        cl = root / rel
+        if not cl.is_file():
+            errors.append(f"{rel}: missing file")
+            continue
         text = cl.read_text(encoding="utf-8")
         if not changelog_has_version(text, version):
-            errors.append(f"CHANGELOG.md: missing ## [{version}]")
-        else:
-            notes = changelog_notes(text, version)
-            if notes is None or not notes.strip():
-                errors.append(f"CHANGELOG.md: empty ## [{version}] section")
-    return version, errors
+            errors.append(f"{rel}: missing ## [{version}]")
+        elif not changelog_notes(text, version):
+            errors.append(f"{rel}: empty ## [{version}] section")
+    return versions.get(component, ""), errors
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -177,16 +180,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--print-version", action="store_true")
     parser.add_argument("--print-notes", action="store_true")
+    parser.add_argument("--component", choices=COMPONENTS, default=LEGACY)
     args = parser.parse_args(argv)
     root = args.root.resolve()
-    version, errors = check(root)
+    version, errors = check(root, args.component)
     if errors:
         print("plugin version check failed:", file=sys.stderr)
         for e in errors:
             print(f"  {e}", file=sys.stderr)
         return 1
     if args.print_notes:
-        notes = changelog_notes((root / "CHANGELOG.md").read_text(encoding="utf-8"), version)
+        notes = changelog_notes((root / COMPONENTS[args.component]).read_text(encoding="utf-8"), version)
         assert notes is not None
         sys.stdout.write(notes)
         return 0

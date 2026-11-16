@@ -262,6 +262,8 @@ Après merge F04, F05 et F07 avancent en parallèle dans leurs worktrees/PR dist
 
 Pas de « tester uniquement que le tool appelle une fonction » : les tests permanents couvrent les transitions, autorisations, octets servis et conflits observables. La configuration/wiring peut être vérifiée par un smoke jetable.
 
+**Compatibilité des postes F08 — décision opérateur explicite : Linux et macOS.** Le publisher commun conserve ces deux environnements ; une implémentation Linux seule n'est pas une livraison F08. La traversée des fichiers, l'état privé, les remplacements atomiques et les verrous doivent rester sûrs sur les deux OS, avec preuve native macOS en CI. Les trois clients prioritaires et leurs preuves de publication restent requis ; aucun droit de déploiement ou de migration de profil n'est ajouté par cette décision.
+
 F08 comprend des PR consommateurs distinctes, en plus de la PR moteur : les 16 lots principaux ne signifient pas 16 worktrees au total.
 
 | Dépôt consommateur | Worktree / branche dédiés | Livraison bloquante avant F12 |

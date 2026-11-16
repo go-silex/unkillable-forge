@@ -1,9 +1,21 @@
 {
-  "name": "silex-forge",
+  "name": "unkillable-forge",
   "interface": {
-    "displayName": "Silex Forge"
+    "displayName": "Unkillable Forge"
   },
   "plugins": [
+    {
+      "name": "unkillable-forge",
+      "source": {
+        "source": "local",
+        "path": "./plugins/unkillable-forge"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
     {
       "name": "silex-forge",
       "source": {

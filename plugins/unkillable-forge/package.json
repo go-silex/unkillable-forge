@@ -1,0 +1,24 @@
+{
+  "name": "unkillable-forge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Profile-isolated local publisher for Unkillable Forge.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "esbuild": "0.28.2",
+    "typescript": "^5.8.2"
+  }
+}
