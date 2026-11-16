@@ -16,10 +16,10 @@ Plan : [forge-convergence-plan.md](forge-convergence-plan.md). Dernière mise à
 ## Recadrage opérateur du 2026-11-16 — livraison puis bascule
 
 - L'opérateur demande d'arrêter la campagne de capacité et de terminer le nouveau système pour le déployer puis basculer. Les quatre cycles synthétiques/20 020 appels ne sont plus un verrou F04. Aucun second essai joint n'est autorisé ou lancé par ce recadrage ; le cas interrompu et ses octets restent conservés, sans reset, abort ni suppression implicite.
-- Référence runtime courante `10e4022a74340170556fb2c1104bf70bbaee643f` : deux revues indépendantes du code CLEAR ; [CI43703791342](https://github.com/go-silex/unkillable-forge/actions/runs/43703791342) avec cinq jobs réussis,41 fichiers/384 Vitest et205 Python ; [secret scan43703791371](https://github.com/go-silex/unkillable-forge/actions/runs/43703791371) réussi. Les modifications présentes sont documentaires ; le nouveau SHA exige sa propre liaison, revue et CI avant merge. Les checkpoints plus bas restent historiques.
+- F04 livré : [PR10](https://github.com/go-silex/unkillable-forge/pull/10), head final `607c4297a10c1e82ad011c51413a49362bccb445`, merge `2999c69e7cfd441b433d9536e0265212209e4833`. Les deux revues indépendantes du SHA final sont CLEAR ; [CI43838686150](https://github.com/go-silex/unkillable-forge/actions/runs/43838686150) : cinq jobs requis exécutés réussis, release skipped non comptée ; [secret scan43838686175](https://github.com/go-silex/unkillable-forge/actions/runs/43838686175) réussi. Les deux commits finaux ne modifient que trois documents ; runtime `10e4022a74340170556fb2c1104bf70bbaee643f` inchangé. Les checkpoints plus bas restent historiques.
 - Le staging isolé a réellement exécuté création puis mise à jour avec un asset32Mio : états committed, versions1→2, mêmes pages/URL, upload puis matérialisation serveur. Neuf jeux D1 primaires par cycle concordent avec les manifestes ; quatre GET R2 physiques et quatre LIST couvrent les deux manifestes et les deux objets32Mio, tailles/SHA recalculés. Preuves privées `C1-C2.c3-semantic.json` SHA `c252a8011045ea6af19691dcb30d233283b63cfba33ac0e47c91233e2a91323d` et `C1-C2.physical-r2.json` SHA `e6f988ad8843f49a29950ac2828afa3484907efac2dacde23ac43f9f9baf9cb3`. Aucune valeur de credential ni octet d'artefact dans cette documentation.
 - Le cas joint est interrompu avant commit :3711fichiers stockés/6289en attente, cause de terminaison inconnue. Sa capacité complète, son historique exact d'appels, l'écho indépendant des versions R2 et un pic mémoire restent non prouvés. Les métriques natives du smoke sont des agrégats/quantiles, pas des maxima ni une preuve individuelle. R16 reste INCONCLUSIVE/non attribué ; aucun diagnostic n'est supprimé ou déclaré universellement bénin.
-- F04 reste non livré avant son merge épinglé, sa revue et ses checks requis. F05/F07 pourront alors avancer en parallèle, puis F08 livrera le vrai publisher des trois clients. Le backend HTTP seul n'est ni le lecteur HTML ni le MCP métier ; aucune bascule n'est faite avant ces fonctions et les contrôles ciblés d'accès/liens. Production, URLs, clés, assets et shortlinks restent inchangés ; sauvegarde/rollback et autorisation spécifique de bascule sont conservés.
+- **6/16 lots livrés.** F07 est mergé après trois revues indépendantes du SHA final et cinq jobs CI réellement réussis ; F05 termine la lecture/gestion web dans son worktree dédié. F08 reste dépendant de l'acceptation F05 et livrera la publication métier réelle des trois clients ; le MCP métier mergé seul ne prouve pas ce parcours. Aucune bascule n'est faite avant les fonctions et contrôles ciblés d'accès/liens, la sauvegarde/rollback et l'autorisation spécifique. Aucune production, URL, clé, donnée, accès aux assets ou shortlink n'a été modifié par ces livraisons moteur.
 
 ## F01 — observations réalisées en lecture seule
 
@@ -240,7 +240,7 @@ Zone Gosilex établie avec le grant opérateur existant rafraîchi ; DNS/Access 
 
 ## Lots et traçabilité
 
-Quatre lots sur seize livrés : F01, F02, F03 et F06.
+Six lots sur seize livrés : F01, F02, F03, F04, F06 et F07.
 
 ### Vague A
 
@@ -255,9 +255,9 @@ Quatre lots sur seize livrés : F01, F02, F03 et F06.
 
 | Lot | État | Dépendances bloquantes |
 |---|---|---|
-| F04 | Runtime implémenté et smoke cloud acquis ; amendement documentaire en finalisation, **non livré avant merge** ; `~/.omp/wt/unkillable-forge/feat-F04-publication`, `feat/F04-publication` | [PR #10](https://github.com/go-silex/unkillable-forge/pull/10). F03/F06 satisfaits. Runtime10e4022 revu/CI verte, création+mise à jour32Mio et preuves D1/R2 acquises. Campagne jointe retirée du gate par le recadrage du16novembre ; sa réussite n'est pas revendiquée. Nouveau SHA documentaire, revue et CI requis avant merge ; aucune bascule de production autorisée ici |
-| F05 | Non démarré | F03, F04 |
-| F07 | Non démarré | F04, F06 |
+| F04 | **Livré** ; `~/.omp/wt/unkillable-forge/feat-F04-publication`, `feat/F04-publication` | [PR #10](https://github.com/go-silex/unkillable-forge/pull/10), head `607c4297a10c1e82ad011c51413a49362bccb445`, merge `2999c69e7cfd441b433d9536e0265212209e4833`. F03/F06 satisfaits ; deux revues CLEAR et CI43838686150/secrets43838686175 réussies. Création+mise à jour32Mio et preuves D1/R2 acquises ; campagne jointe retirée du gate, jamais déclarée réussie. Aucune bascule de production |
+| F05 | Implémenté, preuve navigateur en cours, **non livré** ; `~/.omp/wt/unkillable-forge/feat-F05-serving`, `feat/F05-serving`, base2999c69 | F03/F04 acceptés. Trois fichiers/33 tests natifs et deux projets TypeScript réussis ; lien gestion par page et retrait des injections legacy connues couverts. Navigateur réel local, revue du SHA final, CI et merge encore dus ; aucun déploiement ni replay exhaustif du corpus publié revendiqué |
+| F07 | **Livré** ; `~/.omp/wt/unkillable-forge/feat-F07-remote-mcp`, `feat/F07-remote-mcp`, base2999c69 | [PR #11](https://github.com/go-silex/unkillable-forge/pull/11), head `d575e6da3c69f4ebcffbd1ca1720a049051b7d2f`, merge `24b2ac7909677706268247d69240cb4d44906912`. Trois revues finales CLEAR, [cinq jobs CI réussis](https://github.com/go-silex/unkillable-forge/actions/runs/43864982838) et [secret scan réussi](https://github.com/go-silex/unkillable-forge/actions/runs/43864983020). Après RED7/7, la correction complète des memberships scellés/tombstones et la fermeture du peer manquant passent installation propre,26 tests natifs et deux projets TS. Ni déploiement ni publication métier depuis les trois clients revendiqués |
 | F08 | Non démarré | F04, F05, F06, F07 ; worktrees consommateurs distincts |
 
 ### Vague C

@@ -19,6 +19,7 @@ describe("instance config fails closed on either surface", () => {
     expect(read.ok).toBe(true)
     expect(manage.ok).toBe(true)
     if (read.ok && manage.ok) {
+      expect(read.config.manageHost).toBe(valid.manageHost)
       expect(read.config).not.toHaveProperty("manageAudiences")
       expect(read.config).not.toHaveProperty("shareSealKey")
       expect(manage.config).not.toHaveProperty("readAudiences")

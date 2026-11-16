@@ -83,6 +83,7 @@ export interface InstanceBase {
 }
 export interface ReadInstanceConfig extends InstanceBase {
   readonly surface: "read"
+  readonly manageHost: string                     // validated cross-origin management link; no management audience or key
   readonly readAudiences: readonly string[]
   readonly login: LoginMode
   readonly shareCookie: boolean
@@ -119,9 +120,10 @@ Bindings and variables:
 | `instanceId`, `canonicalHost`, `aliasHosts`, `accessTeamDomain`, `routeGrammars`, `shareGrammars` | common | required | required |
 | `shellPaths` | common | required, exposed | required, exposed |
 | `readAudiences`, `login`, `shareCookie` | read | required, exposed | required, validated, not exposed |
-| `manageHost`, `manageAudiences` | manage | required, validated, not exposed | required, exposed |
+| `manageHost` | manage link | required, exposed for management navigation only | required, exposed |
+| `manageAudiences` | manage | required, validated, not exposed | required, exposed |
 
-Both parsers require and validate the **whole document** (every group, every field and every cross constraint) before building their typed result. Each then exposes only its own surface's fields. A parser never skips the other group's fields or cross constraints because its typed result does not carry them. An unknown field is an error.
+Both parsers require and validate the **whole document** (every group, every field and every cross constraint) before building their typed result. Each exposes its surface's fields; the read projection additionally exposes the already-validated `manageHost` for cross-origin management navigation, never management audiences or sealing material. A parser never skips the other group's fields or cross constraints because its typed result does not carry them. An unknown field is an error.
 
 Validation (all errors collected; any error → the Worker answers every request `503`, `cache-control: no-store`, no partial defaults):
 
@@ -454,6 +456,7 @@ export interface ShareResult { readonly grantId: string; readonly key: string | 
 export interface PagePolicyView {
   readonly pageId: string; readonly artifactId: string
   readonly visibility: "private" | "shared" | "public"; readonly policyEpoch: number; readonly contentVersion: number
+  readonly canonicalUrl: string | null; readonly shareUrlPrefix: string | null
   readonly grant: { readonly grantId: string; readonly mode: "follow_active" | "pinned"; readonly revisionId: string | null; readonly revealable: boolean } | null
 }
 

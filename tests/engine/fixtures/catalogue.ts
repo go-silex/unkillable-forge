@@ -45,7 +45,7 @@ export async function configs(): Promise<{ read: ReadInstanceConfig; manage: Man
   const aes = await crypto.subtle.importKey("raw", new Uint8Array(32).fill(5), "AES-GCM", false, ["encrypt", "decrypt"])
   const base = { instanceId, canonicalHost: "forge.example.test", aliasHosts: ["alias.example.test"], accessTeamDomain: "team.cloudflareaccess.com", routeGrammars: ["tree", "subtree"] as const, shareGrammars: ["page", "card", "slug"] as const, shareVerifierKeys: [{ kid: "one", key: hmac }] }
   return {
-    read: { ...base, surface: "read", readAudiences: ["reader"], login: "serve-shell", shareCookie: true, shellPaths: ["/", "/login", "/login.html"] },
+    read: { ...base, surface: "read", manageHost: "manage.example.test", readAudiences: ["reader"], login: "serve-shell", shareCookie: true, shellPaths: ["/", "/login", "/login.html"] },
     manage: { ...base, surface: "manage", manageHost: "manage.example.test", manageAudiences: ["manager"], shareSealKey: { kid: "seal", key: aes }, shellPaths: ["/", "/login", "/login.html"] },
   }
 }

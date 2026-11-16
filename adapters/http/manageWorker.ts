@@ -4,6 +4,7 @@ import type { PublicationReceipt, PublicationStatus, PublicationUploadStatus } f
 import { runtimeFor } from './manage-config'
 import { cancelBody, checkFraming, InputError, readCommand, uploadStream } from './publication-input'
 import { admitManageRequest, publicError } from './manage-edge'
+import { handleManageWeb } from '../web/manage'
 
 const headers = {
   'Cache-Control': 'no-store',
@@ -33,6 +34,8 @@ async function fetchManage(request: Request, env: Record<string, unknown>): Prom
   try {
     const runtime = await runtimeFor(env)
     if (!runtime) return errorResponse(request, 503, 'configuration_error')
+    const web = await handleManageWeb(request, runtime)
+    if (web) return web
     const { deps, service, transport } = runtime
     const url = new URL(request.url)
     const admission = admitManageRequest(request, url, deps.config.manageHost)

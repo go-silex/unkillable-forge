@@ -14,6 +14,7 @@ export interface ShareResult { readonly grantId: string; readonly key: string | 
 export interface PagePolicyView {
   readonly pageId: string; readonly artifactId: string
   readonly visibility: 'private' | 'shared' | 'public'; readonly policyEpoch: number; readonly contentVersion: number
+  readonly canonicalUrl: string | null; readonly shareUrlPrefix: string | null
   readonly grant: { readonly grantId: string; readonly mode: 'follow_active' | 'pinned'; readonly revisionId: string | null; readonly revealable: boolean } | null
 }
 

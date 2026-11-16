@@ -1,6 +1,6 @@
 import type { ReadInstanceConfig, ShareVerifierKey } from './instance-config'
 import { isVerifiedIdentity, type VerifiedIdentity } from './identity'
-import type { SubtreeOrTree } from './routing/grammar'
+import { canonicalUrl, shareUrl, type SubtreeOrTree } from './routing/grammar'
 import { isShareKey, shareKeyDigests } from './share-secrets'
 import type { ManageDeps, PagePolicyView } from './commands'
 import { PolicyError } from './guard'
@@ -262,16 +262,22 @@ export async function decideRead(db: D1Database, config: ReadInstanceConfig, sub
   } catch { return deny('unavailable') }
 }
 
-function policyPrincipalStatement(db: D1Database, actor: ManageActor, pageIds: readonly string[]): D1PreparedStatement {
-  return db.prepare(`SELECT p.status, p.authority_epoch,
+/** Catalogue-owned SQL expressions only; client values stay in D1 bindings.
+ * The caller binds ?1 to the authenticated principal ID. */
+export function policyPrincipalSql(pageIdsSql: string): string {
+  return `SELECT p.status, p.authority_epoch,
     EXISTS (SELECT 1 FROM role_grants g WHERE g.principal_id = p.principal_id AND g.revoked_at IS NULL AND (g.role = 'admin' OR (g.role = 'publisher' AND g.scope_kind = 'installation'))) AS global_authority,
-    NOT EXISTS (SELECT 1 FROM json_each(?2) j WHERE NOT EXISTS
+    NOT EXISTS (SELECT 1 FROM json_each(${pageIdsSql}) j WHERE NOT EXISTS
       (SELECT 1 FROM role_grants g WHERE g.principal_id = p.principal_id AND g.revoked_at IS NULL
         AND (g.role = 'admin' OR (g.role = 'publisher' AND (g.scope_kind = 'installation' OR (g.scope_kind = 'page' AND g.scope_page_id = j.value)))))) AS page_authority
-    FROM principals p WHERE p.principal_id = ?1`).bind(actor.principalId, JSON.stringify(pageIds))
+    FROM principals p WHERE p.principal_id = ?1`
 }
 
-function assertPolicyPrincipal(results: D1Result[], deps: ManageDeps, actor: ManageActor, pageCount: number): void {
+export function policyPrincipalStatement(db: D1Database, actor: ManageActor, pageIds: readonly string[]): D1PreparedStatement {
+  return db.prepare(policyPrincipalSql('?2')).bind(actor.principalId, JSON.stringify(pageIds))
+}
+
+export function assertPolicyPrincipal(results: D1Result[], deps: ManageDeps, actor: ManageActor, pageCount: number): void {
   if (!instanceMatches(results, deps.config.instanceId)) throw new PolicyError('instance_mismatch')
   const principal = results[1].results[0] as Row | undefined
   if (!principal || principal.status !== 'active') throw new PolicyError('unauthenticated')
@@ -308,12 +314,16 @@ export async function readPagePolicy(deps: ManageDeps, actor: ManageActor, pageI
     const results = await deps.db.batch([
       instanceStatement(deps.db),
       policyPrincipalStatement(deps.db, actor, [pageId]),
-      deps.db.prepare(`SELECT p.page_id, p.artifact_id, p.visibility, p.policy_epoch, a.content_version, g.grant_id, g.mode, g.pinned_revision_id, (g.sealed_key IS NOT NULL) AS revealable FROM pages p JOIN artifacts a ON a.artifact_id = p.artifact_id LEFT JOIN share_grants g ON g.page_id = p.page_id AND ${activeGrantSql('g')} WHERE p.page_id = ?1 AND p.tombstoned_at IS NULL`).bind(pageId),
+      deps.db.prepare(`SELECT p.page_id, p.artifact_id, p.visibility, p.policy_epoch, a.content_version, r.kind AS route_kind, r.route_key, g.grant_id, g.mode, g.pinned_revision_id, (g.sealed_key IS NOT NULL) AS revealable FROM pages p JOIN artifacts a ON a.artifact_id = p.artifact_id LEFT JOIN routes r ON r.page_id = p.page_id AND r.kind IN ('subtree', 'tree_page') LEFT JOIN share_grants g ON g.page_id = p.page_id AND ${activeGrantSql('g')} WHERE p.page_id = ?1 AND p.tombstoned_at IS NULL`).bind(pageId),
     ])
     assertPolicyPrincipal(results, deps, actor, 1)
     const row = results[2].results[0] as Row | undefined
     if (!row) return null
+    const route: SubtreeOrTree | null = row.route_kind === 'subtree' ? { kind: 'subtree', slug: row.route_key } : row.route_kind === 'tree_page' ? { kind: 'tree_page', pageRef: row.route_key } : null
+    const supportsShare = route && deps.config.shareGrammars.includes(route.kind === 'subtree' ? 'slug' : 'page')
     return { pageId: row.page_id, artifactId: row.artifact_id, visibility: row.visibility, policyEpoch: row.policy_epoch, contentVersion: row.content_version,
+      canonicalUrl: route ? `https://${deps.config.canonicalHost}${canonicalUrl(route)}` : null,
+      shareUrlPrefix: route && supportsShare ? shareUrl(deps.config, route, '').slice(0, -1) : null,
       grant: row.grant_id ? { grantId: row.grant_id, mode: row.mode, revisionId: row.pinned_revision_id, revealable: !!row.revealable } : null }
   } catch (error) { if (error instanceof PolicyError) throw error; throw new PolicyError('unavailable') }
 }
