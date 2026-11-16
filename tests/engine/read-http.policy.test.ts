@@ -5,7 +5,7 @@ import { importShare, setVisibility } from "../../domains/catalogue/commands"
 import { PublicationService } from "../../domains/publication"
 import { RevisionStore } from "../../domains/store/revision-store"
 import { actor, bootstrap, configs, instanceId, jwks, manageRequest } from "./fixtures/catalogue"
-import { body, content, documentCommand, publishDocument } from "./fixtures/publication"
+import { body, content, documentCommand, observeD1, publishDocument } from "./fixtures/publication"
 
 beforeEach(async () => { await bootstrap() })
 
@@ -97,5 +97,26 @@ describe("read HTTP policy and representation semantics", () => {
       expect(head.headers.get("content-range")).toBeNull()
       expect(await head.text()).toBe("")
     }
+  })
+  it("advertises read methods on POST without querying D1 or Store", async () => {
+    const config = await configs()
+    const observed = observeD1(env.DB)
+    const actualStore = new RevisionStore(env.REVISION_BYTES, instanceId)
+    let storeCalls = 0
+    const store = new Proxy(actualStore, {
+      get(target, property, receiver) {
+        if (property === "head" || property === "get") return (...args: unknown[]) => {
+          storeCalls++
+          return Reflect.apply(Reflect.get(target, property), target, args)
+        }
+        return Reflect.get(target, property, receiver)
+      },
+    })
+    const response = await handleRead(new Request("https://forge.example.test/api/catalogue", { method: "POST" }), { db: observed.db, config: config.read, jwks, nowSeconds: () => 100, store })
+    expect(response.status).toBe(405)
+    expect(response.headers.get("allow")?.split(/\s*,\s*/).sort()).toEqual(["GET", "HEAD"])
+    expect(observed.calls()).toBe(0)
+    expect(storeCalls).toBe(0)
+    await response.arrayBuffer()
   })
 })

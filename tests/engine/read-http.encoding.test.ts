@@ -5,7 +5,7 @@ import { setVisibility } from "../../domains/catalogue/commands"
 import { PublicationService } from "../../domains/publication"
 import { RevisionStore } from "../../domains/store/revision-store"
 import { actor, bootstrap, configs, instanceId, jwks } from "./fixtures/catalogue"
-import { body, content, documentCommand } from "./fixtures/publication"
+import { body, content, documentCommand, publishDocument } from "./fixtures/publication"
 
 beforeEach(async () => { await bootstrap() })
 
@@ -101,6 +101,10 @@ describe("read HTTP encoded resource paths and representations", () => {
     expect(stylesheet.status).toBe(200)
     const renderedCss = decodeRepresentation(stylesheet, await stylesheet.arrayBuffer())
     expect(renderedCss.text).toContain("café €")
+    const stylesheetHead = await s.request(cssPath, { method: "HEAD", headers })
+    expect(stylesheetHead.status).toBe(200)
+    expect(stylesheetHead.headers.get("content-type")).toBe(stylesheet.headers.get("content-type"))
+    expect(new Uint8Array(await stylesheetHead.arrayBuffer())).toHaveLength(0)
     const cssCharset = /@charset\s+["']([^"']+)["']/i.exec(renderedCss.text)?.[1]
     if (cssCharset) expect(new TextDecoder(cssCharset).encoding).toBe(renderedCss.encoding)
     const imagePath = /url\(["']?([^"')]+)["']?\)/.exec(renderedCss.text)?.[1]
@@ -109,5 +113,36 @@ describe("read HTTP encoded resource paths and representations", () => {
     const servedImage = await s.request(imagePath, { headers })
     expect(servedImage.status).toBe(200)
     expect(new Uint8Array(await servedImage.arrayBuffer())).toEqual(image.bytes)
+  })
+  it.each([
+    ["comment", '<!-- <meta charset="windows-1252"> -->'],
+    ["non-declaring metadata", '<meta name="description" content="charset=windows-1252">'],
+  ])("ignores %s when selecting the effective HTML encoding", async (_variant, inert) => {
+    const s = await setup()
+    const page = await documentCommand("effective-encoding", "/a/effective-encoding/index.html", `<!doctype html>${inert}<meta charset="utf-8"><p>café €</p>`)
+    const published = await publishDocument(s.publication, actor, page.command, page.bytes)
+    await setVisibility({ db: env.DB, config: s.config.manage, jwks, now: () => 10_000 }, actor, { pageId: page.pageId, artifactId: published.receipt.artifactId, expectedPolicyEpoch: 0, visibility: "public" })
+    const response = await s.request("/a/effective-encoding/")
+    expect(response.status).toBe(200)
+    const rendered = decodeRepresentation(response, await response.arrayBuffer())
+    expect(rendered.text).toContain("<p>café €</p>")
+    expect(rendered.text).not.toContain("cafÃ")
+  })
+
+  it("reports transformed windows-1252 representation metadata consistently for HEAD", async () => {
+    const s = await setup()
+    const page = await documentCommand("head-encoding", "/a/head-encoding/index.html", "")
+    const html = await bytesContent(Uint8Array.from([...new TextEncoder().encode('<meta charset="windows-1252"><p>caf'), 0xe9, ...new TextEncoder().encode("</p>")]))
+    const command = { ...page.command, files: [{ ...page.command.files[0], size: html.size, sha256: html.sha256, contentType: "text/html; charset=windows-1252" }] }
+    const published = await publishDocument(s.publication, actor, command, html.bytes)
+    await setVisibility({ db: env.DB, config: s.config.manage, jwks, now: () => 10_000 }, actor, { pageId: page.pageId, artifactId: published.receipt.artifactId, expectedPolicyEpoch: 0, visibility: "public" })
+    const get = await s.request("/a/head-encoding/")
+    expect(get.status).toBe(200)
+    const rendered = decodeRepresentation(get, await get.arrayBuffer())
+    expect(rendered.text).toContain("café")
+    const head = await s.request("/a/head-encoding/", { method: "HEAD" })
+    expect(head.status).toBe(200)
+    expect(head.headers.get("content-type")).toBe(get.headers.get("content-type"))
+    expect(new Uint8Array(await head.arrayBuffer())).toHaveLength(0)
   })
 })

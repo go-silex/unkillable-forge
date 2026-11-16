@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers"
 import { beforeEach, describe, expect, it } from "vitest"
+import * as csstree from "css-tree"
 import { handleRead } from "../../adapters/http/readWorker"
 import { setVisibility } from "../../domains/catalogue/commands"
 import { PublicationService } from "../../domains/publication"
@@ -128,5 +129,23 @@ describe("read HTTP browser origin and resource integrity", () => {
       const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(delivered)))
       expect(assertion.split(/\s+/)).toContain(`sha256-${btoa(String.fromCharCode(...hash))}`)
     }
+  })
+  it("keeps escaped CSS strings inside the style element without creating HTML nodes", async () => {
+    const css = '.demo::before{content:"\\3c /style>\\3c script>window.unexpectedExecution=1;\\3c /script>\\3c img id=unexpected>"}'
+    const s = await publish(`<!doctype html><html><head><style>${css}</style></head><body><p>Safe</p></body></html>`, [])
+    const response = await s.request("https://forge.example.test/a/origin/")
+    expect(response.status).toBe(200)
+    let scripts = 0, unexpected = 0, styles = 0, styleText = ""
+    await new HTMLRewriter()
+      .on("script", { element() { scripts++ } })
+      .on("#unexpected", { element() { unexpected++ } })
+      .on("style", { element() { styles++ }, text(text) { styleText += text.text } })
+      .transform(response).text()
+    expect(scripts).toBe(0)
+    expect(unexpected).toBe(0)
+    expect(styles).toBe(1)
+    const strings: string[] = []
+    csstree.walk(csstree.parse(styleText), node => { if (node.type === "String") strings.push(node.value) })
+    expect(strings).toContain("</style><script>window.unexpectedExecution=1;</script><img id=unexpected>")
   })
 })

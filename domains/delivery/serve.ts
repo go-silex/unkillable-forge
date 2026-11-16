@@ -1,6 +1,6 @@
 import type { ReadPlan } from '../catalogue/read'
 import type { RevisionStore } from '../store/revision-store'
-import { rewriteCss, rewriteHtml } from './rewrite'
+import { rewriteCss, rewriteHtml, transformedContentType } from './rewrite'
 
 export interface PinNamespace { readonly pageId: string; readonly revisionId: string }
 
@@ -25,6 +25,7 @@ export function textResponse(status: number, body: string, method = 'GET'): Resp
   const headers = securityHeaders()
   headers.set('content-type', 'text/plain; charset=utf-8')
   if (status === 404) headers.set('x-robots-tag', 'noindex, nofollow')
+  if (status === 405) headers.set('allow', 'GET, HEAD')
   return new Response(method === 'HEAD' ? null : body, { status, headers })
 }
 
@@ -66,7 +67,10 @@ export async function serve(request: Request, plan: ReadPlan, store: RevisionSto
     headers.set('content-length', String(partial ? end - start + 1 : info.size))
     if (partial) headers.set('content-range', `bytes ${start}-${end}/${info.size}`)
   }
-  if (request.method === 'HEAD') return new Response(null, { status: partial ? 206 : 200, headers })
+  if (request.method === 'HEAD') {
+    if (transformed) headers.set('content-type', transformedContentType(plan.resource.contentType))
+    return new Response(null, { status: partial ? 206 : 200, headers })
+  }
   const object = await store.get(ref, partial ? { range: { offset: start, length: end - start + 1 } } : undefined)
   if (!object || !('body' in object) || !object.body) return textResponse(404, 'Not found', request.method)
   if (object.size !== info.size || object.version !== info.version) { void object.body.cancel(); return textResponse(503, 'Unavailable', request.method) }

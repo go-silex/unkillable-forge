@@ -95,6 +95,22 @@ function rewriteSrcset(value: string, base: URL, origin: string, namespace: Name
   return result
 }
 
+async function htmlEncoding(prefix: string): Promise<string | undefined> {
+  let label: string | undefined
+  await new HTMLRewriter().on("meta", {
+    element(element) {
+      if (label) return
+      let candidate = element.getAttribute("charset")
+      if (!candidate && element.getAttribute("http-equiv")?.trim().toLowerCase() === "content-type") {
+        candidate = /(?:^|;)\s*charset\s*=\s*(?:"([^"]+)"|'([^']+)'|([^;\s]+))/i.exec(element.getAttribute("content") ?? "")?.slice(1).find(Boolean) ?? null
+      }
+      if (!candidate) return
+      try { label = new TextDecoder(candidate.trim()).encoding } catch { /* Continue to the next declaration. */ }
+    },
+  }).transform(new Response(prefix)).text()
+  return label
+}
+
 async function decodedText(response: Response, kind: "html" | "css"): Promise<string> {
   const bytes = new Uint8Array(await response.arrayBuffer())
   const type = response.headers.get("content-type") ?? ""
@@ -106,9 +122,13 @@ async function decodedText(response: Response, kind: "html" | "css"): Promise<st
     const prefix = new TextDecoder("windows-1252").decode(bytes.subarray(0, 1024))
     label = kind === "css"
       ? /^@charset\s+["']([^"']+)["'];/i.exec(prefix)?.[1]
-      : /<meta\s[^>]*charset\s*=\s*["']?\s*([^\s"'/>;]+)/i.exec(prefix)?.[1]
+      : await htmlEncoding(prefix)
   }
   return new TextDecoder(label ?? "utf-8", { fatal: true }).decode(bytes)
+}
+
+export function transformedContentType(type: string): string {
+  return `${type.replace(/;\s*charset\s*=\s*(?:"[^"]*"|'[^']*'|[^;\s]*)/ig, "")}; charset=utf-8`
 }
 
 function transformedHeaders(response: Response): Headers {
@@ -118,7 +138,7 @@ function transformedHeaders(response: Response): Headers {
   headers.delete("etag")
   headers.delete("content-md5")
   const type = headers.get("content-type")
-  if (type) headers.set("content-type", `${type.replace(/;\s*charset\s*=\s*(?:"[^"]*"|'[^']*'|[^;\s]*)/ig, "")}; charset=utf-8`)
+  if (type) headers.set("content-type", transformedContentType(type))
   return headers
 }
 
@@ -267,7 +287,10 @@ export async function rewriteHtml(response: Response, options: HtmlRewriteOption
     text(text) {
       styleText += text.text
       if (text.lastInTextNode) {
-        text.replace(rewriteCssText(styleText, base, documentUrl.origin, options, "stylesheet"), { html: true })
+        const css = rewriteCssText(styleText, base, documentUrl.origin, options, "stylesheet")
+        // CSS escaping keeps the token value while preventing HTML's raw-text
+        // parser from interpreting generated text as a closing style tag.
+        text.replace(css.replace(/<(?=\/style(?:[\t\n\f\r />]|$))/gi, "\\3c "), { html: true })
         styleText = ""
       } else {
         text.remove()
