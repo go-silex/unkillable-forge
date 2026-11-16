@@ -240,7 +240,7 @@ Zone Gosilex établie avec le grant opérateur existant rafraîchi ; DNS/Access 
 
 ## Lots et traçabilité
 
-Quatre lots sur seize livrés : F01, F02, F03 et F06.
+Cinq lots sur seize livrés : F01, F02, F03, F04 et F06.
 
 ### Vague A
 
@@ -256,8 +256,8 @@ Quatre lots sur seize livrés : F01, F02, F03 et F06.
 | Lot | État | Dépendances bloquantes |
 |---|---|---|
 | F04 | **Livré** ; `~/.omp/wt/unkillable-forge/feat-F04-publication`, `feat/F04-publication` | [PR #10](https://github.com/go-silex/unkillable-forge/pull/10), head `607c4297a10c1e82ad011c51413a49362bccb445`, merge `2999c69e7cfd441b433d9536e0265212209e4833`. F03/F06 satisfaits ; deux revues CLEAR et CI43838686150/secrets43838686175 réussies. Création+mise à jour32Mio et preuves D1/R2 acquises ; campagne jointe retirée du gate, jamais déclarée réussie. Aucune bascule de production |
-| F05 | Implémentation en intégration, **non livré** ; `~/.omp/wt/unkillable-forge/feat-F05-serving`, `feat/F05-serving`, base2999c69 | F03/F04 acceptés. Lecture, pinning et gestion web à vérifier ; parité réelle du corpus, revue finale, CI et merge encore dus |
-| F07 | Implémenté et smoke ciblé réussi, **non livré** ; `~/.omp/wt/unkillable-forge/feat-F07-remote-mcp`, `feat/F07-remote-mcp`, base2999c69 | F04/F06 acceptés. Trois fichiers/18 tests natifs MCP/état et typage réussis ; revue indépendante du SHA final, CI requise et merge encore dus. Aucun déploiement ni publication métier depuis les trois clients revendiqué |
+| F05 | Implémenté, preuve navigateur en cours, **non livré** ; `~/.omp/wt/unkillable-forge/feat-F05-serving`, `feat/F05-serving`, base2999c69 | F03/F04 acceptés. Trois fichiers/33 tests natifs et deux projets TypeScript réussis ; lien gestion par page et retrait des injections legacy connues couverts. Navigateur réel local, revue du SHA final, CI et merge encore dus ; aucun déploiement ni replay exhaustif du corpus publié revendiqué |
+| F07 | Corrections vérifiées localement, **non livré** ; `~/.omp/wt/unkillable-forge/feat-F07-remote-mcp`, `feat/F07-remote-mcp`, base2999c69 | [PR draft #11](https://github.com/go-silex/unkillable-forge/pull/11), premier head494f3fcd. Trois revues NOT_CLEAR ont identifié une appartenance scellée incomplète avec fuite de métadonnées et des tombstones perdues ; RED natif réel7/7 acquis. Corrections Catalogue/Publication puis trois fichiers/26 tests natifs et deux projets TypeScript réussis ; nouveau SHA final, revues, CI requise et merge encore dus. Aucun déploiement ni publication métier depuis les trois clients revendiqué |
 | F08 | Non démarré | F04, F05, F06, F07 ; worktrees consommateurs distincts |
 
 ### Vague C

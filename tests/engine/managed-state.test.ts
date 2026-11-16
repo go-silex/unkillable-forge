@@ -11,6 +11,8 @@ const deps = async () => ({ db: env.DB, config: (await configs()).manage, jwks, 
 beforeEach(async () => {
   await bootstrap()
   await pageFixture()
+  // This policy-only fixture has no native seal/session; model materialized imported history.
+  await env.DB.prepare("UPDATE revisions SET origin = 'imported' WHERE revision_id = ?").bind(revisionId).run()
   await env.DB.batch([
     env.DB.prepare("INSERT INTO pages (page_id, artifact_id, visibility, policy_epoch, created_at, tombstoned_at) VALUES (?, ?, 'shared', 3, 1, 2)").bind(sibling, artifactId),
     env.DB.prepare("INSERT INTO principals (principal_id, issuer, subject, created_at) VALUES (?, 'https://team.cloudflareaccess.com', 'scoped', 1)").bind(scopedId),

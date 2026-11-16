@@ -1,6 +1,6 @@
 import { PolicyError } from '../catalogue/guard'
 import { requireManageActor, type ManageActor } from '../catalogue/principals'
-import { managedAuthorityStatements, assertManagedAuthority, managedInventoryPrincipalStatements, assertManagedInventoryPrincipal, managedRevisionAuthorityStatement, decodeManagedRevisionAuthority, managedRevisionInventorySql } from '../catalogue/managed-state'
+import { managedArtifactAuthorityStatements, assertManagedArtifactAuthority, managedAuthorityStatements, assertManagedAuthority, managedInventoryPrincipalStatements, assertManagedInventoryPrincipal, managedRevisionAuthorityStatement, decodeManagedRevisionAuthority, managedRevisionInventorySql } from '../catalogue/managed-state'
 import type { ManagedPage } from '../catalogue/managed-state'
 import type { PublicationDeps, ResourceKind } from './types'
 
@@ -14,7 +14,7 @@ export type ManifestItem = { readonly path: string; readonly kind: ResourceKind;
 export interface ManifestState { readonly artifactId: string; readonly activeRevisionId: string | null; readonly contentVersion: number; readonly revision: RevisionView; readonly section: ManifestSection; readonly items: readonly ManifestItem[]; readonly nextCursor: string | null }
 export interface RevisionInventory { readonly artifactId: string; readonly activeRevisionId: string | null; readonly contentVersion: number; readonly revisions: readonly RevisionView[]; readonly nextCursor: string | null }
 type ArtifactRow = { active_revision_id: string | null; content_version: number }
-type RevisionRow = { revision_id: string; manifest_sha256: string; sealed_at: number; discarded_at: number | null; purged_at: number | null; committed: number }
+type RevisionRow = { revision_id: string; manifest_sha256: string; sealed_at: number; discarded_at: number | null; purged_at: number | null; committed: number; origin: 'published' | 'imported'; sealed_session_id: string | null }
 type InventoryRow = { revisions: number; discarded: number; purged: number }
 type Cursor = { v: 1; instance: string; principal: string; epoch: number; artifact: string; kind: string; selected: string | null; active: string | null; version: number; identity: string | null; policy: string; inventory: string; key: string[] }
 
@@ -50,8 +50,11 @@ function artifactStatement(deps: PublicationDeps, artifactId: string): D1Prepare
   return deps.db.prepare('SELECT active_revision_id,content_version FROM artifacts WHERE artifact_id=?').bind(artifactId)
 }
 function revisionStatement(deps: PublicationDeps, artifactId: string, revisionId: string | null): D1PreparedStatement {
-  return deps.db.prepare(`SELECT r.revision_id,r.manifest_sha256,r.sealed_at,d.discarded_at,d.purged_at,
-    EXISTS(SELECT 1 FROM publication_events e WHERE e.action='commit' AND e.instance_id=?3 AND e.artifact_id=r.artifact_id AND e.revision_id=r.revision_id) AS committed
+  return deps.db.prepare(`SELECT r.revision_id,r.origin,r.manifest_sha256,r.sealed_at,d.discarded_at,d.purged_at,
+    EXISTS(SELECT 1 FROM publication_events e WHERE e.action='commit' AND e.instance_id=?3 AND e.artifact_id=r.artifact_id AND e.revision_id=r.revision_id) AS committed,
+    (SELECT s.session_id FROM publication_events e JOIN publication_sessions s ON s.session_id=e.session_id
+      WHERE e.action='seal' AND e.verdict='ok' AND e.instance_id=?3 AND e.artifact_id=r.artifact_id AND e.revision_id=r.revision_id
+        AND s.instance_id=e.instance_id AND s.artifact_id=e.artifact_id AND s.revision_id=e.revision_id AND s.request_digest=e.request_digest) AS sealed_session_id
     FROM revisions r LEFT JOIN revision_discards d ON d.revision_id=r.revision_id
     WHERE r.artifact_id=?1 AND r.revision_id=COALESCE(?2,(SELECT active_revision_id FROM artifacts WHERE artifact_id=?1))`).bind(artifactId, revisionId, deps.config.instanceId)
 }
@@ -71,8 +74,8 @@ function wrap(error: unknown): never { if (error instanceof PolicyError) throw e
 export async function readArtifactState(deps: PublicationDeps, actor: ManageActor, input: ArtifactTarget): Promise<ArtifactState> {
   validateTarget(input.artifactId); requireManageActor(actor, deps)
   try {
-    const results = await deps.db.batch([...managedAuthorityStatements(deps, actor, input.artifactId, null), artifactStatement(deps, input.artifactId)])
-    const authority = assertManagedAuthority(results, deps, actor)
+    const results = await deps.db.batch([...managedArtifactAuthorityStatements(deps, actor, input.artifactId), artifactStatement(deps, input.artifactId)])
+    const authority = assertManagedArtifactAuthority(results, deps, actor)
     const artifact = artifactFrom(results[3])
     return { artifactId: input.artifactId, activeRevisionId: artifact.active_revision_id, contentVersion: artifact.content_version, pages: authority.pages }
   } catch (error) { return wrap(error) }
@@ -86,10 +89,24 @@ export async function readManifest(deps: PublicationDeps, actor: ManageActor, in
   const limit = limitOf(input.limit), cursor = parseCursor(input.cursor), key = cursor?.key ?? []
   const selected = input.revisionId ?? null
   const revisionExpr = 'COALESCE(?2,(SELECT active_revision_id FROM artifacts WHERE artifact_id=?1))'
+  // A native seal freezes the staging declarations before its event is committed.
+  // New pages and their edges are deliberately not materialized until activation.
+  const sealedSession = `SELECT s.session_id FROM publication_events e JOIN publication_sessions s ON s.session_id=e.session_id
+    WHERE e.action='seal' AND e.verdict='ok' AND e.instance_id=(SELECT instance_id FROM instance_meta WHERE singleton=1)
+      AND e.artifact_id=?1 AND e.revision_id=${revisionExpr} AND s.instance_id=e.instance_id
+      AND s.artifact_id=e.artifact_id AND s.revision_id=e.revision_id AND s.request_digest=e.request_digest
+      AND EXISTS (SELECT 1 FROM revisions r WHERE r.artifact_id=e.artifact_id AND r.revision_id=e.revision_id AND r.origin='published')`
+  const importedRevision = `SELECT revision_id FROM revisions WHERE artifact_id=?1 AND revision_id=${revisionExpr} AND origin='imported'`
   const statements: Record<ManifestSection, string> = {
     files: `SELECT path,kind,sha256,size,content_type FROM revision_resources WHERE revision_id=${revisionExpr} AND path>?3 ORDER BY path LIMIT ?4`,
-    pages: `SELECT page_id,document_path,metadata_json FROM revision_pages WHERE revision_id=${revisionExpr} AND page_id>?3 ORDER BY page_id LIMIT ?4`,
-    edges: `SELECT owner_page_id,path,provider_artifact_id FROM resource_owners WHERE owner_revision_id=${revisionExpr} AND (owner_page_id>?3 OR (owner_page_id=?3 AND path>?4)) ORDER BY owner_page_id,path LIMIT ?5`,
+    pages: `SELECT page_id,document_path,metadata_json FROM (
+      SELECT page_id,document_path,metadata_json FROM publication_pages WHERE session_id=(${sealedSession}) AND disposition<>'drop'
+      UNION ALL SELECT page_id,document_path,metadata_json FROM revision_pages WHERE revision_id=(${importedRevision})
+    ) WHERE page_id>?3 ORDER BY page_id LIMIT ?4`,
+    edges: `SELECT owner_page_id,path,provider_artifact_id FROM (
+      SELECT owner_page_id,path,provider_artifact_id FROM publication_edges WHERE session_id=(${sealedSession})
+      UNION ALL SELECT owner_page_id,path,provider_artifact_id FROM resource_owners WHERE owner_revision_id=(${importedRevision})
+    ) WHERE owner_page_id>?3 OR (owner_page_id=?3 AND path>?4) ORDER BY owner_page_id,path LIMIT ?5`,
   }
   const query = deps.db.prepare(statements[input.section])
   const entries = input.section === 'edges' ? query.bind(input.artifactId, selected, key[0] ?? '', key[1] ?? '', limit + 1) : query.bind(input.artifactId, selected, key[0] ?? '', limit + 1)
@@ -98,6 +115,7 @@ export async function readManifest(deps: PublicationDeps, actor: ManageActor, in
     const authority = assertManagedAuthority(results, deps, actor), artifact = artifactFrom(results[3])
     const revision = results[4].results[0] as RevisionRow | undefined
     if (!revision) throw new PolicyError('not_found')
+    if (revision.origin === 'published' && !revision.sealed_session_id) throw new PolicyError('invalid_state')
     const policy = await fingerprint(authority.policyFingerprint)
     const inventory = await fingerprint([revision.discarded_at, revision.purged_at])
     const base = context(deps, actor, input.artifactId, input.section, revision.revision_id, artifact, revision.manifest_sha256, policy, inventory, [])

@@ -36,6 +36,40 @@ async function multiPage(publication: PublicationService) {
   const receipt = await publication.commit(actor, session.sessionId)
   return { a, b, asset, paths, command, session, receipt }
 }
+async function sealedNewSibling(disposition: "keep" | "drop") {
+  const { deps, publication } = await setup()
+  const p = await documentCommand("sealed-existing", "/a/sealed-existing/index.html", "existing")
+  const initial = await publishDocument(publication, actor, p.command, p.bytes)
+  const principal = `pr_${"b".repeat(26)}`
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO principals (principal_id,issuer,subject,created_at) VALUES (?,'https://team.cloudflareaccess.com','sealed-scoped',1)").bind(principal),
+    env.DB.prepare("INSERT INTO role_grants (role_grant_id,principal_id,role,scope_kind,scope_page_id,origin,granted_at,granted_by) VALUES (?,?,'publisher','page',?,'granted',1,?)").bind(`rg_${"b".repeat(26)}`, principal, p.pageId, actor.principalId),
+  ])
+  const scoped = await authenticatedActor("sealed-scoped")
+  const q = await documentCommand("sealed-sibling", "/a/sealed-sibling/index.html", "new document")
+  const asset = await content("new asset")
+  const assetPath = "/a/sealed-sibling/data.js"
+  const pPage = disposition === "keep"
+    ? { ...p.command.pages[0], disposition: "keep" as const, expectedPolicyEpoch: 0 }
+    : { pageId: p.pageId, disposition: "drop" as const, documentPath: null, metadata: null, expectedPolicyEpoch: 0 }
+  const command: BeginCommand = {
+    idempotencyKey: `sealed-${disposition}`, artifactId: initial.session.artifactId,
+    expectedRevisionId: initial.session.revisionId, expectedContentVersion: initial.receipt.contentVersion,
+    files: [
+      ...(disposition === "keep" ? [{ ...p.command.files[0], source: "base" as const }] : []),
+      q.command.files[0], { path: assetPath, kind: "asset", sha256: asset.sha256, size: asset.size, contentType: "application/javascript", source: "client" },
+    ],
+    pages: [pPage, { ...q.command.pages[0], metadata: { title: "New sibling" } }],
+    edges: [{ ownerPageId: q.pageId, path: assetPath, providerArtifactId: null }],
+  }
+  const candidate = await publication.begin(actor, command)
+  if (disposition === "keep") await publication.materialize(actor, candidate.sessionId, p.command.files[0].path)
+  await publication.upload(actor, candidate.sessionId, q.command.files[0].path, body(q.bytes))
+  await publication.upload(actor, candidate.sessionId, assetPath, body(asset.bytes))
+  await publication.seal(actor, candidate.sessionId)
+  return { deps, scoped, p, q, assetPath, candidate, initial }
+}
+
 
 describe("publication state", () => {
   it("reconstructs every file, page and ownership edge through keyset pages on a fresh client", async () => {
@@ -150,5 +184,91 @@ describe("publication state", () => {
     expect((await readRevisions(deps, actor, { artifactId: empty })).revisions).toEqual([])
     await expect(readArtifactState(deps, scoped, { artifactId: empty })).rejects.toMatchObject({ code: "forbidden" })
     await expect(readRevisions(deps, scoped, { artifactId: empty })).rejects.toMatchObject({ code: "forbidden" })
+  })
+  it.each(["keep", "drop"] as const)("omits a sealed %s plus new sibling from page-scoped revision inventory", async disposition => {
+    const { deps, scoped, candidate, initial } = await sealedNewSibling(disposition)
+    const inventory = await readRevisions(deps, scoped, { artifactId: candidate.artifactId })
+    expect(inventory.revisions.map(revision => revision.revisionId)).toContain(initial.session.revisionId)
+    expect(inventory.revisions.map(revision => revision.revisionId)).not.toContain(candidate.revisionId)
+  })
+
+  it.each(["keep", "drop"] as const)("denies page-scoped manifest access to a sealed %s plus new sibling", async disposition => {
+    const { deps, scoped, candidate } = await sealedNewSibling(disposition)
+    for (const section of ["files", "pages", "edges"] as const) {
+      await expect(readManifest(deps, scoped, { artifactId: candidate.artifactId, revisionId: candidate.revisionId, section })).rejects.toMatchObject({ code: "forbidden" })
+    }
+  })
+
+  it.each(["keep", "drop"] as const)("returns the complete sealed %s plus new sibling manifest to an installation publisher", async disposition => {
+    const { deps, p, q, assetPath, candidate } = await sealedNewSibling(disposition)
+    const target = { artifactId: candidate.artifactId, revisionId: candidate.revisionId }
+    const pages = await readManifest(deps, actor, { ...target, section: "pages" })
+    expect(pages.revision.previouslyActivated).toBe(false)
+    expect(pages.items).toEqual(expect.arrayContaining([{ pageId: q.pageId, documentPath: q.command.pages[0].documentPath, metadata: { title: "New sibling" } }]))
+    expect(pages.items).toHaveLength(disposition === "keep" ? 2 : 1)
+    if (disposition === "keep") expect(pages.items).toEqual(expect.arrayContaining([{ pageId: p.pageId, documentPath: p.command.pages[0].documentPath, metadata: {} }]))
+    else expect(pages.items).not.toEqual(expect.arrayContaining([expect.objectContaining({ pageId: p.pageId })]))
+    const edges = await readManifest(deps, actor, { ...target, section: "edges" })
+    expect(edges.items).toEqual([{ ownerPageId: q.pageId, path: assetPath, providerArtifactId: candidate.artifactId }])
+    const files = await readManifest(deps, actor, { ...target, section: "files" })
+    expect(files.items).toEqual(expect.arrayContaining([expect.objectContaining({ path: q.command.files[0].path }), expect.objectContaining({ path: assetPath })]))
+  })
+
+  it("reads complete metadata for a sealed new artefact without activating its page", async () => {
+    const { deps, publication } = await setup()
+    const q = await documentCommand("sealed-new", "/a/sealed-new/index.html", "new page")
+    const asset = await content("new asset"), path = "/a/sealed-new/a.js"
+    const command: BeginCommand = {
+      ...q.command,
+      files: [...q.command.files, { path, kind: "asset", sha256: asset.sha256, size: asset.size, contentType: "application/javascript", source: "client" }],
+      pages: [{ ...q.command.pages[0], metadata: { title: "New artefact" } }],
+      edges: [{ ownerPageId: q.pageId, path, providerArtifactId: null }],
+    }
+    const session = await publication.begin(actor, command)
+    await publication.upload(actor, session.sessionId, command.files[0].path, body(q.bytes))
+    await publication.upload(actor, session.sessionId, path, body(asset.bytes))
+    await publication.seal(actor, session.sessionId)
+    const target = { artifactId: session.artifactId, revisionId: session.revisionId }
+    const state = await readArtifactState(deps, actor, target)
+    expect(state).toMatchObject({ activeRevisionId: null, contentVersion: 0, pages: [] })
+    const pages = await readManifest(deps, actor, { ...target, section: "pages" })
+    expect(pages.revision.previouslyActivated).toBe(false)
+    expect(pages.items).toEqual([{ pageId: q.pageId, documentPath: q.command.pages[0].documentPath, metadata: { title: "New artefact" } }])
+    expect((await readManifest(deps, actor, { ...target, section: "edges" })).items).toEqual([{ ownerPageId: q.pageId, path, providerArtifactId: session.artifactId }])
+  })
+
+  it("returns only authorized tombstones after real unpublication without granting empty or unrelated scope", async () => {
+    const { deps, publication } = await setup()
+    const { a, b, session, receipt } = await multiPage(publication)
+    const other = await documentCommand("unrelated", "/a/unrelated/index.html", "unrelated")
+    await publishDocument(publication, actor, other.command, other.bytes)
+    const p = `pr_${"b".repeat(26)}`, unrelated = `pr_${"c".repeat(26)}`, roleless = `pr_${"d".repeat(26)}`
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO principals (principal_id,issuer,subject,created_at) VALUES (?,'https://team.cloudflareaccess.com','tombstone-scoped',1)").bind(p),
+      env.DB.prepare("INSERT INTO principals (principal_id,issuer,subject,created_at) VALUES (?,'https://team.cloudflareaccess.com','tombstone-unrelated',1)").bind(unrelated),
+      env.DB.prepare("INSERT INTO principals (principal_id,issuer,subject,created_at) VALUES (?,'https://team.cloudflareaccess.com','tombstone-roleless',1)").bind(roleless),
+      env.DB.prepare("INSERT INTO role_grants (role_grant_id,principal_id,role,scope_kind,scope_page_id,origin,granted_at,granted_by) VALUES (?,?,'publisher','page',?,'granted',1,?)").bind(`rg_${"b".repeat(26)}`, p, a.pageId, actor.principalId),
+      env.DB.prepare("INSERT INTO role_grants (role_grant_id,principal_id,role,scope_kind,scope_page_id,origin,granted_at,granted_by) VALUES (?,?,'publisher','page',?,'granted',1,?)").bind(`rg_${"c".repeat(26)}`, unrelated, other.pageId, actor.principalId),
+    ])
+    const scoped = await authenticatedActor("tombstone-scoped")
+    const outsider = await authenticatedActor("tombstone-unrelated")
+    const noRole = await authenticatedActor("tombstone-roleless")
+    const target = { artifactId: session.artifactId }
+    await expect(readArtifactState(deps, scoped, target)).rejects.toMatchObject({ code: "forbidden" })
+    const unpublished = await publication.unpublish(actor, { idempotencyKey: "unpublish-state", artifactId: session.artifactId, expectedContentVersion: receipt.contentVersion })
+    const expected = (pageId: string) => ({ pageId, artifactId: session.artifactId, visibility: "private", policyEpoch: 1, tombstoned: true, route: null })
+    const global = await readArtifactState(deps, actor, target)
+    expect(global).toMatchObject({ activeRevisionId: null, contentVersion: unpublished.contentVersion })
+    expect(global.pages).toEqual(expect.arrayContaining([expected(a.pageId), expected(b.pageId)]))
+    expect(global.pages).toHaveLength(2)
+    const visible = await readArtifactState(deps, scoped, target)
+    expect(visible).toMatchObject({ activeRevisionId: null, contentVersion: unpublished.contentVersion })
+    expect(visible.pages).toEqual([expected(a.pageId)])
+    await expect(readArtifactState(deps, outsider, target)).rejects.toMatchObject({ code: "forbidden" })
+    await expect(readArtifactState(deps, noRole, target)).rejects.toMatchObject({ code: "forbidden" })
+    const empty = `ar_${"z".repeat(26)}`
+    await env.DB.prepare("INSERT INTO artifacts (artifact_id,origin,created_at) VALUES (?,'published',1)").bind(empty).run()
+    expect((await readArtifactState(deps, actor, { artifactId: empty })).pages).toEqual([])
+    await expect(readArtifactState(deps, scoped, { artifactId: empty })).rejects.toMatchObject({ code: "forbidden" })
   })
 })

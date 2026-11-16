@@ -25,10 +25,36 @@ function decodePage(row: PageRow): ManagedPage {
 }
 // Selectors are domain-owned SQL; request values remain bound parameters.
 const principalSql = (selector: string) => policyPrincipalSql(`(${selector})`)
+// A published revision is readable only with its exact seal/session evidence.
+const sealSession = (revision: string) => `SELECT s.session_id FROM publication_sessions s
+  JOIN publication_events e ON e.session_id = s.session_id AND e.action = 'seal' AND e.verdict = 'ok'
+    AND e.instance_id = s.instance_id AND e.artifact_id = s.artifact_id AND e.revision_id = s.revision_id AND e.request_digest = s.request_digest
+  JOIN instance_meta im ON im.singleton = 1 AND im.instance_id = s.instance_id
+  JOIN revisions sealed ON sealed.revision_id = s.revision_id AND sealed.artifact_id = s.artifact_id AND sealed.origin = 'published'
+  WHERE s.artifact_id = ?3 AND s.revision_id = ${revision}`
+const completeEvidence = (revision: string) => `NOT EXISTS (
+  SELECT 1 FROM revisions evidence WHERE evidence.artifact_id = ?3 AND evidence.revision_id = ${revision}
+    AND ((evidence.origin = 'imported' AND NOT EXISTS (SELECT 1 FROM revision_pages rp WHERE rp.revision_id = evidence.revision_id))
+    OR (evidence.origin = 'published' AND (
+      NOT EXISTS (SELECT 1 FROM publication_pages pp WHERE pp.session_id IN (${sealSession(revision)}) AND pp.disposition <> 'drop')
+      OR EXISTS (SELECT 1 FROM revision_pages rp WHERE rp.revision_id = evidence.revision_id AND NOT EXISTS (
+        SELECT 1 FROM publication_pages pp WHERE pp.session_id IN (${sealSession(revision)}) AND pp.page_id = rp.page_id
+          AND pp.disposition <> 'drop' AND pp.document_path = rp.document_path AND pp.metadata_json = rp.metadata_json))
+      OR EXISTS (SELECT 1 FROM publication_pages pp WHERE pp.session_id IN (${sealSession(revision)}) AND pp.disposition IN ('keep','restore')
+        AND NOT EXISTS (SELECT 1 FROM revision_pages rp WHERE rp.revision_id = evidence.revision_id AND rp.page_id = pp.page_id))
+      OR EXISTS (SELECT 1 FROM revision_resources rr WHERE rr.revision_id = evidence.revision_id AND rr.kind = 'document'
+        AND NOT EXISTS (SELECT 1 FROM publication_pages pp WHERE pp.session_id IN (${sealSession(revision)}) AND pp.disposition <> 'drop' AND pp.document_path = rr.path))
+      OR EXISTS (SELECT 1 FROM publication_pages pp WHERE pp.session_id IN (${sealSession(revision)}) AND pp.disposition <> 'drop'
+        AND NOT EXISTS (SELECT 1 FROM revision_resources rr WHERE rr.revision_id = evidence.revision_id AND rr.kind = 'document' AND rr.path = pp.document_path))
+    ))))`
+const requiresGlobal = (revision: string) => `EXISTS (SELECT 1 FROM publication_pages pp
+  WHERE pp.session_id IN (${sealSession(revision)}) AND pp.disposition = 'new'
+    AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.page_id = pp.page_id AND p.artifact_id = ?3))`
 const unionSelector = (revision: string) => `SELECT COALESCE(json_group_array(page_id), '[]') FROM (
   SELECT page_id FROM pages WHERE artifact_id = ?3 AND tombstoned_at IS NULL
   UNION SELECT rp.page_id FROM revision_pages rp JOIN revisions rev ON rev.revision_id = rp.revision_id
     WHERE rev.artifact_id = ?3 AND rev.revision_id = ${revision}
+  UNION SELECT pp.page_id FROM publication_pages pp WHERE pp.session_id IN (${sealSession(revision)}) AND pp.disposition <> 'drop'
 )`
 const instanceStatement = (db: D1Database) => db.prepare('SELECT instance_id FROM instance_meta WHERE singleton = 1')
 const projection = (selector: string) => `SELECT ${pageColumns} ${pageJoin} WHERE page.page_id IN (SELECT value FROM json_each((${selector}))) ORDER BY page.page_id`
@@ -38,13 +64,37 @@ export function managedAuthorityStatements(deps: ManageDeps, actor: ManageActor,
   requireManageActor(actor, deps)
   const selector = unionSelector('COALESCE(?4, (SELECT active_revision_id FROM artifacts WHERE artifact_id = ?3))')
   return [instanceStatement(deps.db),
-    deps.db.prepare(principalSql(selector)).bind(actor.principalId, null, artifactId, revisionId),
+    deps.db.prepare(`SELECT authority.*, json_array_length((${selector})) AS scope_count,
+      ${completeEvidence('COALESCE(?4, (SELECT active_revision_id FROM artifacts WHERE artifact_id = ?3))')} AS complete_evidence,
+      ${requiresGlobal('COALESCE(?4, (SELECT active_revision_id FROM artifacts WHERE artifact_id = ?3))')} AS requires_global
+      FROM (${principalSql(selector)}) authority`).bind(actor.principalId, null, artifactId, revisionId),
     deps.db.prepare(projection(selector)).bind(null, null, artifactId, revisionId)]
 }
 export function assertManagedAuthority(results: D1Result[], deps: ManageDeps, actor: ManageActor): { pages: ManagedPage[]; policyFingerprint: string } {
   requireManageActor(actor, deps)
+  const principal = results[1].results[0] as { scope_count: number; complete_evidence: number; requires_global: number; global_authority: number } | undefined
+  assertPolicyPrincipal(results, deps, actor, principal?.scope_count ?? 0)
+  if (principal?.requires_global && !principal.global_authority) throw new PolicyError('forbidden')
+  if (!principal?.complete_evidence) throw new PolicyError('invalid_state')
   const pages = (results[2].results as PageRow[]).map(decodePage)
-  assertPolicyPrincipal(results, deps, actor, pages.length)
+  return { pages, policyFingerprint: JSON.stringify(pages) }
+}
+/** Artifact state authorizes every live page and exposes only individually authorized tombstones. */
+export function managedArtifactAuthorityStatements(deps: ManageDeps, actor: ManageActor, artifactId: string): D1PreparedStatement[] {
+  requireManageActor(actor, deps)
+  const live = `SELECT COALESCE(json_group_array(page_id), '[]') FROM pages WHERE artifact_id = ?3 AND tombstoned_at IS NULL`
+  const visible = `SELECT ${pageColumns} ${pageJoin} WHERE page.artifact_id = ?3 AND (page.tombstoned_at IS NULL OR
+    (SELECT page_authority FROM (${principalSql('SELECT json_array(page.page_id)')})) = 1) ORDER BY page.page_id`
+  return [instanceStatement(deps.db), deps.db.prepare(principalSql(live)).bind(actor.principalId, null, artifactId),
+    deps.db.prepare(visible).bind(actor.principalId, null, artifactId)]
+}
+export function assertManagedArtifactAuthority(results: D1Result[], deps: ManageDeps, actor: ManageActor): { pages: ManagedPage[]; policyFingerprint: string } {
+  requireManageActor(actor, deps)
+  const pages = (results[2].results as PageRow[]).map(decodePage)
+  const liveCount = pages.filter(page => !page.tombstoned).length
+  const principal = results[1].results[0] as { global_authority: number } | undefined
+  assertPolicyPrincipal(results, deps, actor, liveCount || (pages.length ? 1 : 0))
+  if (!liveCount && !pages.length && !principal?.global_authority) throw new PolicyError('forbidden')
   return { pages, policyFingerprint: JSON.stringify(pages) }
 }
 /** SQL for an authorized revision inventory, to be joined before keyset pagination.
@@ -54,11 +104,11 @@ export function managedRevisionInventorySql(deps: ManageDeps, actor: ManageActor
   const selector = unionSelector('inventory.revision_id')
   const policy = principalSql(selector)
   return `SELECT revision_id, policy_fingerprint FROM (SELECT inventory.revision_id,
-    (SELECT CASE WHEN json_array_length((${selector})) = 0 THEN authority.global_authority ELSE authority.page_authority END FROM (${policy}) authority) AS allowed,
+    (SELECT CASE WHEN json_array_length((${selector})) = 0 OR ${requiresGlobal('inventory.revision_id')} THEN authority.global_authority ELSE authority.page_authority END FROM (${policy}) authority) AS allowed,
     (SELECT json_group_array(json_object('pageId', selected.page_id, 'artifactId', selected.artifact_id, 'visibility', selected.visibility,
       'policyEpoch', selected.policy_epoch, 'tombstonedAt', selected.tombstoned_at, 'routeKind', selected.route_kind, 'routeKey', selected.route_key))
       FROM (${projection(selector)}) selected) AS policy_fingerprint
-    FROM revisions inventory WHERE inventory.artifact_id = ?3) WHERE allowed = 1`
+    FROM revisions inventory WHERE inventory.artifact_id = ?3 AND ${completeEvidence('inventory.revision_id')}) WHERE allowed = 1`
 }
 /** Validate an inventory principal without requiring a live active revision. */
 export function managedInventoryPrincipalStatements(deps: ManageDeps, actor: ManageActor, artifactId: string): D1PreparedStatement[] {
