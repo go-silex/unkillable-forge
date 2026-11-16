@@ -46,21 +46,23 @@ static int component(const char *s) { return s && *s && strcmp(s, ".") && strcmp
 static napi_value handle(napi_env env, int fd) { napi_value obj; owned_fd *h = malloc(sizeof(*h)); if (!h) { close(fd); return fail(env, ENOMEM); } h->fd = fd; if (napi_create_object(env, &obj) != napi_ok || napi_wrap(env, obj, h, finalize, NULL, NULL) != napi_ok) { close(fd); free(h); return fail(env, ENOMEM); } return obj; }
 #ifdef __APPLE__
 /*
- * Require the kernel's mount-level extended-security support and a complete
- * fstatx_np security record. XNU's vnode_getattr resolves a missing ACL via
- * its filesec fallback when extended security is active; stat then reports
- * NOACL, exposed by libc as absent FILESEC_ACL with FILESEC_UUID present.
- * Any missing evidence, error, or ACL (including deny-only) is rejected.
+ * Require mount-level extended-security support and a successful fstatx_np.
+ * XNU's vnode_getattr resolves a missing requested ACL through its filesec
+ * fallback, propagating errors; libc reports absent ACL as an unset property.
+ * A missing UUID property is normal for ACL-free APFS objects. Any ACL
+ * (including deny-only), unavailable support, or query failure is rejected.
  */
 static int private_acl_check(int fd, struct stat *st) {
   if (fpathconf(fd, _PC_EXTENDED_SECURITY_NP) != 1) { errno = EPERM; return -1; }
   filesec_t security = filesec_init();
   if (!security) return -1;
-  int has_uuid = 0, has_acl = 0;
-  int ok = fstatx_np(fd, st, security) == 0 &&
-    filesec_query_property(security, FILESEC_UUID, &has_uuid) == 0 &&
-    filesec_query_property(security, FILESEC_ACL, &has_acl) == 0 &&
-    has_uuid && !has_acl;
+  int has_acl = 0;
+  /* Apple's statx_np realloc-failure path can return success with ENOMEM. */
+  errno = 0;
+  int stat_result = fstatx_np(fd, st, security);
+  int stat_error = errno;
+  int ok = stat_result == 0 && stat_error != ENOMEM &&
+    filesec_query_property(security, FILESEC_ACL, &has_acl) == 0 && !has_acl;
   filesec_free(security);
   if (!ok) { errno = EPERM; return -1; }
   return 0;
