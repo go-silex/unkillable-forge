@@ -16,6 +16,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
   minted, revealable share can request a create-only Shlink mapping when Shlink
   is configured; without a share-sealing key the primary share remains usable
   but no shortlink intent exists to retry. Existing mappings are not retargeted.
+  Valid non-object JSON metadata does not block previews or original images;
+  the Web share result reports shortlink requests only when work was admitted.
   Browser Run uses admitted revision resources without management cookies;
   HTML authors remain trusted. Native Request tests use simulated providers;
   actual provider and visual proof remain outstanding. This is not a production

@@ -72,8 +72,9 @@ export async function resolvePagePreview(db: D1Database, config: ReadInstanceCon
   if (!row) return null
   let metadata: unknown
   try { metadata = JSON.parse(String(row.metadata_json)) } catch { return null }
-  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null
-  const info = metadata as Record<string, unknown>
+  const info = metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+    ? metadata as Record<string, unknown>
+    : {}
   const title = typeof info.title === 'string' ? info.title : ''
   const description = typeof info.description === 'string' ? info.description : null
   let image: SharedPreviewPlan['image'] = null

@@ -1,11 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
 import { handleManageWeb } from '../../adapters/web/manage'
 import { runtimeFor } from '../../adapters/http/manage-config'
+import { handleRead } from '../../adapters/http/readWorker'
+import { PublicationService } from '../../domains/publication'
+import { RevisionStore } from '../../domains/store/revision-store'
 import { assignRole, readPagePolicy } from '../../domains/catalogue/commands'
 import { readActivePageRevision } from '../../domains/catalogue/read'
-import { actor, artifactId, authenticatedActor, configs, jwks, pageFixture, pageId, revisionId } from './fixtures/catalogue'
+import { actor, artifactId, authenticatedActor, configs, instanceId, jwks, pageFixture, pageId, revisionId } from './fixtures/catalogue'
 import { manageHttpBindings } from './fixtures/manage-http-bindings'
 import { env, request, setupHttp, signed } from './fixtures/manage-http'
+import { documentCommand, publishDocument } from './fixtures/publication'
 
 setupHttp()
 const origin = 'https://manage.example.test'
@@ -48,6 +52,32 @@ describe('management web', () => {
     expect(job).toMatchObject({ state: 'ready', revision_id: revisionId, expected_policy_epoch: 1, requested_short_domain: 'short.example', requested_short_code: sent.customSlug, destination: sent.longUrl })
     expect(job?.desired_grant_id).toBe((await readPagePolicy(await deps(), actor, pageId))?.grant?.grantId)
     expect(await readActivePageRevision(await deps(), actor, { pageId, artifactId, expectedPolicyEpoch: 0, expectedContentVersion: 0 })).toBeNull()
+  })
+
+  it('reports no shortlink admission without a seal while retaining a usable primary share', async () => {
+    const config = await configs()
+    const store = new RevisionStore(env.REVISION_BYTES, instanceId)
+    const publication = new PublicationService({ db: env.DB, config: config.manage, jwks, now: () => 10_000, store, publication: { sessionTtlMs: 60_000, maxUploadTimeoutMs: 1000, retainMs: 900_000, marginMs: 1000, manageClockSkewMs: 0, readClockSkewMs: 0 } })
+    const page = await documentCommand('web-unsealed', '/a/web-unsealed/index.html', '<p>shared document</p>')
+    const published = await publishDocument(publication, actor, page.command, page.bytes)
+    const base = await runtimeFor({ ...manageHttpBindings, DB: env.DB, REVISION_BYTES: env.REVISION_BYTES })
+    if (!base) throw new Error('Invalid test runtime')
+    const fetcher = vi.fn()
+    const body = new URLSearchParams({ op: 'share', pageId: page.pageId, artifactId: published.receipt.artifactId, epoch: '0' })
+    const req = request('/manage', 'POST', await signed(), body.toString(), { 'Content-Type': 'application/x-www-form-urlencoded', Origin: origin })
+    const result = await handleManageWeb(req, { ...base, shlink: { collectionUrl: 'https://provider.example/rest/v3/short-urls', apiKey: 'test', fetch: fetcher as typeof fetch } }, 'short.example')
+    expect(result?.status).toBe(200)
+    const html = await result!.text()
+    expect(html).toContain('Shortlink enrichment was not requested')
+    expect(html).not.toContain('Shortlink enrichment was requested')
+    expect(html).toContain('This share key cannot be revealed')
+    const link = html.match(/https:\/\/forge\.example\.test\/s\/web-unsealed\/[A-Za-z0-9_-]{24}\//)?.[0]
+    expect(link).toBeTruthy()
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM enrichment_jobs WHERE kind='shortlink'").first()).toEqual({ n: 0 })
+    const shared = await handleRead(new Request(link!), { db: env.DB, config: config.read, jwks, nowSeconds: () => 100, store })
+    expect(shared.status).toBe(200)
+    expect(await shared.text()).toContain('shared document')
   })
 
   it('preserves a created share when shortlink configuration is invalid', async () => {

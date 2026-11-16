@@ -120,8 +120,10 @@ export async function handleManageWeb(request: Request, runtime: Runtime, shortD
         key = result.key
         if (result.key && runtime.shlink && shortDomain) {
           try {
-            await triggerShareShortlink(runtime.deps, actor, runtime.shlink, shortDomain, target, result)
-            enrichment = 'Shortlink enrichment was requested; check its status for the result.'
+            const requested = await triggerShareShortlink(runtime.deps, actor, runtime.shlink, shortDomain, target, result)
+            enrichment = requested
+              ? 'Shortlink enrichment was requested; check its status for the result.'
+              : 'Shortlink enrichment was not requested; this share key cannot be recovered for enrichment.'
           } catch {
             enrichment = 'Share created, but shortlink enrichment could not be requested or completed.'
           }

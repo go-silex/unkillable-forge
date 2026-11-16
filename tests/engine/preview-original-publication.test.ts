@@ -11,15 +11,19 @@ beforeEach(async () => { await bootstrap() })
 
 describe('published original preview images', () => {
   it.each([
-    ['/a/original/index.html', '/a/original/og.jpg', '/s/original/original_key123/'],
-    ['/docs/original.html', '/docs/original.og.jpg', '/s/docs/original.html/original_key123'],
-  ])('serves the original published with %s', async (documentPath, imagePath, sharePath) => {
+    ['/a/original/index.html', '/a/original/og.jpg', '/s/original/original_key123/', {}],
+    ['/docs/original.html', '/docs/original.og.jpg', '/s/docs/original.html/original_key123', {}],
+    ['/a/original/index.html', '/a/original/og.jpg', '/s/original/original_key123/', []],
+    ['/docs/original.html', '/docs/original.og.jpg', '/s/docs/original.html/original_key123', []],
+    ['/a/original/index.html', '/a/original/og.jpg', '/s/original/original_key123/', 'scalar'],
+    ['/docs/original.html', '/docs/original.og.jpg', '/s/docs/original.html/original_key123', 42],
+  ] as const)('serves %s with image %s, share %s and metadata %j', async (documentPath, imagePath, sharePath, metadata) => {
     const config = await configs()
     const store = new RevisionStore(env.REVISION_BYTES, instanceId)
     const publication = new PublicationService({ db: env.DB, config: config.manage, jwks, now: () => 10_000, store, publication: { sessionTtlMs: 60_000, maxUploadTimeoutMs: 1000, retainMs: 900_000, marginMs: 1000, manageClockSkewMs: 0, readClockSkewMs: 0 } })
     const page = await documentCommand(`original-${documentPath}`, documentPath, '<p>page</p>')
     const image = await content('original image bytes')
-    const command = { ...page.command, files: [...page.command.files, { path: imagePath, kind: 'asset' as const, sha256: image.sha256, size: image.size, contentType: 'image/jpeg', source: 'client' as const }], edges: [{ ownerPageId: page.pageId, path: imagePath, providerArtifactId: null }] }
+    const command = { ...page.command, pages: [{ ...page.command.pages[0], metadata }], files: [...page.command.files, { path: imagePath, kind: 'asset' as const, sha256: image.sha256, size: image.size, contentType: 'image/jpeg', source: 'client' as const }], edges: [{ ownerPageId: page.pageId, path: imagePath, providerArtifactId: null }] }
     const session = await publication.begin(actor, command)
     await publication.upload(actor, session.sessionId, documentPath, body(page.bytes))
     await publication.upload(actor, session.sessionId, imagePath, body(image.bytes))
@@ -28,6 +32,7 @@ describe('published original preview images', () => {
     await importShare({ db: env.DB, config: config.manage, jwks, now: () => 10_000 }, actor, { pageId: page.pageId, artifactId: receipt.artifactId, expectedPolicyEpoch: 0, key: 'original_key123', mode: 'follow_active' })
     const deps = { db: env.DB, config: config.read, jwks, nowSeconds: () => 100, store }
     const preview = await handleRead(new Request(`https://forge.example.test${sharePath}`, { headers: { 'User-Agent': 'Slackbot' } }), deps)
+    expect(preview.status).toBe(200)
     const html = await preview.text()
     const url = /<meta property="og:image" content="([^"]+)"/.exec(html)?.[1].replaceAll('&amp;', '&')
     expect(url).toBeDefined()

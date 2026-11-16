@@ -7,8 +7,8 @@ import { runShortlinkEnrichment } from './enrichment-runner'
 import type { ShlinkConfig } from './client'
 
 /** Enrich only a freshly minted, revealable share; never choose a destination for a private page. */
-export async function triggerShareShortlink(deps: ManageDeps, actor: ManageActor, config: ShlinkConfig, shortDomain: string, target: { pageId: string; artifactId: string }, share: ShareResult): Promise<void> {
-  if (!share.key || !share.revealable) return
+export async function triggerShareShortlink(deps: ManageDeps, actor: ManageActor, config: ShlinkConfig, shortDomain: string, target: { pageId: string; artifactId: string }, share: ShareResult): Promise<boolean> {
+  if (!share.key || !share.revealable) return false
   const domain = new URL(`https://${shortDomain}`)
   const provider = new URL(config.collectionUrl)
   if (domain.host !== shortDomain || domain.username || domain.password || domain.pathname !== '/' || domain.search || domain.hash || provider.protocol !== 'https:' || provider.username || provider.password || provider.search || provider.hash) throw new Error('Invalid shortlink configuration')
@@ -22,4 +22,5 @@ export async function triggerShareShortlink(deps: ManageDeps, actor: ManageActor
   const inputSha256 = await shortlinkDestinationDigest(JSON.stringify({ ...target, revisionId, grantId: share.grantId, policyEpoch: policy.policyEpoch, contentVersion: policy.contentVersion, providerOrigin: provider.origin, shortDomain, shortCode, destinationSha256 }))
   const job = await enqueueEnrichment(deps, actor, { ...target, revisionId, expectedContentVersion: policy.contentVersion, expectedPolicyEpoch: policy.policyEpoch, kind: 'shortlink', inputSha256, desiredGrantId: share.grantId, mappingId, providerOrigin: provider.origin, shortDomain, shortCode, destinationSha256 })
   await runShortlinkEnrichment(deps, actor, config, job, 10_000)
+  return true
 }
