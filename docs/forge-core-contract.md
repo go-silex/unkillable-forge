@@ -771,13 +771,15 @@ All share failures answer `deny 404` with no fallthrough to another grammar once
 | `instance_mismatch`, `unavailable` | any | `deny 503` |
 | `allow` | subtree, tree, resource, pinned | `serve`, or `redirect 308` to the served form (§11.3) |
 | `allow` | share slug; share page with `browser = false` | `serve` (slug) · `share_unfurl` (page, F09) |
-| `allow` | share page with `browser = true` | `share_exchange`: 302 to `canonicalUrl` with the share cookie (F05) |
+| `allow` | share page with `browser = true` | `share_exchange` only for `follow_active` grants when share cookies are enabled; pinned grants are served directly at the keyed URL so their authorized revision is retained |
 | `allow` | card | `share_card` (F09) |
 | `login_required` | subtree, tree | `login` with `loginLocation(next)` |
 | `not_found` | any | `deny 404` |
 | alias found, team identity, target live or absent (§12.5) | any unclaimed path | `redirect` with the alias status |
 | shell `/login` with a read identity | — | `redirect 302` to `next` |
 | shell `/login` without identity, `redirect-access-login` | — | `redirect 302` to `accessLoginLocation` |
+
+For an authorized slug-keyed serve, Catalogue supplies URL-encoded, slash-terminated canonical and keyed prefixes for presentation-only navigation rewriting; other serves supply no share context. Serve, unfurl and card outcomes also supply the unlisted response hint derived from the authorized grant, including pinned grant proofs. Delivery does not infer a grant from a URL.
 
 `deny 404` renders the legacy body `Not found`, `content-type: text/plain; charset=utf-8`, `cache-control: no-store`, `x-robots-tag: noindex, nofollow`. Every controlled response is `no-store`. Header names and values are F05's; the legacy `x-forge-acl: vis-v4` marker is not reused as proof of the new model.
 
@@ -997,6 +999,8 @@ Header and body bytes (`cache-control`, `content-type`, `Set-Cookie`, the `Not f
 | F09 OG and cards | `share_unfurl`, `share_card` outcomes, card candidates | crawler HTML, card serving, Shlink links |
 | F10 Import | `claimPageStatements`, `importShare`, `setAlias`, `executeGuarded` ownership admission, `validateRevisionPaths`, schema checks | pages, routes, aliases from `site/_redirects`, revisions from the corpus, exact keys for pages whose legacy visibility is `shared` (a key without `vis:shared` is reported, not imported), visibility unknown → private with report, explicit fragment/asset typing and ownership (G1b), reserved-path collisions reported, public or shared visibility records without bytes reported (OR-1 counterexample) rather than dropped or turned into pages, historical tree URL and access fidelity acceptance before F13; preserve I-CV through Publication activation, persist versions from verified native PUTs, and implement budgeted non-starving cursor resweeps of all discarded/closed-session residue |
 | F11 Release operations | migration, config schema, error codes, F10 maintenance cursor contract | per-instance Worker configurations and measured capacity profiles, secrets, `instance_meta` and first-admin bootstrap, staging guard-message confirmation, backups including verifier keys, alias-host edge rule, and scheduling the F10 collector; local-only Wrangler bindings never authorize deployment |
+
+F05's shell representations are explicit bundled instance inputs, not Publication objects. Composition requires complete coverage of configured fixed shell paths, alongside the dynamic root/index/login implementation; a missing representation is a configuration failure, never another instance's branding or a Store/hub fallback. F05 ships the generic serving path and genuine public Unkillable bundle. F12 supplies genuine private downstream bytes before Roxabi parity and cutover can be accepted. The configured `shellPaths` remains the only route declaration.
 
 ### 15.1 F07 managed metadata interface
 

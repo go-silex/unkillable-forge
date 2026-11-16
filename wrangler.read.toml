@@ -1,13 +1,23 @@
 # LOCAL DEVELOPMENT ONLY — never deploy this profile. Missing remote IDs can
 # cause Wrangler to provision resources on deploy. Use a private dotenv file.
 name = "forge-read-local"
-main = "adapters/http/readWorker.ts"
+main = "adapters/http/unkillableReadWorker.ts"
 compatibility_date = "2025-02-14"
 compatibility_flags = ["enable_request_signal", "unhandled_rejection_after_microtask_checkpoint"]
 workers_dev = false
 preview_urls = false
 send_metrics = false
 tsconfig = "tsconfig.engine.json"
+
+[[rules]]
+type = "Data"
+globs = ["**/*.ico", "**/*.png"]
+fallthrough = true
+
+[[rules]]
+type = "Text"
+globs = ["**/*.txt"]
+fallthrough = true
 
 [observability]
 enabled = false

@@ -1,10 +1,12 @@
+/// <reference types="vite/client" />
 import { env } from "cloudflare:workers"
 import { beforeEach, describe, expect, it } from "vitest"
+import shareBarScript from "../../plugins/silex-forge/scripts/share-bar.js?raw"
 import { handleRead } from "../../adapters/http/readWorker"
-import { importShare, rotateShare, setVisibility } from "../../domains/catalogue/commands"
+import { importShare, revokeShare, rotateShare, setVisibility, share } from "../../domains/catalogue/commands"
 import { PublicationService } from "../../domains/publication"
 import { RevisionStore } from "../../domains/store/revision-store"
-import { actor, artifactId, bootstrap, configs, instanceId, jwks, pageFixture, pageId } from "./fixtures/catalogue"
+import { actor, artifactId, bootstrap, configs, instanceId, jwks, manageRequest, pageFixture, pageId } from "./fixtures/catalogue"
 import { body, content, documentCommand, publishDocument } from "./fixtures/publication"
 
 beforeEach(async () => { await bootstrap() })
@@ -27,13 +29,7 @@ async function publishPage(publication: PublicationService, path: string, value:
 describe("read HTTP with native D1 and R2", () => {
   it.each(["marked", "unmarked"])("replaces the %s legacy share toolbar with a management link", async variant => {
     const s = await setup()
-    const legacy = `<script>window.__FORGE_SHARE__={"slug":"toolbar"};</script>
-<script>
-  window.__FORGE_SHARE_BAR__ = true;
-  fetch("/api/share", { method: "POST" });
-  fetch("/api/visibility", { method: "POST" });
-  document.body.insertAdjacentHTML("beforeend", '<button data-forge-share-bar>Change visibility</button>');
-</script>`
+    const legacy = `<script>window.__FORGE_SHARE__={"slug":"toolbar"};</script>\n<script>\n${shareBarScript}\n</script>`
     const toolbar = variant === "marked" ? `<!-- forge-share-bar -->${legacy}<!-- /forge-share-bar -->` : legacy
     const html = `<!doctype html><html><body><main>Page content</main>${toolbar}<script>window.keepDocumentScript = "preserved";</script></body></html>`
     const page = await publishPage(s.publication, "/a/toolbar/index.html", html)
@@ -273,6 +269,94 @@ describe("read HTTP with native D1 and R2", () => {
     const denied = await s.request("/docs/shared", { headers: { Cookie: cookie, "If-None-Match": "*", Range: "bytes=0-3" } })
     expect([200, 206, 304]).not.toContain(denied.status)
     expect(await denied.text()).not.toContain("shared tree page")
+  })
+
+  it.each(["anonymous", "team"])("keeps a pinned tree share on its revision for a %s browser through promotion and revocation", async viewer => {
+    const s = await setup()
+    const path = "/docs/pinned.html"
+    const first = await documentCommand(`pinned-tree-${viewer}`, path, "<p>original shared revision</p>")
+    const initial = await publishDocument(s.publication, actor, first.command, first.bytes)
+    const management = { db: env.DB, config: s.config.manage, jwks, now: () => 10_000 }
+    const grant = await share(management, actor, { pageId: first.pageId, artifactId: initial.receipt.artifactId, expectedPolicyEpoch: 0, mode: "pinned", revisionId: initial.session.revisionId })
+    if (!grant.key) throw new Error("pinned share key missing")
+    const team: Record<string, string> = viewer === "team" ? { "Cf-Access-Jwt-Assertion": (await manageRequest("reader", "reader")).headers.get("Cf-Access-Jwt-Assertion")! } : {}
+    const open = () => s.request(`/s/docs/pinned.html/${grant.key}`, { headers: { ...team, "Sec-Fetch-Dest": "document" } })
+    const before = await open()
+    expect(before.status).toBe(200)
+    expect(await before.text()).toContain("original shared revision")
+
+    const replacement = await content("<p>promoted active revision</p>")
+    const command = {
+      ...first.command, idempotencyKey: `pinned-tree-next-${viewer}`, artifactId: initial.receipt.artifactId,
+      expectedRevisionId: initial.receipt.revisionId, expectedContentVersion: initial.receipt.contentVersion,
+      files: [{ path, kind: "document" as const, size: replacement.size, sha256: replacement.sha256, contentType: "text/html", source: "client" as const }],
+      pages: [{ ...first.command.pages[0], disposition: "keep" as const, expectedPolicyEpoch: 1 }],
+    }
+    await publishDocument(s.publication, actor, command, replacement.bytes)
+    const after = await open()
+    expect(after.status).toBe(200)
+    const rendered = await after.text()
+    expect(rendered).toContain("original shared revision")
+    expect(rendered).not.toContain("promoted active revision")
+    await revokeShare(management, actor, { pageId: first.pageId, artifactId: initial.receipt.artifactId, expectedPolicyEpoch: 1, grantId: grant.grantId })
+    const denied = await s.request(`/s/docs/pinned.html/${grant.key}`, { headers: { ...team, "Sec-Fetch-Dest": "document" } })
+    expect(denied.status).toBe(404)
+    if (viewer === "team") {
+      const active = await s.request("/docs/pinned", { headers: team })
+      expect(active.status).toBe(200)
+      expect(await active.text()).toContain("promoted active revision")
+    }
+  })
+
+  it.each(["no base", "existing base"])("preserves slug share authority for relative navigation with %s", async variant => {
+    const s = await setup()
+    const base = variant === "existing base" ? '<base href="nested/">' : ""
+    const next = variant === "existing base" ? "nested/next/" : "next/"
+    const first = await documentCommand(`slug-navigation-${variant.replaceAll(" ", "-")}`, "/a/navshare/index.html", `<!doctype html>${base}<a href="next/">Continue</a><a href="/a/private-sibling/">Sibling</a>`)
+    const nextPath = `/a/navshare/${next}index.html`
+    const child = await content("<p>shared child document</p>")
+    const command = { ...first.command, files: [...first.command.files, { path: nextPath, kind: "subdocument" as const, size: child.size, sha256: child.sha256, contentType: "text/html", source: "client" as const }] }
+    const session = await s.publication.begin(actor, command)
+    await s.publication.upload(actor, session.sessionId, "/a/navshare/index.html", body(first.bytes))
+    await s.publication.upload(actor, session.sessionId, nextPath, body(child.bytes))
+    await s.publication.seal(actor, session.sessionId)
+    const receipt = await s.publication.commit(actor, session.sessionId)
+    await publishPage(s.publication, "/a/private-sibling/index.html", "<p>private sibling content</p>")
+    await importShare({ db: env.DB, config: s.config.manage, jwks, now: () => 10_000 }, actor, { pageId: first.pageId, artifactId: receipt.artifactId, expectedPolicyEpoch: 0, key: "slug_share_123", mode: "follow_active" })
+
+    const startUrl = "https://forge.example.test/s/navshare/slug_share_123/"
+    const start = await s.request(new URL(startUrl).pathname)
+    expect(start.status).toBe(200)
+    const html = await start.text()
+    const baseHref = html.match(/<base\b[^>]*href="([^"]+)"/i)?.[1]
+    const link = html.match(/<a\b[^>]*href="([^"]+)"[^>]*>Continue<\/a>/i)?.[1]
+    expect(link).toBeDefined()
+    const destination = new URL(link!, baseHref ? new URL(baseHref, startUrl) : startUrl)
+    const followed = await s.request(destination.pathname + destination.search)
+    expect(followed.status).toBe(200)
+    expect(await followed.text()).toContain("shared child document")
+    const wrong = await s.request(`/s/navshare/wrong_key_123/${next}`)
+    expect(wrong.status).toBe(404)
+    const sibling = await s.request("/a/private-sibling/")
+    expect([200, 206, 304]).not.toContain(sibling.status)
+    expect(await sibling.text()).not.toContain("private sibling content")
+  })
+
+  it.each(["marked", "unmarked"])("preserves benign script marker mentions while removing the %s legacy toolbar", async variant => {
+    const s = await setup()
+    const benign = `<script>/* __FORGE_SHARE_BAR__ is a historical name */ window.markerExample = "__FORGE_SHARE__";</script>`
+    const legacy = `<script>window.__FORGE_SHARE__={"slug":"markers"};</script>\n<script>\n${shareBarScript}\n</script>`
+    const toolbar = variant === "marked" ? `<!-- forge-share-bar -->${legacy}<!-- /forge-share-bar -->` : legacy
+    const page = await publishPage(s.publication, "/a/markers/index.html", `<!doctype html><html><body>${benign}${toolbar}</body></html>`)
+    await setVisibility({ db: env.DB, config: s.config.manage, jwks, now: () => 10_000 }, actor, { pageId: page.pageId, artifactId: page.receipt.artifactId, expectedPolicyEpoch: 0, visibility: "public" })
+    const response = await s.request("/a/markers/")
+    expect(response.status).toBe(200)
+    const html = await response.text()
+    expect(html).toContain(benign)
+    expect(html).not.toContain(shareBarScript)
+    expect(html).not.toContain('window.__FORGE_SHARE__={"slug":"markers"}')
+    expect(html).not.toContain('fetch("/api/visibility"')
+    expect(html).toContain(`https://manage.example.test/manage?pageId=${page.pageId}`)
   })
 
   it("enforces host, method and reserved paths before content delivery", async () => {

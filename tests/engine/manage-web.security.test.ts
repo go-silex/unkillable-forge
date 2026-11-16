@@ -35,7 +35,7 @@ describe('management web', () => {
     const selected = await web(request(`/manage?pageId=${pageId}`, 'GET', null, null, nav))
     expect(selected.status).toBe(200)
     expect(selected.headers.get('cache-control')).toBe('no-store')
-    expect(selected.headers.get('referrer-policy')).toBe('no-referrer')
+    expect(selected.headers.get('referrer-policy')).toBe('same-origin')
     expect(selected.headers.get('content-security-policy')).toContain("frame-ancestors 'none'")
     expect(await selected.text()).toContain('https://forge.example.test/a/sample/')
     expect((await web(request('/manage', 'GET', null, null, { Cookie: `CF_Authorization=${jwt}` }))).status).toBe(403)
@@ -44,6 +44,35 @@ describe('management web', () => {
     expect(await readPagePolicy(await deps(), actor, pageId)).toMatchObject({ visibility: 'private', policyEpoch: 0 })
     expect((await web(request('/manage', 'GET', null, null, { Cookie: 'forge_share=sample|invalidkey', 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' }))).status).toBe(401)
   })
+  it('permits a same-origin browser form while denying an opaque Origin', async () => {
+    await pageFixture()
+    const jwt = await signed()
+    const nav = new Headers({ Cookie: `CF_Authorization=${jwt}`, 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' })
+    const selected = await web(request(`/manage?pageId=${pageId}`, 'GET', null, null, nav))
+    expect(selected.status).toBe(200)
+    const html = await selected.text()
+    const publicForm = html.match(/<form method="post" action="([^"]+)">((?:(?!<\/form>)[\s\S])*?<button name="op" value="public">(?:(?!<\/form>)[\s\S])*?)<\/form>/)
+    expect(publicForm).toBeTruthy()
+    const fields = new URLSearchParams()
+    for (const match of publicForm![2].matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)) fields.set(match[1], match[2])
+    fields.set('op', 'public')
+    expect(Object.fromEntries(fields)).toEqual({ pageId, artifactId, epoch: '0', op: 'public' })
+    const submit = (requestOrigin: string) => web(request(publicForm![1], 'POST', null, fields.toString(), {
+      Cookie: `CF_Authorization=${jwt}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Origin: requestOrigin,
+    }))
+
+    // Chromium was observed sending Origin: null for this form under no-referrer.
+    expect((await submit('null')).status).toBe(403)
+    expect(await readPagePolicy(await deps(), actor, pageId)).toMatchObject({ visibility: 'private', policyEpoch: 0 })
+    const policy = selected.headers.get('referrer-policy')
+    const browserOrigin = policy === 'same-origin' ? origin : 'null'
+    expect((await submit(browserOrigin)).status).toBe(200)
+    expect(await readPagePolicy(await deps(), actor, pageId)).toMatchObject({ visibility: 'public', policyEpoch: 1 })
+    expect(policy).toBe('same-origin')
+  })
+
   it('keeps the submitted epoch, and mints, reveals, rotates and revokes only the selected grant', async () => {
     await pageFixture()
     const jwt = await signed()

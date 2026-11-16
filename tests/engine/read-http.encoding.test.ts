@@ -1,0 +1,113 @@
+import { env } from "cloudflare:workers"
+import { beforeEach, describe, expect, it } from "vitest"
+import { handleRead } from "../../adapters/http/readWorker"
+import { setVisibility } from "../../domains/catalogue/commands"
+import { PublicationService } from "../../domains/publication"
+import { RevisionStore } from "../../domains/store/revision-store"
+import { actor, bootstrap, configs, instanceId, jwks } from "./fixtures/catalogue"
+import { body, content, documentCommand } from "./fixtures/publication"
+
+beforeEach(async () => { await bootstrap() })
+
+async function bytesContent(bytes: Uint8Array<ArrayBuffer>) {
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))
+  return { bytes, size: bytes.byteLength, sha256: Array.from(hash, byte => byte.toString(16).padStart(2, "0")).join("") }
+}
+
+async function setup() {
+  const config = await configs()
+  const store = new RevisionStore(env.REVISION_BYTES, instanceId)
+  const publication = new PublicationService({ db: env.DB, config: config.manage, jwks, now: () => 10_000, store, publication: { sessionTtlMs: 60_000, maxUploadTimeoutMs: 1000, retainMs: 900_000, marginMs: 1000, manageClockSkewMs: 0, readClockSkewMs: 0 } })
+  const request = (path: string, init?: RequestInit) => handleRead(new Request(new URL(path, "https://forge.example.test"), init), { db: env.DB, config: config.read, jwks, nowSeconds: () => 10, store })
+  return { config, publication, request }
+}
+
+function decodeRepresentation(response: Response, bytes: ArrayBuffer): { text: string; encoding: string } {
+  const type = response.headers.get("content-type") ?? ""
+  const label = /charset\s*=\s*["']?([^;\s"']+)/i.exec(type)?.[1]
+  expect(label).toBeTruthy()
+  const decoder = new TextDecoder(label)
+  return { text: decoder.decode(bytes), encoding: decoder.encoding }
+}
+
+describe("read HTTP encoded resource paths and representations", () => {
+  it("retains literal percent escapes in stylesheet bases when following a pinned image", async () => {
+    const s = await setup()
+    const page = await documentCommand("encoded-path", "/a/encoded/index.html", '<link rel="stylesheet" href="dir%2541/main.css">')
+    const css = await content('.hero{background:url("logo.png")}')
+    const image = await content("literal percent directory image")
+    const decoy = await content("wrong decoded directory image")
+    const paths = ["/a/encoded/dir%41/main.css", "/a/encoded/dir%41/logo.png", "/a/encoded/dirA/logo.png"]
+    const files = [css, image, decoy]
+    const command = { ...page.command, files: [...page.command.files, ...files.map((file, index) => ({ path: paths[index], kind: "asset" as const, size: file.size, sha256: file.sha256, contentType: index === 0 ? "text/css" : "image/png", source: "client" as const }))], edges: paths.map(path => ({ ownerPageId: page.pageId, path, providerArtifactId: null })) }
+    const session = await s.publication.begin(actor, command)
+    await s.publication.upload(actor, session.sessionId, "/a/encoded/index.html", body(page.bytes))
+    for (let i = 0; i < files.length; i++) await s.publication.upload(actor, session.sessionId, paths[i], body(files[i].bytes))
+    await s.publication.seal(actor, session.sessionId)
+    const receipt = await s.publication.commit(actor, session.sessionId)
+    await setVisibility({ db: env.DB, config: s.config.manage, jwks, now: () => 10_000 }, actor, { pageId: page.pageId, artifactId: receipt.artifactId, expectedPolicyEpoch: 0, visibility: "public" })
+
+    const document = await s.request("/a/encoded/")
+    expect(document.status).toBe(200)
+    const cookie = document.headers.get("set-cookie")
+    expect(cookie).toBeTruthy()
+    const headers = { Cookie: cookie!.split(";", 1)[0] }
+    const documentText = await document.text()
+    const cssPath = /href="([^"]*main\.css)"/.exec(documentText)?.[1]
+    expect(cssPath).toContain("dir%2541/main.css")
+    if (!cssPath) throw new Error("stylesheet reference missing")
+    const stylesheet = await s.request(cssPath, { headers })
+    expect(stylesheet.status).toBe(200)
+    const cssText = await stylesheet.text()
+    const imagePath = /url\(["']?([^"')]+)["']?\)/.exec(cssText)?.[1]
+    expect(imagePath).toContain("dir%2541/logo.png")
+    if (!imagePath) throw new Error("stylesheet image reference missing")
+    const servedImage = await s.request(imagePath, { headers })
+    expect(servedImage.status).toBe(200)
+    expect(new Uint8Array(await servedImage.arrayBuffer())).toEqual(image.bytes)
+  })
+
+  it("preserves windows-1252 HTML and CSS text with matching charset labels and a usable image", async () => {
+    const s = await setup()
+    const page = await documentCommand("windows-1252", "/a/charset/index.html", "")
+    // These are actual Windows-1252 bytes, including 0xe9 and 0x80, not UTF-8 encoding.
+    const html = await bytesContent(Uint8Array.from([...new TextEncoder().encode('<!doctype html><meta charset="windows-1252"><p>caf'), 0xe9, 0x20, 0x80, ...new TextEncoder().encode('</p><link rel="stylesheet" href="main.css">')]))
+    const css = await bytesContent(Uint8Array.from([...new TextEncoder().encode('@charset "windows-1252";.label{content:"caf'), 0xe9, 0x20, 0x80, ...new TextEncoder().encode('";background:url("logo.png")}')]))
+    const image = await content("charset image bytes")
+    const paths = ["/a/charset/main.css", "/a/charset/logo.png"]
+    const files = [css, image]
+    const command = { ...page.command, files: [{ ...page.command.files[0], size: html.size, sha256: html.sha256, contentType: "text/html; charset=windows-1252" }, ...files.map((file, index) => ({ path: paths[index], kind: "asset" as const, size: file.size, sha256: file.sha256, contentType: index === 0 ? "text/css; charset=windows-1252" : "image/png", source: "client" as const }))], edges: paths.map(path => ({ ownerPageId: page.pageId, path, providerArtifactId: null })) }
+    const session = await s.publication.begin(actor, command)
+    await s.publication.upload(actor, session.sessionId, "/a/charset/index.html", body(html.bytes))
+    for (let i = 0; i < files.length; i++) await s.publication.upload(actor, session.sessionId, paths[i], body(files[i].bytes))
+    await s.publication.seal(actor, session.sessionId)
+    const receipt = await s.publication.commit(actor, session.sessionId)
+    await setVisibility({ db: env.DB, config: s.config.manage, jwks, now: () => 10_000 }, actor, { pageId: page.pageId, artifactId: receipt.artifactId, expectedPolicyEpoch: 0, visibility: "public" })
+
+    const document = await s.request("/a/charset/")
+    expect(document.status).toBe(200)
+    const cookie = document.headers.get("set-cookie")
+    expect(cookie).toBeTruthy()
+    const headers = { Cookie: cookie!.split(";", 1)[0] }
+    const rendered = decodeRepresentation(document, await document.arrayBuffer())
+    expect(rendered.text).toContain("café €")
+    const metaCharset = /<meta\s+charset=["']([^"']+)/i.exec(rendered.text)?.[1]
+    expect(metaCharset).toBeTruthy()
+    expect(new TextDecoder(metaCharset).encoding).toBe(rendered.encoding)
+    const cssPath = /href="([^"]*main\.css)"/.exec(rendered.text)?.[1]
+    expect(cssPath).toBeTruthy()
+    if (!cssPath) throw new Error("stylesheet reference missing")
+    const stylesheet = await s.request(cssPath, { headers })
+    expect(stylesheet.status).toBe(200)
+    const renderedCss = decodeRepresentation(stylesheet, await stylesheet.arrayBuffer())
+    expect(renderedCss.text).toContain("café €")
+    const cssCharset = /@charset\s+["']([^"']+)["']/i.exec(renderedCss.text)?.[1]
+    if (cssCharset) expect(new TextDecoder(cssCharset).encoding).toBe(renderedCss.encoding)
+    const imagePath = /url\(["']?([^"')]+)["']?\)/.exec(renderedCss.text)?.[1]
+    expect(imagePath).toBeTruthy()
+    if (!imagePath) throw new Error("stylesheet image reference missing")
+    const servedImage = await s.request(imagePath, { headers })
+    expect(servedImage.status).toBe(200)
+    expect(new Uint8Array(await servedImage.arrayBuffer())).toEqual(image.bytes)
+  })
+})

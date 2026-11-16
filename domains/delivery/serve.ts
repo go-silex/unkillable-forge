@@ -4,6 +4,15 @@ import { rewriteCss, rewriteHtml } from './rewrite'
 
 export interface PinNamespace { readonly pageId: string; readonly revisionId: string }
 
+export interface ServeOptions {
+  readonly manageHost: string
+  readonly canonicalHost: string
+  readonly aliasHosts: readonly string[]
+  readonly shellPaths: readonly string[]
+  readonly shareContext: { readonly canonicalPrefix: string; readonly sharePrefix: string } | null
+  readonly unlisted: boolean
+}
+
 export function pinPath(pin: PinNamespace): string {
   return `/_revisions/${pin.pageId}/${pin.revisionId}/`
 }
@@ -15,11 +24,12 @@ export function securityHeaders(): Headers {
 export function textResponse(status: number, body: string, method = 'GET'): Response {
   const headers = securityHeaders()
   headers.set('content-type', 'text/plain; charset=utf-8')
+  if (status === 404) headers.set('x-robots-tag', 'noindex, nofollow')
   return new Response(method === 'HEAD' ? null : body, { status, headers })
 }
 
 /** Called only after Catalogue has authorized the selected object. */
-export async function serve(request: Request, plan: ReadPlan, store: RevisionStore, pin: PinNamespace | null, manageHost: string): Promise<Response> {
+export async function serve(request: Request, plan: ReadPlan, store: RevisionStore, pin: PinNamespace | null, options: ServeOptions): Promise<Response> {
   const ref = { kind: 'resource' as const, artifactId: plan.artifactId, revisionId: plan.revisionId, path: plan.resource.path }
   const info = await store.head(ref)
   if (!info) return textResponse(404, 'Not found', request.method)
@@ -27,6 +37,7 @@ export async function serve(request: Request, plan: ReadPlan, store: RevisionSto
   const type = plan.resource.contentType.split(';', 1)[0].trim().toLowerCase()
   const transformed = !!pin && (type === 'text/html' || type === 'text/css')
   const headers = securityHeaders()
+  if (options.unlisted) headers.set('x-robots-tag', 'noindex, nofollow, noarchive')
   headers.set('content-type', plan.resource.contentType)
   if (plan.pinnedProof && pin) headers.append('set-cookie', `forge_pin=${plan.pinnedProof}; Path=${pinPath(pin)}; Max-Age=900; HttpOnly; Secure; SameSite=Lax`)
   const etag = `"${plan.resource.sha256}"`
@@ -37,7 +48,7 @@ export async function serve(request: Request, plan: ReadPlan, store: RevisionSto
     if (match && match.split(',').some(value => value.trim() === '*' || value.trim().replace(/^W\//, '') === etag)) return new Response(null, { status: 304, headers })
   }
   let start = 0, end = info.size - 1, partial = false
-  const range = !transformed && request.headers.get('range')
+  const range = request.method === 'GET' && !transformed && request.headers.get('range')
   const ifRange = request.headers.get('if-range')
   if (range && (!ifRange || ifRange === etag)) {
     const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim())
@@ -61,13 +72,14 @@ export async function serve(request: Request, plan: ReadPlan, store: RevisionSto
   if (object.size !== info.size || object.version !== info.version) { void object.body.cancel(); return textResponse(503, 'Unavailable', request.method) }
   let response = new Response(object.body, { status: partial ? 206 : 200, headers })
   if (transformed && pin) {
-    const original = new URL(plan.resource.path, request.url).href
+    const encodedPath = plan.resource.path.split('/').map(encodeURIComponent).join('/')
+    const original = new URL(encodedPath, request.url).href
     if (type === 'text/html') {
       const navigable = plan.resource.kind === 'document' || plan.resource.kind === 'subdocument'
-      const managementUrl = navigable ? `https://${manageHost}/manage?pageId=${encodeURIComponent(pin.pageId)}` : null
-      response = await rewriteHtml(response, { documentUrl: original, managementUrl, ...pin })
+      const managementUrl = navigable ? `https://${options.manageHost}/manage?pageId=${encodeURIComponent(pin.pageId)}` : null
+      response = await rewriteHtml(response, { documentUrl: original, managementUrl, ...pin, ...options })
     }
-    else response = await rewriteCss(response, { resourceUrl: original, ...pin })
+    else response = await rewriteCss(response, { resourceUrl: original, ...pin, ...options })
   }
   return response
 }

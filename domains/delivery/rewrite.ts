@@ -3,6 +3,10 @@ import * as csstree from "css-tree"
 interface Namespace {
   pageId: string
   revisionId: string
+  canonicalHost: string
+  aliasHosts: readonly string[]
+  shellPaths: readonly string[]
+  shareContext: { readonly canonicalPrefix: string; readonly sharePrefix: string } | null
 }
 
 export interface HtmlRewriteOptions extends Namespace {
@@ -27,8 +31,16 @@ function resourceUrl(value: string, base: URL, origin: string, namespace: Namesp
   } catch {
     return value
   }
-  if ((resolved.protocol !== "http:" && resolved.protocol !== "https:") || resolved.origin !== origin) return value
-  return `/_revisions/${namespace.pageId}/${namespace.revisionId}${resolved.pathname}${resolved.search}${resolved.hash}`
+  if (!localUrl(resolved, namespace)) return value
+  const path = namespace.shellPaths.includes(resolved.pathname)
+    ? `${resolved.pathname}${resolved.search}${resolved.hash}`
+    : `/_revisions/${namespace.pageId}/${namespace.revisionId}${resolved.pathname}${resolved.search}${resolved.hash}`
+  return base.origin === origin && !path.startsWith("//") ? path : `${origin}${path}`
+}
+
+function localUrl(url: URL, namespace: Namespace): boolean {
+  return (url.protocol === "http:" || url.protocol === "https:") && !url.port &&
+    (url.hostname === namespace.canonicalHost || namespace.aliasHosts.includes(url.hostname))
 }
 
 function rewriteCssText(text: string, base: URL, origin: string, namespace: Namespace, context: "stylesheet" | "declarationList"): string {
@@ -36,6 +48,12 @@ function rewriteCssText(text: string, base: URL, origin: string, namespace: Name
   csstree.walk(ast, (node) => {
     if (node.type === "Url") {
       node.value = resourceUrl(node.value, base, origin, namespace)
+    } else if (node.type === "Atrule" && node.name.toLowerCase() === "charset") {
+      if (node.prelude?.type === "Raw") node.prelude.value = '"utf-8"'
+      else if (node.prelude?.type === "AtrulePrelude") {
+        const first = node.prelude.children.first
+        if (first?.type === "String") first.value = "utf-8"
+      }
     } else if (node.type === "Atrule" && node.name.toLowerCase() === "import" && node.prelude?.type === "AtrulePrelude") {
       const first = node.prelude.children.first
       if (first?.type === "String") first.value = resourceUrl(first.value, base, origin, namespace)
@@ -77,28 +95,69 @@ function rewriteSrcset(value: string, base: URL, origin: string, namespace: Name
   return result
 }
 
+async function decodedText(response: Response, kind: "html" | "css"): Promise<string> {
+  const bytes = new Uint8Array(await response.arrayBuffer())
+  const type = response.headers.get("content-type") ?? ""
+  let label = /(?:^|;)\s*charset\s*=\s*(?:"([^"]+)"|'([^']+)'|([^;\s]+))/i.exec(type)?.slice(1).find(Boolean)
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) label = "utf-8"
+  else if (bytes[0] === 0xff && bytes[1] === 0xfe) label = "utf-16le"
+  else if (bytes[0] === 0xfe && bytes[1] === 0xff) label = "utf-16be"
+  if (!label) {
+    const prefix = new TextDecoder("windows-1252").decode(bytes.subarray(0, 1024))
+    label = kind === "css"
+      ? /^@charset\s+["']([^"']+)["'];/i.exec(prefix)?.[1]
+      : /<meta\s[^>]*charset\s*=\s*["']?\s*([^\s"'/>;]+)/i.exec(prefix)?.[1]
+  }
+  return new TextDecoder(label ?? "utf-8", { fatal: true }).decode(bytes)
+}
+
 function transformedHeaders(response: Response): Headers {
   const headers = new Headers(response.headers)
   headers.delete("content-length")
   headers.delete("content-encoding")
   headers.delete("etag")
   headers.delete("content-md5")
+  const type = headers.get("content-type")
+  if (type) headers.set("content-type", `${type.replace(/;\s*charset\s*=\s*(?:"[^"]*"|'[^']*'|[^;\s]*)/ig, "")}; charset=utf-8`)
   return headers
 }
 
 /** Rewrite a stylesheet against its original URL while retaining the requesting revision namespace. */
 export async function rewriteCss(response: Response, options: CssRewriteOptions): Promise<Response> {
   const base = new URL(options.resourceUrl)
-  const body = rewriteCssText(await response.text(), base, base.origin, options, "stylesheet")
+  const body = rewriteCssText(await decodedText(response, "css"), base, base.origin, options, "stylesheet")
   return new Response(body, { status: response.status, statusText: response.statusText, headers: transformedHeaders(response) })
 }
 
 /** Rewrite resource references without rewriting navigation or executable script text. */
 export async function rewriteHtml(response: Response, options: HtmlRewriteOptions): Promise<Response> {
   const documentUrl = new URL(options.documentUrl)
-  const originalHtml = await response.text()
+  const originalHtml = await decodedText(response, "html")
+  // Match the shipped legacy script by its complete bytes, not marker mentions
+  // in unrelated application scripts.
+  const scripts: { text: string; external: boolean }[] = []
+  await new HTMLRewriter().on("script", {
+    element(element) { scripts.push({ text: "", external: element.hasAttribute("src") }) },
+    text(text) { scripts[scripts.length - 1].text += text.text },
+  }).transform(new Response(originalHtml)).text()
+  const removedScripts = new Set<number>()
+  for (let i = 1; i < scripts.length; i++) {
+    if (scripts[i].external || scripts[i - 1].external || !scripts[i].text.trim().startsWith("/* forge share-bar")) continue
+    const config = /^\s*window\.__FORGE_SHARE__\s*=\s*(\{[\s\S]*\})\s*;\s*$/.exec(scripts[i - 1].text)
+    if (!config) continue
+    try {
+      const parsed: unknown = JSON.parse(config[1])
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue
+      const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(scripts[i].text.trim())))
+      const hex = Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("")
+      if (hex === "bbf3cc434d129969f2231d2b3f232b589f81e81e730ceefdd7e96d07c345df28") {
+        removedScripts.add(i - 1)
+        removedScripts.add(i)
+      }
+    } catch { /* Not a legacy configuration. */ }
+  }
   let insideLegacyBar = false
-  let scriptText = ""
+  let scriptIndex = 0
   const cleanup = new HTMLRewriter()
     .onDocument({
       comments(comment) {
@@ -109,16 +168,7 @@ export async function rewriteHtml(response: Response, options: HtmlRewriteOption
       },
     })
     .on("*", { element(element) { if (insideLegacyBar || element.hasAttribute("data-forge-share-bar") || element.hasAttribute("data-forge-toast")) element.remove() } })
-    .on("script", {
-      element() { scriptText = "" },
-      text(text) {
-        scriptText += text.text
-        if (!text.lastInTextNode) { text.remove(); return }
-        if (insideLegacyBar || scriptText.includes("__FORGE_SHARE__") || scriptText.includes("__FORGE_SHARE_BAR__")) text.remove()
-        else text.replace(scriptText, { html: true })
-        scriptText = ""
-      },
-    })
+    .on("script", { element(element) { if (removedScripts.has(scriptIndex++)) element.remove() } })
   const html = await cleanup.transform(new Response(originalHtml)).text()
   let base = documentUrl
   let foundBase = false
@@ -139,6 +189,15 @@ export async function rewriteHtml(response: Response, options: HtmlRewriteOption
     rewriter.on("body", { element(element) { element.append(link, { html: true }); appended = true } })
     rewriter.onDocument({ end(end) { if (!appended) end.append(link, { html: true }) } })
   }
+  rewriter.on("meta[charset], meta[http-equiv]", {
+    element(element) {
+      if (element.hasAttribute("charset")) element.setAttribute("charset", "utf-8")
+      if (element.getAttribute("http-equiv")?.toLowerCase() === "content-type") {
+        const content = element.getAttribute("content")
+        if (content) element.setAttribute("content", content.replace(/charset\s*=\s*[^;\s]+/i, "charset=utf-8"))
+      }
+    },
+  })
   rewriter.on("base[href]", {
     element(element) {
       const href = element.getAttribute("href")!
@@ -151,10 +210,24 @@ export async function rewriteHtml(response: Response, options: HtmlRewriteOption
       if (!href.trim() || href.trim().startsWith("#")) return
       try {
         const target = new URL(href, base)
-        if (target.origin === documentUrl.origin && (target.protocol === "http:" || target.protocol === "https:")) {
-          element.setAttribute("href", `${target.pathname}${target.search}${target.hash}`)
+        if (localUrl(target, options)) {
+          const context = options.shareContext
+          const path = context && target.pathname.startsWith(context.canonicalPrefix)
+            ? context.sharePrefix + target.pathname.slice(context.canonicalPrefix.length)
+            : target.pathname
+          const suffix = `${path}${target.search}${target.hash}`
+          const origin = context && path !== target.pathname ? documentUrl.origin : target.origin
+          element.setAttribute("href", base.origin === origin && !suffix.startsWith("//") ? suffix : `${origin}${suffix}`)
         }
       } catch { /* Preserve invalid navigation URLs. */ }
+    },
+  })
+  rewriter.on("use, image", {
+    element(element) {
+      for (const name of ["href", "xlink:href"]) {
+        const value = element.getAttribute(name)
+        if (value !== null) element.setAttribute(name, resourceUrl(value, base, documentUrl.origin, options))
+      }
     },
   })
   rewriter.on("[src], [poster], [data], link[href], [srcset], link[imagesrcset], [style]", {
@@ -167,6 +240,13 @@ export async function rewriteHtml(response: Response, options: HtmlRewriteOption
       if (tag === "object") attributes.push("data")
       if (tag === "link") {
         const rel = (element.getAttribute("rel") ?? "").toLowerCase().split(/\s+/)
+        if (rel.includes("stylesheet") || (rel.includes("preload") && element.getAttribute("as")?.toLowerCase() === "style")) {
+          const href = element.getAttribute("href")
+          try {
+            const target = href === null ? null : new URL(href, base)
+            if (target && localUrl(target, options) && !options.shellPaths.includes(target.pathname)) element.removeAttribute("integrity")
+          } catch { /* Preserve assertions for invalid or external URLs. */ }
+        }
         if (rel.some((token) => ["stylesheet", "icon", "preload", "modulepreload", "prefetch", "manifest"].includes(token))) attributes.push("href")
       }
       for (const name of attributes) {

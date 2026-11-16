@@ -7,7 +7,7 @@ import { cancelBody, InputError } from '../http/publication-input'
 const headers = {
   'Cache-Control': 'no-store',
   'X-Content-Type-Options': 'nosniff',
-  'Referrer-Policy': 'no-referrer',
+  'Referrer-Policy': 'same-origin',
   'Content-Security-Policy': "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
   'Content-Type': 'text/html; charset=utf-8',
 }

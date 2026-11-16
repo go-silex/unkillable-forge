@@ -101,7 +101,7 @@ export interface ReadPlan {
   readonly cache: 'no-store'
 }
 export type ReadDecision =
-  | { readonly kind: 'allow'; readonly plan: ReadPlan }
+  | { readonly kind: 'allow'; readonly plan: ReadPlan; readonly shareMode?: 'follow_active' | 'pinned' }
   | { readonly kind: 'deny'; readonly reason: 'not_found' | 'login_required' | 'instance_mismatch' | 'unavailable' }
   | { readonly kind: 'alias'; readonly status: 301 | 302 | 307 | 308; readonly location: string }
 
@@ -213,7 +213,10 @@ async function decideReadAuthorized(db: D1Database, config: ReadInstanceConfig, 
       const revision = first.key_grant_mode === 'pinned' ? first.key_grant_revision_id : first.active_revision_id
       for (const path of candidates) {
         const row = rs.find(r => r.path === path && r.resource_revision_id === revision && (!image || r.content_type.startsWith('image/')))
-        if (row) return makePlan(config, row, revision, 'share_key', row.page_id, row.key_grant_id, row.policy_epoch, path)
+        if (row) {
+          const decision = makePlan(config, row, revision, 'share_key', row.page_id, row.key_grant_id, row.policy_epoch, path)
+          return decision.kind === 'allow' ? { ...decision, shareMode: first.key_grant_mode } : decision
+        }
       }
       return null
     }
@@ -258,7 +261,7 @@ export async function decideRead(db: D1Database, config: ReadInstanceConfig, sub
   try {
     const decision = await decideReadAuthorized(db, config, subject, credentials, aliasPath)
     if (decision.kind !== 'allow') return decision
-    return { kind: 'allow', plan: { ...decision.plan, pinnedProof: await mintPinnedProof(config, decision.plan, credentials.nowSeconds) } }
+    return { ...decision, plan: { ...decision.plan, pinnedProof: await mintPinnedProof(config, decision.plan, credentials.nowSeconds) } }
   } catch { return deny('unavailable') }
 }
 

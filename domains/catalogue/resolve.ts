@@ -15,7 +15,8 @@ export interface ReadDeps {
 
 export async function resolveRead(request: Request, deps: ReadDeps): Promise<RouteOutcome> {
   const nowSeconds = deps.nowSeconds()
-  const identity = await authenticate(request, { teamDomain: deps.config.accessTeamDomain, audiences: deps.config.readAudiences, surface: "read" }, deps.jwks, nowSeconds)
+  const authenticated = await authenticate(request, { teamDomain: deps.config.accessTeamDomain, audiences: deps.config.readAudiences, surface: "read" }, deps.jwks, nowSeconds)
+  const identity = authenticated && nowSeconds < authenticated.expiresAt ? authenticated : null
   const { parsed, credentials, aliasPath } = parseRequest(request, deps.config)
   if (parsed.kind === "deny") return parsed
   if (parsed.kind === "shell" || parsed.kind === "catalogue") {

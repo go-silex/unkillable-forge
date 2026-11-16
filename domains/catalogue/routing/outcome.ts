@@ -11,10 +11,10 @@ export type RouteOutcome =
   | { readonly kind: "redirect"; readonly status: 301 | 302 | 307 | 308; readonly location: string }
   | { readonly kind: "shell"; readonly path: string }
   | { readonly kind: "catalogue"; readonly viewer: "anonymous" | "team" }
-  | { readonly kind: "serve"; readonly plan: ReadPlan }
+  | { readonly kind: "serve"; readonly plan: ReadPlan; readonly shareContext: { readonly canonicalPrefix: string; readonly sharePrefix: string } | null; readonly unlisted: boolean }
   | { readonly kind: "share_exchange"; readonly plan: ReadPlan; readonly cookie: { readonly pageRef: string; readonly key: string }; readonly location: string }
-  | { readonly kind: "share_unfurl"; readonly plan: ReadPlan; readonly pageRef: string; readonly key: string }
-  | { readonly kind: "share_card"; readonly plan: ReadPlan }
+  | { readonly kind: "share_unfurl"; readonly plan: ReadPlan; readonly pageRef: string; readonly key: string; readonly unlisted: true }
+  | { readonly kind: "share_card"; readonly plan: ReadPlan; readonly unlisted: true }
 
 export function toOutcome(parsed: ParsedRequest, decision: ReadDecision, identity: VerifiedIdentity | null, config: ReadInstanceConfig): RouteOutcome {
   if (parsed.kind === "deny") return parsed
@@ -31,16 +31,20 @@ export function toOutcome(parsed: ParsedRequest, decision: ReadDecision, identit
     return { kind: "deny", status: 404, reason: "not_found" }
   }
   const plan = decision.plan
+  const unlisted = plan.authority.grantId !== null || plan.authority.basis === "share_key" || plan.authority.basis === "share_cookie"
   if (parsed.kind === "share") {
-    if (parsed.grammar === "slug") return { kind: "serve", plan }
+    if (parsed.grammar === "slug" && parsed.route.kind === "subtree") return {
+      kind: "serve", plan, unlisted,
+      shareContext: { canonicalPrefix: `/a/${encodeURIComponent(parsed.route.slug)}/`, sharePrefix: `/s/${encodeURIComponent(parsed.route.slug)}/${encodeURIComponent(parsed.key)}/` },
+    }
     if (parsed.route.kind !== "tree_page") return { kind: "deny", status: 404, reason: "not_found" }
     if (parsed.browser) {
-      if (!config.shareCookie) return { kind: "serve", plan }
+      if (!config.shareCookie || decision.shareMode !== "follow_active") return { kind: "serve", plan, shareContext: null, unlisted }
       return { kind: "share_exchange", plan, cookie: { pageRef: parsed.route.pageRef, key: parsed.key }, location: canonicalUrl(parsed.route) }
     }
-    return { kind: "share_unfurl", plan, pageRef: parsed.route.pageRef, key: parsed.key }
+    return { kind: "share_unfurl", plan, pageRef: parsed.route.pageRef, key: parsed.key, unlisted: true }
   }
-  if (parsed.kind === "card") return { kind: "share_card", plan }
+  if (parsed.kind === "card") return { kind: "share_card", plan, unlisted: true }
   if ((parsed.kind === "subtree" || parsed.kind === "tree") && (plan.resource.kind === "document" || plan.resource.kind === "subdocument")) {
     const q = parsed.next.indexOf("?")
     const requested = q < 0 ? parsed.next : parsed.next.slice(0, q)
@@ -55,5 +59,5 @@ export function toOutcome(parsed: ParsedRequest, decision: ReadDecision, identit
     else if (!parsed.path.endsWith("/") && plan.requestedPath === `${parsed.path}/index.html`) target = `${requested}/`
     if (target !== null) return { kind: "redirect", status: 308, location: target + search }
   }
-  return { kind: "serve", plan }
+  return { kind: "serve", plan, shareContext: null, unlisted }
 }
