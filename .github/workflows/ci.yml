@@ -45,6 +45,28 @@ jobs:
           rm -rf plugins/unkillable-forge/dist
           node plugins/unkillable-forge/scripts/build-native.mjs --ci
           node plugins/unkillable-forge/scripts/build.mjs --local
+      # Temporary diagnostic on disposable fixtures; remove after identifying the Darwin failure.
+      - name: Probe Darwin ACL metadata
+        if: runner.os == 'macOS'
+        run: |
+          set -eu
+          work="$(mktemp -d "${TMPDIR:-/tmp}/forge-acl-probe.XXXXXXXX")"
+          trap 'rm -rf "$work"' EXIT
+          cc -std=c11 -Wall -Wextra -o "$work/probe" plugins/unkillable-forge/scripts/darwin-acl-probe.c
+          mkdir "$work/private"
+          chmod 700 "$work/private"
+          : > "$work/private/file"
+          chmod 600 "$work/private/file"
+          echo 'clean directory'
+          "$work/probe" "$work/private"
+          echo 'clean file'
+          "$work/probe" "$work/private/file"
+          chmod +a "$(id -un) allow read" "$work/private/file"
+          echo 'file with explicit allow ACL'
+          "$work/probe" "$work/private/file"
+          chmod +a "$(id -un) allow read" "$work/private"
+          echo 'directory with explicit allow ACL'
+          "$work/probe" "$work/private"
       - name: Exercise native source on this architecture
         run: npx vitest run --project publisher
       - uses: actions/upload-artifact@v4
