@@ -1,10 +1,15 @@
 import { env } from "cloudflare:workers"
 import { beforeEach, expect, it } from "vitest"
 import { PublicationService } from "../../domains/publication"
-import { uploadImport } from "../../domains/publication/staging"
+import { beginImport, seal, uploadImport } from "../../domains/publication/staging"
+import { commitImport } from "../../domains/publication/promotion"
+import { admitImportSelection, type ImportApproval } from "../../domains/catalogue/import"
+import { authenticateImportRead } from "../../domains/catalogue/principals"
+import { newId } from "../../domains/catalogue/ids"
 import type { PublicationDeps } from "../../domains/publication/types"
 import { RevisionStore } from "../../domains/store/revision-store"
-import { actor, bootstrap, configs, instanceId, jwks } from "./fixtures/catalogue"
+import { actor, bootstrap, configs, instanceId, jwks, manageRequest } from "./fixtures/catalogue"
+import { syntheticImport } from "./fixtures/import"
 import { body, clock, documentCommand } from "./fixtures/publication"
 
 beforeEach(async () => { await bootstrap() })
@@ -118,4 +123,49 @@ it("awaits an already-dispatched native stored-at batch even if the deadline pas
     expect(await pending).toMatchObject({ stored: true, state: "open" })
     expect(await env.DB.prepare("SELECT stored_at FROM publication_files WHERE session_id=? AND path=?").bind(session.sessionId, "/transfer.html").first()).toEqual({ stored_at: 10_000 })
   } finally { signalRelease() }
+}, 15_000)
+
+it("does not dispatch replay assertions after the import deadline expires during a native read", async () => {
+  const { deps } = await setup()
+  const grantId = newId("gr")
+  const fixture = await syntheticImport(pageId => [{ kind: "page_policy", policy: { operationId: "replay-shared", sourcePageId: "source-page", pageId, grantId, expectedPolicyEpoch: null, visibility: { captured: true, value: "shared", metadataV: "shared", expiresAt: null }, share: { captured: true, key: "synthetic-replay-key", expiresAt: null } } }])
+  const authority = await authenticateImportRead(await manageRequest(), deps)
+  const admitted = await admitImportSelection(fixture.selection, fixture.inventory, fixture.approval as ImportApproval, deps, authority)
+  const command = { ...fixture.selection.command, idempotencyKey: `import:${admitted.planDigest}` }
+  const session = await beginImport(deps, actor, command, { planId: fixture.selection.planId, planDigest: admitted.planDigest })
+  await uploadImport(deps, actor, session.sessionId, command.files[0].path, body(fixture.bytes), 2_000)
+  await seal(deps, actor, session.sessionId)
+  const committed = await commitImport(deps, actor, session.sessionId, admitted, fixture.selection.planId, admitted.planDigest)
+  const snapshot = async () => ({
+    audit: (await env.DB.prepare("SELECT * FROM mutation_events ORDER BY event_id").all()).results,
+    assertions: (await env.DB.prepare("SELECT * FROM import_assertions ORDER BY assertion_id").all()).results,
+    receipt: await env.DB.prepare("SELECT * FROM publication_imports WHERE plan_id=?").bind(fixture.selection.planId).first(),
+    artifact: await env.DB.prepare("SELECT active_revision_id,content_version FROM artifacts WHERE artifact_id=?").bind(session.artifactId).first(),
+    grants: (await env.DB.prepare("SELECT * FROM share_grants WHERE page_id=? ORDER BY grant_id").bind(fixture.pageId).all()).results,
+  })
+  const before = await snapshot()
+  expect(before.artifact).toEqual({ active_revision_id: committed.publication.revisionId, content_version: committed.publication.contentVersion })
+  expect(before.grants).toHaveLength(1)
+  let deadline = 0
+  const wrap = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement, { get(target, property) {
+    if (property === "bind") return (...values: unknown[]) => wrap(target.bind(...values))
+    if (property === "first") return async (...args: unknown[]) => {
+      const result = await Reflect.apply(target.first, target, args)
+      await afterDeadline(deadline)
+      return result
+    }
+    const value = Reflect.get(target, property, target)
+    return typeof value === "function" ? value.bind(target) : value
+  } })
+  const db = new Proxy(env.DB, { get(target, property) {
+    if (property === "prepare") return (sql: string) => {
+      const statement = target.prepare(sql)
+      return sql === "SELECT action,request_digest,receipt_json FROM publication_events WHERE session_id=? AND action='commit'" ? wrap(statement) : statement
+    }
+    const value = Reflect.get(target, property, target)
+    return typeof value === "function" ? value.bind(target) : value
+  } })
+  deadline = performance.now() + 550
+  await expect(commitImport({ ...deps, db }, actor, session.sessionId, admitted, fixture.selection.planId, admitted.planDigest, deadline)).rejects.toMatchObject({ code: "unavailable", detail: "import_timeout" })
+  expect(await snapshot()).toEqual(before)
 }, 15_000)

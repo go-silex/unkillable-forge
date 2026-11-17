@@ -293,7 +293,7 @@ export async function buildImportCompletion(deps: ManageDeps, actor: ManageActor
   return {statements, mappingSummary:summary(context)}
 }
 
-export async function assertImportReplay(deps: ManageDeps, actor: ManageActor, context: AdmittedImportSelection, target: CompletionTarget): Promise<ImportMappingSummary> {
+export async function assertImportReplay(deps: ManageDeps, actor: ManageActor, context: AdmittedImportSelection, target: CompletionTarget, deadline?: number): Promise<ImportMappingSummary> {
   requireManageActor(actor, deps)
   if (!admitted.has(context) || target.planId !== context.selection.planId || target.planDigest !== context.planDigest) throw new PolicyError('forbidden')
   const { db } = deps
@@ -322,7 +322,7 @@ export async function assertImportReplay(deps: ManageDeps, actor: ManageActor, c
       checks.push(assertion(db, `EXISTS (SELECT 1 FROM preview_selections WHERE page_id=? AND revision_id=? AND original_path=?)`, op.pageId,target.revisionId,op.path))
     }
   }
-  await executeGuarded(deps, actor, [{action:'import_state',requestDigest:context.planDigest,occurredAt:deps.now()}], checks)
+  await executeGuarded(deps, actor, [{action:'import_state',requestDigest:context.planDigest,occurredAt:deps.now()}], checks, undefined, [], deadline)
   return summary(context)
 }
 

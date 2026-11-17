@@ -121,7 +121,7 @@ async function commitBound(deps: PublicationDeps, actor: ManageActor, sessionId:
   const replayCommit = async (event: Event) => {
     const publication = await replay(deps, actor, event, 'commit', session.request_digest, session.artifact_id)
     if (!imported) return { publication }
-    const mappingSummary = await assertImportReplay(deps, actor, imported.admitted, { sessionId, artifactId: session.artifact_id, revisionId: session.revision_id, planId: imported.planId, planDigest: imported.planDigest, publicationReceipt: publication })
+    const mappingSummary = await assertImportReplay(deps, actor, imported.admitted, { sessionId, artifactId: session.artifact_id, revisionId: session.revision_id, planId: imported.planId, planDigest: imported.planDigest, publicationReceipt: publication }, deadline)
     return { publication, mappingSummary }
   }
   const prior = await db.prepare("SELECT action,request_digest,receipt_json FROM publication_events WHERE session_id=? AND action='commit'").bind(sessionId).first<Event>()
