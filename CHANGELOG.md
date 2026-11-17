@@ -11,6 +11,20 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ### Added
 
+- F09 source adds authorized preview/card delivery, immutable derived OG bytes,
+  request-driven enrichment intents and explicit retry/status tools. A freshly
+  minted, revealable share can request a create-only Shlink mapping when Shlink
+  is configured; without a share-sealing key the primary share remains usable
+  but no shortlink intent exists to retry. Existing mappings are not retargeted.
+  Valid non-object JSON metadata does not block previews or original images;
+  the Web share result reports shortlink requests only when work was admitted.
+  Browser Run uses admitted revision resources without management cookies;
+  HTML authors remain trusted. Native Request tests use simulated providers;
+  actual provider and visual proof remain outstanding. This is not a production
+  deployment, autonomous scheduler, historical import or advanced recovery
+  proof. Final integration, review and CI remain required; see
+  `docs/forge-manage-http.md`.
+
 - F05 adds an isolated read Worker, authorized R2 delivery, per-document revision pinning and structured HTML/CSS resource rewriting. Explicit native Data/Text bundles supply the fixed instance shell; incomplete packaging fails closed without an artefact fallback. Catalogue and per-page management links stay on the separate management origin; forms reuse Catalogue policy commands. Known legacy toolbar injections are removed only from delivered HTML, never from R2. This is engine serving, not a production cutover, corpus migration, new share grant or Shlink update; see `docs/forge-serving.md`.
 - Add an isolated F06 OAuth and streamed-byte transport spike with a temporary authenticated receiver and local MCP adapter. Source `143cb7e` received an independent CLEAR for preparation only; local SDK/Node synthetic-JWKS smoke and a named Worker dry-run bundle passed. A subsequent local Miniflare/workerd proof also exercised the receiver with synthetic assertions; none proves live Access or the three-client authentication matrix. The integrated final SHA requires its own review and CI. See `docs/forge-mcp-auth-spike.md` for boundaries and approvals.
 - `forge-inventory.py` writes a read-only inventory of one forge instance: local hub files, the canonical Pages deployment file map, optional production history, and KV visibility, share presence, and the snapshot anchor. It does not publish, reanchor, or mutate Cloudflare. Share values are not stored. A listed KV 404 is absence, not presence. `layout` `tree` records HTML path page ids; the default layout keeps the first directory. The configured root is resolved once, then opened without following. Output is refused inside a git worktree, including when the output parent is swapped for a symlink. See `docs/forge-inventory.md`.
