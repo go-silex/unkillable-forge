@@ -20,6 +20,7 @@ existing clients; the public canonical repository `go-silex/unkillable-forge`
 exists. The designed new engine is not yet implemented. Plugin identity and
 distribution remain legacy until F08. See the
 [transition runbook](docs/forge-canonical-transition.md).
+For preparation only, see the [manual engine packaging and code-return runbook](docs/forge-manual-ops.md); it is not an F11 delivery or production authorization.
 
 ---
 
