@@ -1,5 +1,5 @@
 import { executeGuarded, PolicyError } from '../catalogue/guard'
-import { importCursorIdentity, inspectImportChunk, type AdmittedImportSelection, type ImportMappingSummary } from '../catalogue/import'
+import { importCursorIdentity, importPlanForKid, inspectImportChunk, selectImportPlan, type AdmittedImportSelection, type ImportMappingSummary } from '../catalogue/import'
 import type { ManageActor } from '../catalogue/principals'
 import { SourceIntegrityError, StoreError, verifyRevisionBytes } from '../store/revision-store'
 import type { PublicationDeps, PublicationReceipt, PublicationStatus } from './types'
@@ -26,8 +26,8 @@ const cursorMessage = (instanceId: string, kid: string, payload: string) =>
   encoder.encode(`forge.import.cursor.v1\0${instanceId}\0${kid}\0${payload}`)
 type PlanCursor = {
   plan: string
-  inventoryVersion: string
-  inventoryHash: string
+  planKid: string
+  observationKid: string
   mode: 'dry_run' | 'apply'
   principal: string
   epoch: number
@@ -59,9 +59,10 @@ async function parseCursor(deps: PublicationDeps, cursor: string, admitted: Admi
   try {
     const binary = atob(parts[0].replace(/-/g, '+').replace(/_/g, '/'))
     const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(binary, c => c.charCodeAt(0)))) as PlanCursor
-    if (value.plan !== admitted.planDigest || value.inventoryVersion !== admitted.approval.objectVersion || value.inventoryHash !== admitted.approval.sha256 || value.mode !== mode || value.principal !== principal || value.epoch !== epoch || !Number.isSafeInteger(value.expiresAt) || (!allowExpired && value.expiresAt <= deps.now()) || !['preflight', 'target', 'source', 'recheck', 'apply'].includes(value.phase) ||
+    if (value.mode !== mode || value.principal !== principal || value.epoch !== epoch || !Number.isSafeInteger(value.expiresAt) || (!allowExpired && value.expiresAt <= deps.now()) || !['preflight', 'target', 'source', 'recheck', 'apply'].includes(value.phase) ||
         !Number.isSafeInteger(value.offset) || value.offset < 0 || (value.position !== null && typeof value.position !== 'string') ||
         !/^(|[a-f0-9]{64})$/.test(value.digest) || !/^(|[a-f0-9]{64})$/.test(value.target)) throw new Error()
+    if (value.observationKid !== value.planKid || value.plan !== importPlanForKid(admitted, value.planKid).planDigest) throw new Error()
     return value
   } catch { throw new PolicyError('conflict') }
 }
@@ -113,11 +114,15 @@ async function verifyFile(source: ImportSourceReader, file: AdmittedImportSelect
 }
 
 async function planImportStep(deps: PublicationDeps, admitted: AdmittedImportSelection, cursor: string | null, source: ImportSourceReader, deadline: number, mode: PlanCursor['mode']): Promise<ImportResult> {
-  const { planDigest, sourceDigest, inventory, selection } = admitted
+  const { inventory, selection } = admitted
   const identity = await withinDeadline(deadline, () => importCursorIdentity(admitted, deps))
+  const kid = deps.config.shareVerifierKeys[0]?.kid
+  if (!kid) throw new PolicyError('invalid_state')
   const state: PlanCursor = cursor === null
-    ? { plan: planDigest, inventoryVersion: admitted.approval.objectVersion, inventoryHash: admitted.approval.sha256, mode, principal: identity.principalId, epoch: identity.authorityEpoch, expiresAt: Math.min(identity.expiresAt * 1000, deps.now() + deps.publication.sessionTtlMs), phase: 'preflight', preflight: { phase: 'files', index: 0 }, position: null, offset: 0, digest: '', target: '' }
+    ? { plan: admitted.planDigest, planKid: admitted.planKid, observationKid: admitted.planKid, mode, principal: identity.principalId, epoch: identity.authorityEpoch, expiresAt: Math.min(identity.expiresAt * 1000, deps.now() + deps.publication.sessionTtlMs), phase: 'preflight', preflight: { phase: 'files', index: 0 }, position: null, offset: 0, digest: '', target: '' }
     : await withinDeadline(deadline, () => parseCursor(deps, cursor!, admitted, mode, identity.principalId, identity.authorityEpoch))
+  admitted = importPlanForKid(admitted, state.planKid)
+  const { planDigest, sourceDigest } = admitted
   const checking = async (): Promise<ImportResult> => ({ state: 'checking', planDigest, nextCursor: await withinDeadline(deadline, () => makeCursor(deps, state)) })
   if (state.phase === 'apply') {
     if (mode !== 'apply') throw new PolicyError('conflict')
@@ -135,7 +140,7 @@ async function planImportStep(deps: PublicationDeps, admitted: AdmittedImportSel
     return checking()
   }
   if (state.phase === 'target' || state.phase === 'recheck') {
-    const chunk = await withinDeadline(deadline, () => inspectImportChunk(deps, admitted, state.position))
+    const chunk = await withinDeadline(deadline, () => inspectImportChunk(deps, admitted, state.position, state.observationKid))
     if (chunk.issues.length) return { state: 'blocked', planDigest, issues: chunk.issues }
     state.digest = await withinDeadline(deadline, () => chainDigest(state.digest, chunk.targetDigest))
     state.position = chunk.nextPosition
@@ -183,8 +188,16 @@ export function planPublicationImport(deps: PublicationDeps, admitted: AdmittedI
 }
 
 export async function applyPublicationImport(deps: PublicationDeps, actor: ManageActor, admitted: AdmittedImportSelection, source: ImportSourceReader, deadline = performance.now() + deps.publication.maxUploadTimeoutMs, cursor: string | null = null): Promise<ImportResult> {
-  const { selection, planDigest, inventory } = admitted
-  const existing = await withinDeadline(deadline, () => deps.db.prepare('SELECT session_id FROM publication_sessions WHERE instance_id=? AND import_plan_id=?').bind(deps.config.instanceId, selection.planId).first())
+  const { selection, inventory } = admitted
+  const existing = await withinDeadline(deadline, () => deps.db.prepare("SELECT s.session_id,s.import_plan_digest,EXISTS(SELECT 1 FROM publication_events e WHERE e.session_id=s.session_id AND e.action='commit') AS committed FROM publication_sessions s WHERE s.instance_id=? AND s.import_plan_id=?").bind(deps.config.instanceId, selection.planId).first<{session_id:string;import_plan_digest:string;committed:number}>())
+  if (cursor !== null) {
+    const identity = await importCursorIdentity(admitted, deps)
+    const parsed = await parseCursor(deps, cursor, admitted, 'apply', identity.principalId, identity.authorityEpoch, existing?.committed === 1)
+    const selected = importPlanForKid(admitted, parsed.planKid)
+    if (existing && selected.planDigest !== existing.import_plan_digest) throw new PolicyError('conflict')
+    admitted = selected
+  } else if (existing) admitted = selectImportPlan(admitted, existing.import_plan_digest)
+  let { planDigest } = admitted
   let continuation: string | null = null
   if (!existing) {
     const planned = await planImportStep(deps, admitted, cursor, source, deadline, 'apply')
@@ -192,21 +205,14 @@ export async function applyPublicationImport(deps: PublicationDeps, actor: Manag
     if (planned.state !== 'ready') return planned
     continuation = planned.nextCursor!
   }
-  const command = { ...selection.command, idempotencyKey: `import:${planDigest}` }
+  let command = { ...selection.command, idempotencyKey: `import:${planDigest}` }
   let session!: PublicationStatus
-  let expiredCursor = false
-  if (existing && cursor !== null) {
-    const identity = await importCursorIdentity(admitted, deps)
-    const parsed = await parseCursor(deps, cursor, admitted, 'apply', identity.principalId, identity.authorityEpoch, true)
-    expiredCursor = parsed.expiresAt <= deps.now()
-  }
   if (existing) {
     session = await beginImport(deps, actor, command, { planId: selection.planId, planDigest }, deadline)
     if (session.state === 'committed') {
       const result = await commitImport(deps, actor, session.sessionId, admitted, selection.planId, planDigest, deadline)
       return { state: 'committed', ...result }
     }
-    if (expiredCursor) throw new PolicyError('conflict')
     remaining(deadline)
   }
   remaining(deadline)
@@ -214,7 +220,21 @@ export async function applyPublicationImport(deps: PublicationDeps, actor: Manag
   remaining(deadline)
   for (const file of selection.command.files) if (file.size > MAX_BYTES) return { state: 'blocked', planDigest, issues: [{ code: 'import_file_too_large', path: file.path }] }
   if (!existing) {
-    session = await beginImport(deps, actor, command, { planId: selection.planId, planDigest }, deadline)
+    try {
+      session = await beginImport(deps, actor, command, { planId: selection.planId, planDigest }, deadline)
+    } catch (error) {
+      if (!(error instanceof PolicyError) || error.code !== 'conflict') throw error
+      const winner = await withinDeadline(deadline, () => deps.db.prepare('SELECT import_plan_digest FROM publication_sessions WHERE instance_id=? AND import_plan_id=?').bind(deps.config.instanceId, selection.planId).first<{import_plan_digest:string}>())
+      if (!winner || winner.import_plan_digest === planDigest) throw error
+      admitted = selectImportPlan(admitted, winner.import_plan_digest)
+      planDigest = admitted.planDigest
+      command = { ...selection.command, idempotencyKey: `import:${planDigest}` }
+      remaining(deadline)
+      await executeGuarded(deps, actor, [{ action: 'import_state', requestDigest: planDigest, occurredAt: deps.now() }], [], undefined, [], deadline)
+      remaining(deadline)
+      session = await beginImport(deps, actor, command, { planId: selection.planId, planDigest }, deadline)
+      continuation = null
+    }
     if (session.state === 'committed') {
       const result = await commitImport(deps, actor, session.sessionId, admitted, selection.planId, planDigest, deadline)
       return { state: 'committed', ...result }

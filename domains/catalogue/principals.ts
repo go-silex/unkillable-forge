@@ -90,6 +90,28 @@ export async function requireImportReadContext(context: unknown, deps: ManageDep
   await importReadCursorIdentity(context, deps)
 }
 
+/** Mint an ordinary guarded manage actor from existing import authority without registration. */
+export async function importManageActor(context: ImportReadContext, deps: ManageDeps): Promise<ManageActor> {
+  const identity = await importReadCursorIdentity(context, deps)
+  const authority = importReadContexts.get(context)!
+  const result = await deps.db.withSession("first-primary").prepare(`SELECT role_grant_id, role, scope_kind, scope_page_id
+    FROM role_grants WHERE principal_id = ? AND revoked_at IS NULL`).bind(identity.principalId).all<RoleRow>()
+  const roles = Object.freeze(result.results.map(role => Object.freeze({
+    roleGrantId: role.role_grant_id,
+    role: role.role,
+    scope: Object.freeze(role.scope_kind === "installation" ? { kind: "installation" as const } : { kind: "page" as const, pageId: role.scope_page_id! }),
+  })))
+  if (!roles.some(role => role.role === "admin" && role.scope.kind === "installation")) throw new PolicyError("forbidden")
+  const actor = Object.freeze({
+    principalId: identity.principalId, status: "active" as const, authorityEpoch: identity.authorityEpoch, roles,
+    instanceId: authority.instanceId, audience: authority.audience, issuer: authority.issuer,
+    subject: authority.subject, expiresAt: authority.expiresAt,
+  }) as ManageActor
+  manageActors.add(actor)
+  requireManageActor(actor, deps)
+  return actor
+}
+
 export async function authenticateManage(request: Request, deps: ManageDeps): Promise<ManageActor | null> {
   const now = deps.now() / 1000
   const instanceId = deps.config.instanceId

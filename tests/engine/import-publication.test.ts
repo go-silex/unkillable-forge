@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest"
+import worker from "../../adapters/http/manageWorker"
 import { RevisionStore } from "../../domains/store/revision-store"
 import { newId } from "../../domains/catalogue/ids"
 import { instanceId, pageFixture } from "./fixtures/catalogue"
-import { env, setupHttp, signed } from "./fixtures/manage-http"
+import { env, request, setupHttp, signed } from "./fixtures/manage-http"
 import { importResult, syntheticImport } from "./fixtures/import"
+import { manageHttpBindings } from "./fixtures/manage-http-bindings"
 import { content, storedBytes } from "./fixtures/publication"
 
 setupHttp()
@@ -192,6 +194,42 @@ describe("synthetic selected import through the real management endpoint", () =>
     const response = await advance(fixture.call, jwt, fixture.selection, "dry_run", cursor)
     if (response.status === 200) expect((await importResult(response)).state).toBe("blocked")
     else expect(response.status).toBe(409)
+  })
+
+  it("resumes under a retained verifier key after rotation, and rejects its removal", async () => {
+    const fixture = await syntheticImport()
+    const jwt = await signed()
+    let originalCursor: string | null = null
+    let sawSourcePhase = false
+    for (let i = 0; i < 64; i++) {
+      const result = await importResult(await fixture.call(jwt, { op: "dry_run", selection: fixture.selection, cursor: originalCursor }))
+      expect(result.state).toBe("checking")
+      originalCursor = result.nextCursor
+      const payload = originalCursor!.split(".")[0].replace(/-/g, "+").replace(/_/g, "/")
+      if ((JSON.parse(atob(payload)) as { phase: string }).phase === "source") { sawSourcePhase = true; break }
+    }
+    const decoded = atob(originalCursor!.split(".")[0].replace(/-/g, "+").replace(/_/g, "/"))
+    expect(decoded).not.toContain(fixture.approval.sha256)
+    expect(decoded).not.toContain(fixture.approval.objectVersion)
+    expect(sawSourcePhase).toBe(true)
+    const original = JSON.parse(manageHttpBindings.FORGE_SHARE_VERIFIER_KEYS) as { kid: string; key: string }[]
+    const replacement = { kid: "two", key: btoa("\u0005".repeat(32)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_") }
+    const rotated = { ...fixture.bindings, FORGE_SHARE_VERIFIER_KEYS: JSON.stringify([replacement, ...original]) }
+    const removed = { ...fixture.bindings, FORGE_SHARE_VERIFIER_KEYS: JSON.stringify([replacement]) }
+    const call = (bindings: typeof rotated) => (token: string, value: unknown) =>
+      worker.fetch(request("/api/maintenance/import", "POST", token, JSON.stringify(value), { "Content-Type": "application/json" }), bindings)
+    expect((await call(removed)(jwt, { op: "dry_run", selection: fixture.selection, cursor: originalCursor })).status).toBe(409)
+    const continued = await importResult(await call(rotated)(jwt, { op: "dry_run", selection: fixture.selection, cursor: originalCursor }))
+    expect(continued.state).toBe("checking")
+    expect(continued.nextCursor.split(".")[1]).toBe("two")
+    expect((await call(removed)(jwt, { op: "dry_run", selection: fixture.selection, cursor: continued.nextCursor })).status).toBe(409)
+    const result = await importResult(await advance(call(rotated), jwt, fixture.selection, "dry_run", continued.nextCursor))
+    expect(result.state).toBe("ready")
+    const committed = await finish(fixture.call, jwt, fixture.selection)
+    const replay = await finish(call(rotated), jwt, fixture.selection)
+    expect(replay.publication).toEqual(committed.publication)
+    expect((await call(removed)(jwt, { op: "apply", selection: fixture.selection, cursor: null })).status).toBe(409)
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM publication_imports").first()).toEqual({ n: 1 })
   })
   it("resumes a selection exceeding 128 metadata entries", async () => {
     const fixture = await syntheticImport(undefined, 65)

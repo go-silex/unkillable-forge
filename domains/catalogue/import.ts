@@ -48,11 +48,12 @@ export interface ApprovedImportInventory {
   readonly files: readonly ImportFile[]
   readonly operations: readonly ImportOperation[]
 }
-export interface AdmittedImportSelection { readonly selection: ImportSelection; readonly inventory: ApprovedImportInventory; readonly approval: ImportApproval; readonly planDigest: string; readonly sourceDigest: string }
+export interface AdmittedImportSelection { readonly selection: ImportSelection; readonly inventory: ApprovedImportInventory; readonly approval: ImportApproval; readonly planKid: string; readonly planDigest: string; readonly sourceDigest: string }
 export interface ImportMappingSummary { readonly pages: number; readonly aliases: number; readonly shortlinks: number; readonly previews: number }
 const admitted = new WeakMap<object, ImportReadContext>()
+type PlanCandidate = { readonly kid:string; readonly planDigest:string; readonly sourceDigest:string }
+const candidates = new WeakMap<object, readonly PlanCandidate[]>()
 export const IMPORT_METADATA_LIMIT = 128
-const hash = async (value: string): Promise<string> => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))), x => x.toString(16).padStart(2, '0')).join('')
 const hex = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 const text = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 1024
 function canonical(value: unknown): string {
@@ -131,12 +132,18 @@ export async function admitImportSelection(selection: ImportSelection, input: un
     } else throw new PolicyError('invalid_state')
   }
   if (selection.command.pages.some(page => page.disposition === 'new' && !policyPages.has(page.pageId))) throw new PolicyError('invalid_state', 'missing_policy_evidence')
-  const sourceDigest = await hash(JSON.stringify(inventory.files.map(({path,kind,contentType,size,sha256}) => ({path,kind,contentType,size,sha256}))))
-  const key = deps.config.shareVerifierKeys[0]
-  if (!key) throw new PolicyError('invalid_state')
-  const bytes = new TextEncoder().encode(`forge.import.plan.v1\0${canonical({selection, pin:approval.sha256, approvalRef:approval.approvalRef})}`)
-  const planDigest = Array.from(new Uint8Array(await crypto.subtle.sign('HMAC', key.key, bytes)), b => b.toString(16).padStart(2, '0')).join('')
-  const result = structuredClone({ selection, inventory, approval, planDigest, sourceDigest })
+  const planInput = canonical({
+    instanceId:deps.config.instanceId,
+    selection: {version:selection.version,inventoryId:selection.inventoryId,selectionId:selection.selectionId,planId:selection.planId},
+    pin: {objectKey:approval.objectKey,objectVersion:approval.objectVersion,sha256:approval.sha256,maxInventoryBytes:approval.maxInventoryBytes,approvalRef:approval.approvalRef,sourceInstance:approval.sourceInstance,kind:approval.kind,g1bRef:approval.g1bRef},
+  })
+  const sourceInput = canonical({instanceId:deps.config.instanceId,files:inventory.files.map(({path,kind,contentType,size,sha256}) => ({path,kind,contentType,size,sha256}))})
+  const sign = async (key:CryptoKey, domain:string, kid:string, input:string) => Array.from(new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${domain}\0${kid}\0${input}`))), b => b.toString(16).padStart(2,'0')).join('')
+  const options = await Promise.all(deps.config.shareVerifierKeys.map(async key => ({
+    kid:key.kid, planDigest:await sign(key.key,'forge.import.plan.v2',key.kid,planInput), sourceDigest:await sign(key.key,'forge.import.source.v2',key.kid,sourceInput),
+  })))
+  if (!options.length) throw new PolicyError('invalid_state')
+  const result = structuredClone({ selection, inventory, approval, planKid:options[0].kid, planDigest:options[0].planDigest, sourceDigest:options[0].sourceDigest })
   const freeze = (value: unknown): void => {
     if (value && typeof value === 'object' && !Object.isFrozen(value)) {
       for (const child of Object.values(value)) freeze(child)
@@ -145,7 +152,31 @@ export async function admitImportSelection(selection: ImportSelection, input: un
   }
   freeze(result)
   admitted.set(result, readContext)
+  candidates.set(result, options)
   return result
+}
+
+function selectCandidate(context: AdmittedImportSelection, predicate: (candidate:PlanCandidate) => boolean): AdmittedImportSelection {
+  const authority = admitted.get(context)
+  const options = candidates.get(context)
+  if (!authority || !options) throw new PolicyError('forbidden')
+  const selected = options.find(predicate)
+  if (!selected) throw new PolicyError('conflict')
+  if (selected.planDigest === context.planDigest) return context
+  const result = Object.freeze({...context,planKid:selected.kid,planDigest:selected.planDigest,sourceDigest:selected.sourceDigest})
+  admitted.set(result, authority)
+  candidates.set(result, options)
+  return result
+}
+
+/** Only a digest already persisted for this admitted plan may select a retained candidate. */
+export function selectImportPlan(context: AdmittedImportSelection, digest: string): AdmittedImportSelection {
+  return selectCandidate(context, candidate => candidate.planDigest === digest)
+}
+
+/** Caller must authenticate the cursor and its key ID before selecting by key. */
+export function importPlanForKid(context: AdmittedImportSelection, kid: string): AdmittedImportSelection {
+  return selectCandidate(context, candidate => candidate.kid === kid)
 }
 
 export async function importCursorIdentity(context: AdmittedImportSelection, deps: ManageDeps) {
@@ -154,7 +185,7 @@ export async function importCursorIdentity(context: AdmittedImportSelection, dep
   return importReadCursorIdentity(authority, deps)
 }
 
-export async function inspectImportTarget(deps: ManageDeps, context: AdmittedImportSelection): Promise<string> {
+export async function inspectImportTarget(deps: ManageDeps, context: AdmittedImportSelection, observationKid: string): Promise<string> {
   if (!admitted.has(context)) throw new PolicyError('forbidden')
   await requireImportReadContext(admitted.get(context)!, deps)
   const command = context.selection.command
@@ -178,8 +209,8 @@ export async function inspectImportTarget(deps: ManageDeps, context: AdmittedImp
     deps.db.prepare('SELECT artifact_id FROM publication_imports WHERE instance_id=? AND source_instance=? AND source_artifact_id=? LIMIT 1').bind(deps.config.instanceId,context.inventory.sourceInstance,context.inventory.sourceArtifactId),
   ])
   const related = results.map(result => result.results)
-  const key = deps.config.shareVerifierKeys[0]
-  if (!key) throw new PolicyError('invalid_state')
+  const key = deps.config.shareVerifierKeys.find(candidate => candidate.kid === observationKid)
+  if (!key) throw new PolicyError('conflict')
   return Array.from(new Uint8Array(await crypto.subtle.sign('HMAC', key.key, new TextEncoder().encode(`forge.import.target.v1\0${canonical(related)}`))), b => b.toString(16).padStart(2,'0')).join('')
 }
 
@@ -335,7 +366,7 @@ export async function inspectImportConflicts(deps: ManageDeps, context: Admitted
 }
 
 /** One bounded observation. The opaque position is carried in a signed caller cursor. */
-export async function inspectImportChunk(deps: ManageDeps, context: AdmittedImportSelection, position: string | null): Promise<{nextPosition:string|null;targetDigest:string;issues:readonly {code:string;pageId?:string;path?:string}[]}> {
+export async function inspectImportChunk(deps: ManageDeps, context: AdmittedImportSelection, position: string | null, observationKid: string): Promise<{nextPosition:string|null;targetDigest:string;issues:readonly {code:string;pageId?:string;path?:string}[]}> {
   const readContext = admitted.get(context)
   if (!readContext) throw new PolicyError('forbidden')
   await requireImportReadContext(readContext, deps)
@@ -379,7 +410,7 @@ export async function inspectImportChunk(deps: ManageDeps, context: AdmittedImpo
     const operations = cursor.phase === 'operations' ? context.inventory.operations.slice(cursor.index,cursor.index + IMPORT_METADATA_LIMIT) : []
     const chunk: AdmittedImportSelection = { ...context, selection:{...context.selection,command:chunkCommand}, inventory:{...context.inventory,operations} }
     admitted.set(chunk, readContext)
-    const targetDigest = await inspectImportTarget(deps, chunk)
+    const targetDigest = await inspectImportTarget(deps, chunk, observationKid)
     if (cursor.phase === 'operations') {
       const conflictChunk: AdmittedImportSelection = { ...chunk, selection:{...context.selection,command:{...command,expectedRevisionId:null}} }
       admitted.set(conflictChunk, readContext)
@@ -423,8 +454,8 @@ export async function inspectImportChunk(deps: ManageDeps, context: AdmittedImpo
     } else next = nextPhase()
     observation = rows
   }
-  const key = deps.config.shareVerifierKeys[0]
-  if (!key) throw new PolicyError('invalid_state')
+  const key = deps.config.shareVerifierKeys.find(candidate => candidate.kid === observationKid)
+  if (!key) throw new PolicyError('conflict')
   const bytes = new TextEncoder().encode(`forge.import.chunk.v1\0${canonical({cursor,artifact,observation})}`)
   const targetDigest = Array.from(new Uint8Array(await crypto.subtle.sign('HMAC', key.key, bytes)), b => b.toString(16).padStart(2,'0')).join('')
   return {nextPosition:next ? JSON.stringify(next) : null,targetDigest,issues}

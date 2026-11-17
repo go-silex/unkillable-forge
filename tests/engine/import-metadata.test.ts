@@ -27,8 +27,8 @@ async function tracedCall(fixture: {call:(jwt:string,value:unknown)=>Promise<Res
   finally { console.info(`[import-metadata:${trace.label}] ${op} request ${Math.round(performance.now()-start)}ms bytes=${byteLength({op,selection,cursor})}`) }
 }
 
-async function complete(fixture: { call: (jwt: string, value: unknown) => Promise<Response>; selection: unknown }, jwt: string, trace?:Trace) {
-  let cursor: string | null = null
+async function complete(fixture: { call: (jwt: string, value: unknown) => Promise<Response>; selection: unknown }, jwt: string, trace?:Trace, initialCursor: string | null = null) {
+  let cursor: string | null = initialCursor
   for (let i = 0; i < 256; i++) {
     const response = await tracedCall(fixture, jwt, "apply", fixture.selection, cursor, trace)
     const text = await response.clone().text()
@@ -320,7 +320,73 @@ describe("synthetic selected import metadata", () => {
     }
     expect(await env.DB.prepare("SELECT count(*) AS n FROM share_grants WHERE page_id = ? AND revoked_at IS NULL").bind(fixture.pageId).first()).toEqual({ n: 0 })
     expect(await env.DB.prepare("SELECT count(*) AS n FROM shortlink_mappings").first()).toEqual({ n: 1 })
-  })
+  }, 30_000)
+
+  it("resumes and replays the same import across retained verifier-key rotation", async () => {
+    const grantId = newId("gr")
+    const seed = await syntheticImport(pageId => [{kind:"page_policy",policy:{operationId:"rotation-policy",sourcePageId:"source-page",pageId,grantId,expectedPolicyEpoch:null,visibility:{captured:true,value:"shared",metadataV:"shared",expiresAt:null},share:{captured:true,key,expiresAt:null}}}], 9)
+    const oldKeys = JSON.parse(seed.bindings.FORGE_SHARE_VERIFIER_KEYS as string) as {kid:string;key:string}[]
+    const newKey = {kid:"two",key:btoa(String.fromCharCode(...new Uint8Array(32).fill(2))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"")}
+    const rotatedBindings = {...seed.bindings,FORGE_SHARE_VERIFIER_KEYS:JSON.stringify([newKey,...oldKeys])}
+    const removedBindings = {...seed.bindings,FORGE_SHARE_VERIFIER_KEYS:JSON.stringify([newKey])}
+    const renamedBindings = {...seed.bindings,FORGE_SHARE_VERIFIER_KEYS:JSON.stringify([{kid:"two",key:oldKeys[0].key}])}
+    const withBindings = (bindings:typeof seed.bindings) => ({...seed,bindings,call:(jwt:string,value:unknown) => worker.fetch(request("/api/maintenance/import","POST",jwt,JSON.stringify(value),{"Content-Type":"application/json"}),bindings)})
+    const rotated = withBindings(rotatedBindings), removed = withBindings(removedBindings), renamed = withBindings(renamedBindings), jwt = await signed()
+    const firstCheck = await importResult(await seed.call(jwt,{op:"dry_run",selection:seed.selection,cursor:null}))
+    expect(firstCheck.state).toBe("checking")
+    const cursorPayload = atob(firstCheck.nextCursor.split(".")[0].replace(/-/g,"+").replace(/_/g,"/"))
+    expect(cursorPayload).not.toContain(seed.approval.sha256)
+    expect(cursorPayload).not.toContain(key)
+    expect(JSON.stringify(firstCheck)).not.toContain(seed.approval.sha256)
+    expect(JSON.stringify(firstCheck)).not.toContain(key)
+    expect((await removed.call(jwt,{op:"dry_run",selection:seed.selection,cursor:firstCheck.nextCursor})).status).toBe(409)
+    let cursor: string | null = firstCheck.nextCursor
+    let checked: Record<string,any> = firstCheck
+    // Advance several real observation requests before rotating, without inspecting the opaque cursor.
+    for (let i=0; i<5; i++) {
+      checked = await importResult(await seed.call(jwt,{op:"dry_run",selection:seed.selection,cursor}))
+      expect(checked.state).toBe("checking")
+      cursor = checked.nextCursor
+    }
+    for (let i=0; i<256 && checked.state==="checking"; i++) {
+      checked = await importResult(await rotated.call(jwt,{op:"dry_run",selection:seed.selection,cursor}))
+      cursor = checked.nextCursor ?? null
+      if (i === 0) {
+        expect(checked.state).toBe("checking")
+        expect((await removed.call(jwt,{op:"dry_run",selection:seed.selection,cursor})).status).toBe(409)
+      }
+    }
+    expect(checked.state).toBe("ready")
+    expect(checked.planDigest).toBe(firstCheck.planDigest)
+    const unkeyedSource = await content(JSON.stringify(seed.inventory.files.map(({path,kind,contentType,size,sha256}) => ({path,kind,contentType,size,sha256}))))
+    expect(checked.sourceDigest).not.toBe(unkeyedSource.sha256)
+    expect(JSON.stringify(checked)).not.toContain(seed.approval.sha256)
+    expect(JSON.stringify(checked)).not.toContain(key)
+    cursor = null
+    let staged: Record<string,any> = {}
+    for (let i=0; i<256; i++) {
+      staged = await importResult(await seed.call(jwt,{op:"apply",selection:seed.selection,cursor}))
+      cursor = staged.nextCursor
+      if (staged.state !== "checking") break
+    }
+    expect(staged.state).toBe("staging")
+    const committed = await complete(rotated,jwt,undefined,cursor)
+    const replay = await complete(rotated,jwt)
+    expect(replay.publication).toEqual(committed.publication)
+    expect((await renamed.call(jwt,{op:"apply",selection:seed.selection,cursor:null})).status).toBe(409)
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM publication_imports").first()).toEqual({n:1})
+    expect(await env.DB.prepare("SELECT grant_id,revoked_at FROM share_grants WHERE page_id=?").bind(seed.pageId).all()).toMatchObject({results:[{grant_id:grantId,revoked_at:null}]})
+    const changedPin = await repin(rotated,seed.selection,{...seed.inventory,evidence:{...seed.inventory.evidence,capturedAt:seed.inventory.evidence.capturedAt+1}})
+    expect((await changedPin.call(jwt,{op:"apply",selection:seed.selection,cursor:null})).status).toBe(409)
+    const next = await updatePlan(rotated,committed.publication,"rotation-next")
+    const update = await repin(rotated,next.selection,next.inventory)
+    await complete(update,jwt)
+    expect((await rotated.call(jwt,{op:"apply",selection:seed.selection,cursor:null})).status).toBe(409)
+    const policy = await env.DB.prepare("SELECT policy_epoch FROM pages WHERE page_id=?").bind(seed.pageId).first<{policy_epoch:number}>()
+    if (!policy) throw new Error("missing shared page")
+    await revokeShare({db:env.DB,config:(await configs()).manage,jwks,now:Date.now},actor,{pageId:seed.pageId,artifactId:committed.publication.artifactId,expectedPolicyEpoch:policy.policy_epoch,grantId})
+    expect((await update.call(jwt,{op:"apply",selection:update.selection,cursor:null})).status).toBe(409)
+  }, 30000)
 
   it("does not commit publication or receipts when an imported alias conflicts", async () => {
     const fixture = await syntheticImport(pageId => [

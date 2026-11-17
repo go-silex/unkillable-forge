@@ -184,7 +184,7 @@ describe("synthetic import HTTP security", () => {
     const admitted = await admitImportSelection(fixture.selection, fixture.inventory, fixture.approval as ImportApproval, runtime.deps, context)
     await revokeRole(runtime.deps, operator, { targetPrincipalId: targetId, expectedTargetAuthorityEpoch: 0, roleGrantId: targetRole })
     const before = await snapshot()
-    await expect(inspectImportChunk(runtime.deps, admitted, null)).rejects.toMatchObject({ code: "forbidden" })
+    await expect(inspectImportChunk(runtime.deps, admitted, null, "one")).rejects.toMatchObject({ code: "forbidden" })
     await expect(admitImportSelection(fixture.selection, fixture.inventory, fixture.approval as ImportApproval, runtime.deps, context)).rejects.toMatchObject({ code: "forbidden" })
     expect(await snapshot()).toEqual(before)
   })

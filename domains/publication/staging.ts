@@ -128,9 +128,9 @@ async function guarded(deps: PublicationDeps, actor: ManageActor, s: Session, pa
   const now = clock(deps)
   await executeGuarded(deps, actor, guards(s, pages, now), [...assertion(deps, s, now, allowSealed), ...effects], ownership, [], importDeadline)
 }
-async function transferGuarded(deps: PublicationDeps, actor: ManageActor, s: Session, pages: PageScope[], effects: D1PreparedStatement[]): Promise<void> {
+async function transferGuarded(deps: PublicationDeps, actor: ManageActor, s: Session, pages: PageScope[], effects: D1PreparedStatement[], deadline: number): Promise<void> {
   const now = clock(deps)
-  await executeGuarded(deps, actor, [transferGuard(s, pages, now)], [...assertion(deps, s, now), ...effects])
+  await executeGuarded(deps, actor, [transferGuard(s, pages, now)], [...assertion(deps, s, now), ...effects], undefined, [], deadline)
 }
 export async function status(deps: PublicationDeps, actor: ManageActor, sessionId: string): Promise<PublicationStatus> {
   const s = await load(deps, actor, sessionId)
@@ -327,7 +327,7 @@ async function transfer(deps: PublicationDeps, actor: ManageActor, sessionId: st
     if (!f || f.source !== source) throw new PolicyError('not_found')
     if (f.stored_at !== null && f.object_key !== null && f.object_version !== null) return {sessionId,path,stored:true,state}
     if (state !== 'open') throw new PolicyError('conflict')
-    await transferGuarded(deps,actor,s,pages,[])
+    await transferGuarded(deps,actor,s,pages,[],deadline)
     if (controller.signal.aborted || performance.now() >= deadline) throw timeout
     if (source === 'base') {
       if (!s.base_revision_id) fail()
@@ -345,10 +345,10 @@ async function transfer(deps: PublicationDeps, actor: ManageActor, sessionId: st
     if (!body) fail()
     if (controller.signal.aborted || performance.now() >= deadline) { void body!.cancel().catch(() => {}); throw timeout }
     const stored = await deps.store.put({ artifactId:s.artifact_id, revisionId:s.revision_id, kind:'resource', path }, { size:f.size, sha256:f.sha256 }, body!, controller.signal)
-    await transferGuarded(deps,actor,s,pages,[deps.db.prepare('UPDATE publication_files SET object_key = ?, object_version = ?, stored_at = ? WHERE session_id = ? AND path = ?').bind(stored.key,stored.version,clock(deps),sessionId,path)])
+    await transferGuarded(deps,actor,s,pages,[deps.db.prepare('UPDATE publication_files SET object_key = ?, object_version = ?, stored_at = ? WHERE session_id = ? AND path = ?').bind(stored.key,stored.version,clock(deps),sessionId,path)],deadline)
     return {sessionId,path,stored:true,state:'open'}
   } catch (error) {
-    if (error === timeout || (error instanceof StoreError && error.cause === timeout)) throw timeout
+    if (error === timeout || (error instanceof StoreError && error.cause === timeout) || (error instanceof PolicyError && error.detail === 'import_timeout')) throw timeout
     throw error
   } finally { clearTimeout(timer) }
 }

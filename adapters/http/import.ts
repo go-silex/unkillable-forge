@@ -1,4 +1,4 @@
-import { authenticateImportRead, authenticateManage, type ManageActor } from '../../domains/catalogue/principals'
+import { authenticateImportRead, importManageActor } from '../../domains/catalogue/principals'
 import { PolicyError } from '../../domains/catalogue/guard'
 import { admitImportSelection, type ImportSelection } from '../../domains/catalogue/import'
 import { planPublicationImport, applyPublicationImport, type ImportSourceReader } from '../../domains/publication/import'
@@ -129,12 +129,8 @@ async function loadInventory(bucket: R2Bucket, key: string, version: string, exp
 export async function handleImport(request: Request, runtime: Runtime): Promise<unknown> {
   const deadline = performance.now() + runtime.deps.publication.maxUploadTimeoutMs
   const input = await readRequest(request, runtime.transport)
-  let actor: ManageActor | null = null
-  const context = await authenticateImportRead(request, runtime.deps)
-  if (input.op === 'apply') {
-    actor = await authenticateManage(request, runtime.deps)
-    if (!actor) throw new PolicyError('unauthenticated')
-  }
+  const context = await withinImportDeadline(deadline, () => authenticateImportRead(request, runtime.deps))
+  const actor = input.op === 'apply' ? await withinImportDeadline(deadline, () => importManageActor(context, runtime.deps)) : null
   const configured = runtime.importSource
   if (!configured) throw new PolicyError('unavailable')
   const approval = configured.approvals.find(p => p.inventoryId === input.selection.inventoryId && p.selectionId === input.selection.selectionId)

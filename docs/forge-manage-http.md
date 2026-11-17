@@ -86,16 +86,25 @@ writes. It may return `checking` with a continuation cursor, `blocked` with
 issues, or `ready` with plan, source and target digests. A ready result is an
 observation made during that run, not an atomic snapshot of the current source,
 a promise that its objects remain available, or permission to apply. The
-inventory's pinned version and digest are rechecked on each request; the
-continuation is signed and binds the operation, instance, current administrator
-and authority epoch, inventory version/hash, plan, phase and expiry. The
-configured Catalogue share-verifier key signs it with a separate import-cursor
-domain. The cursor is not a credential or authority to activate. Expiry or a
-changed actor/plan requires restarting an unfinished check; a removed signing
-key makes its cursor invalid. A committed receipt can be reconciled with fresh
-authority even after cursor expiry. Apply can return `checking` before staging;
-pass its `nextCursor` to the next apply request and continue staged responses
-with their `nextCursor`, or resume an existing session without a cursor.
+inventory's pinned version and digest are rechecked on each request. Plan and
+source identities use separate domain-separated HMACs: the plan binds the
+selection and exact approved inventory pin, and the source digest binds the
+file descriptors. Neither exposes raw keys, destinations or an unkeyed digest
+of protected inventory. Existing sessions select their original plan identity
+from the retained verifier-key ring; new plans use its primary key.
+The continuation is signed and binds the operation, instance, current
+administrator and authority epoch, plan, phase and expiry. Target observations
+remain keyed under the verifier key selected when the continuation starts;
+new cursors are signed with the current primary key. Retaining the original
+plan and observation keys across rotation permits unfinished checks and
+sessions to continue; removing either required key prevents reconciliation.
+Cursor MACs are verified against their indicated retained key. The cursor is not
+a credential or authority to activate. Expiry or a changed actor/plan requires
+restarting an unfinished check; a committed receipt can be reconciled with fresh authority
+after cursor expiry while its plan key remains retained. Apply can return `checking`
+before staging; pass its `nextCursor` to the next apply request and continue
+staged responses with their `nextCursor`, or resume an existing session without
+a cursor.
 
 Apply reauthenticates and uses normal Publication staging, streamed byte
 verification, sealing and activation. Each source read must match the approved
@@ -120,9 +129,10 @@ A provider unpublishing that resource after preparation makes activation
 conflict; local edges remain governed by the selected revision. This applies
 to ordinary Publication as well as import, not only to dry-run.
 
-The request deadline includes metadata inspection and byte transfer. A D1
-write already started cannot be cancelled and can outlive that deadline;
-subsequent write phases must not start after expiry.
+The request deadline includes metadata inspection and byte transfer. Each
+guarded transfer write checks the deadline immediately before D1 dispatch; no
+new write batch may start after expiry. A D1 write already submitted cannot be
+cancelled and may settle after the deadline; its outcome is awaited.
 Finite visibility or shared-key expiries are explicitly blocked as
 `expiring_policy_unsupported`: the current target policy cannot preserve
 their expiry without extending access. Historical import remains unauthorized
