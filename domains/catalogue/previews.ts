@@ -22,6 +22,23 @@ export interface PreviewRequest {
   readonly candidates: readonly string[]
   readonly credentials: ReadCredentials
 }
+/** Select an original image only when the admitted revision owns it. */
+export function importPreviewStatements(db: D1Database, pageId: string, artifactId: string, revisionId: string, path: string, assertionId: string): readonly D1PreparedStatement[] {
+  return [
+    db.prepare(`INSERT INTO import_assertions(assertion_id,verdict)
+      SELECT ?, CASE WHEN EXISTS (
+        SELECT 1 FROM pages p JOIN revision_pages rp ON rp.page_id=p.page_id AND rp.revision_id=?
+        JOIN revision_resources rr ON rr.revision_id=rp.revision_id AND rr.path=? AND rr.content_type IN ('image/jpeg','image/png')
+        JOIN routes r ON r.page_id=p.page_id AND r.kind IN ('subtree','tree_page')
+        WHERE p.page_id=? AND p.artifact_id=? AND p.tombstoned_at IS NULL
+          AND ((r.kind='subtree' AND substr(rr.path,1,length('/a/'||r.route_key||'/'))='/a/'||r.route_key||'/')
+            OR EXISTS (SELECT 1 FROM resource_owners ro WHERE ro.owner_revision_id=rp.revision_id AND ro.owner_page_id=p.page_id AND ro.path=rr.path AND ro.provider_artifact_id=p.artifact_id))
+      ) THEN 'ok' ELSE 'conflict' END`).bind(assertionId, revisionId, path, pageId, artifactId),
+    db.prepare('INSERT OR IGNORE INTO preview_selections(page_id,revision_id,original_path) VALUES (?,?,?)').bind(pageId, revisionId, path),
+    db.prepare(`INSERT INTO import_assertions(assertion_id,verdict) SELECT ?, CASE WHEN EXISTS (SELECT 1 FROM preview_selections WHERE page_id=? AND revision_id=? AND original_path=?) THEN 'ok' ELSE 'conflict' END`).bind(`${assertionId}:selection`, pageId, revisionId, path),
+  ]
+}
+
 
 /** Resolve the document first; image selection is never an admission credential. */
 export async function resolvePagePreview(db: D1Database, config: ReadInstanceConfig, input: PreviewRequest): Promise<SharedPreviewPlan | null> {
@@ -61,7 +78,7 @@ export async function resolvePagePreview(db: D1Database, config: ReadInstanceCon
         AND candidate.content_type IN ('image/jpeg','image/png')
         AND ((r.kind = 'subtree' AND substr(candidate.path, 1, length('/a/' || r.route_key || '/')) = '/a/' || r.route_key || '/')
           OR EXISTS (SELECT 1 FROM resource_owners ro WHERE ro.owner_revision_id = rp.revision_id AND ro.owner_page_id = rp.page_id AND ro.path = candidate.path AND ro.provider_artifact_id = p.artifact_id))
-      ORDER BY coalesce((SELECT CAST(key AS INTEGER) FROM json_each(?10) WHERE value = candidate.path), 1000) LIMIT 1)
+      ORDER BY CASE WHEN candidate.path = s.original_path THEN -1 ELSE coalesce((SELECT CAST(key AS INTEGER) FROM json_each(?10) WHERE value = candidate.path), 1000) END LIMIT 1)
     LEFT JOIN preview_objects o ON o.page_id = s.page_id AND o.revision_id = s.revision_id AND o.recipe_sha256 = s.recipe_sha256 AND o.input_sha256 = s.input_sha256 AND o.content_sha256 = s.content_sha256 AND o.extension = s.extension AND o.artifact_id = p.artifact_id
     WHERE i.singleton = 1 AND i.instance_id = ?1 AND NOT EXISTS (SELECT 1 FROM revision_discards d WHERE d.revision_id = rp.revision_id)
       AND ((?7 = 'team' AND a.active_revision_id = ?4)

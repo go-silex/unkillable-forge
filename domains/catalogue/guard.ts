@@ -2,7 +2,7 @@ import { newId } from "./ids"
 import type { ManageDeps } from "./commands"
 import { requireManageActor, type ManageActor } from "./principals"
 
-export type GuardAction = "create_page" | "stage" | "publish" | "restore_page" | "unpublish" | "set_visibility" | "share" | "rotate_share" | "revoke_share" | "reveal_share" | "import_share" | "set_alias" | "assign_role" | "revoke_role" | "disable_principal" | "enrich_page" | "set_shortlink"
+export type GuardAction = "create_page" | "stage" | "publish" | "restore_page" | "unpublish" | "set_visibility" | "share" | "rotate_share" | "revoke_share" | "reveal_share" | "import_share" | "set_alias" | "assign_role" | "revoke_role" | "disable_principal" | "enrich_page" | "set_shortlink" | "import_state"
 interface GuardInput {
   readonly action: GuardAction
   readonly actor: { readonly principalId: string; readonly surface: "read" | "manage"; readonly expectedAuthorityEpoch: number }
@@ -47,8 +47,8 @@ CASE
   WHEN ?5 IS NOT 'manage' THEN 'forbidden'
   WHEN NOT EXISTS (SELECT 1 FROM principals WHERE principal_id = ?4 AND status = 'active') THEN 'unauthenticated'
   WHEN (SELECT authority_epoch FROM principals WHERE principal_id = ?4) IS NOT ?11 THEN 'conflict'
-  WHEN ?3 NOT IN ('create_page', 'stage', 'publish', 'restore_page', 'unpublish', 'set_visibility', 'share', 'rotate_share', 'revoke_share', 'reveal_share', 'import_share', 'set_alias', 'assign_role', 'revoke_role', 'disable_principal', 'enrich_page', 'set_shortlink') THEN 'forbidden'
-  WHEN ?3 IN ('import_share', 'set_alias', 'assign_role', 'revoke_role', 'disable_principal', 'set_shortlink')
+  WHEN ?3 NOT IN ('create_page', 'stage', 'publish', 'restore_page', 'unpublish', 'set_visibility', 'share', 'rotate_share', 'revoke_share', 'reveal_share', 'import_share', 'set_alias', 'assign_role', 'revoke_role', 'disable_principal', 'enrich_page', 'set_shortlink', 'import_state') THEN 'forbidden'
+  WHEN ?3 IN ('import_share', 'set_alias', 'assign_role', 'revoke_role', 'disable_principal', 'set_shortlink', 'import_state')
     AND NOT EXISTS (SELECT 1 FROM role_grants WHERE principal_id = ?4 AND revoked_at IS NULL AND role = 'admin') THEN 'forbidden'
   WHEN ?3 IN ('create_page', 'restore_page') AND NOT EXISTS (SELECT 1 FROM role_grants WHERE principal_id = ?4 AND revoked_at IS NULL AND (role = 'admin' OR (role = 'publisher' AND scope_kind = 'installation'))) THEN 'forbidden'
   WHEN ?3 IN ('stage', 'publish', 'unpublish', 'set_visibility', 'share', 'rotate_share', 'revoke_share', 'reveal_share', 'enrich_page')
@@ -110,7 +110,7 @@ CASE
   WHEN ?3 = 'disable_principal' AND EXISTS (SELECT 1 FROM role_grants WHERE principal_id = ?9 AND role = 'admin' AND revoked_at IS NULL) AND NOT EXISTS (SELECT 1 FROM role_grants g JOIN principals p ON p.principal_id = g.principal_id WHERE g.role = 'admin' AND g.revoked_at IS NULL AND p.status = 'active' AND g.principal_id <> ?9) THEN 'last_admin'
   ELSE 'ok' END`
 
-const GUARD_ACTIONS: readonly string[] = ["create_page", "stage", "publish", "restore_page", "unpublish", "set_visibility", "share", "rotate_share", "revoke_share", "reveal_share", "import_share", "set_alias", "assign_role", "revoke_role", "disable_principal", "enrich_page", "set_shortlink"]
+const GUARD_ACTIONS: readonly string[] = ["create_page", "stage", "publish", "restore_page", "unpublish", "set_visibility", "share", "rotate_share", "revoke_share", "reveal_share", "import_share", "set_alias", "assign_role", "revoke_role", "disable_principal", "enrich_page", "set_shortlink", "import_state"]
 
 function guardStatement(db: D1Database, instanceId: string, input: GuardInput, hasEdges: boolean, checkNamespace: boolean): D1PreparedStatement {
   if (!GUARD_ACTIONS.includes(input.action)) throw new PolicyError("forbidden")
@@ -143,7 +143,7 @@ export function mapPolicyError(error: unknown): PolicyError {
   const message = messages.join("\n")
   const named = message.match(/CHECK constraint failed: guard_(instance_mismatch|unauthenticated|forbidden|not_found|conflict|invalid_state|last_admin)\b/)
   if (named) return new PolicyError(named[1] as PolicyErrorCode)
-  if (/CHECK constraint failed: enrichment_assertion\b/.test(message)) return new PolicyError("conflict")
+  if (/CHECK constraint failed: (?:enrichment_assertion|import_assertion)\b/.test(message)) return new PolicyError("conflict")
   const publication = message.match(/CHECK constraint failed: ((?:publication_(?:not_found|closed|expired|incomplete|not_sealed|never_committed|conflict)|discard_(?:not_found|revision_active|revision_pinned|revision_staged|revision_retained)))\b/)
   if (publication) {
     const detail = publication[1]

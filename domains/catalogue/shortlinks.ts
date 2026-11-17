@@ -32,6 +32,11 @@ export async function shortlinkDestinationDigest(destination: string): Promise<s
   const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(destination)))
   return Array.from(hash, byte => byte.toString(16).padStart(2, '0')).join('')
 }
+export async function importShortlinkStatement(db: D1Database, m: ShortlinkMapping): Promise<D1PreparedStatement> {
+  if (!m || !m.mappingId || !m.providerOrigin || !m.shortCode || !m.shortUrl || !m.destination || !m.pageId || !['created', 'imported'].includes(m.source) || !Number.isSafeInteger(m.observedAt) || m.observedAt < 0 || m.destinationDigest !== await shortlinkDestinationDigest(m.destination) || !validShortlinkIdentity(m.providerOrigin, m.shortDomain, m.shortCode, m.shortUrl)) throw new PolicyError('invalid_state')
+  return db.prepare('INSERT OR IGNORE INTO shortlink_mappings (mapping_id,provider_origin,provider_id,short_domain,short_code,short_url,page_id,grant_id,destination,source,observed_at,destination_digest) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').bind(m.mappingId, m.providerOrigin, m.providerId, m.shortDomain, m.shortCode, m.shortUrl, m.pageId, m.grantId, m.destination, m.source, m.observedAt, m.destinationDigest)
+}
+
 
 /** Insert an exact provider observation or explicitly reconcile an existing observation with CAS. */
 export async function setShortlinkMapping(deps: ManageDeps, actor: ManageActor, target: ShortlinkTarget, command:

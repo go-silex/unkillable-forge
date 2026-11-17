@@ -33,7 +33,7 @@ export default defineConfig({
         test: {
           name: "engine",
           include: ["tests/engine/**/*.test.ts"],
-          exclude: ["tests/engine/manage-http.*.test.ts", "tests/engine/manage-web.*.test.ts", "tests/engine/native-jwks.test.ts"],
+          exclude: ["tests/engine/manage-http.*.test.ts", "tests/engine/manage-web.*.test.ts", "tests/engine/import-*.test.ts", "tests/engine/native-jwks.test.ts"],
           setupFiles: ["tests/engine/setup/apply-migrations.ts"],
           globals: true,
         },
@@ -47,7 +47,7 @@ export default defineConfig({
             compatibilityDate: "2025-02-14",
             compatibilityFlags: ["enable_request_signal", "unhandled_rejection_after_microtask_checkpoint"],
             d1Databases: ["DB", "EMPTY_DB", "OTHER_DB"],
-            r2Buckets: ["REVISION_BYTES"],
+            r2Buckets: ["REVISION_BYTES", "FORGE_IMPORT_SOURCE"],
             bindings: {
               ...manageHttpBindings,
               TEST_MIGRATIONS: await readD1Migrations(path.join(root, "migrations")),
@@ -56,7 +56,7 @@ export default defineConfig({
         }))],
         test: {
           name: "manage-http",
-          include: ["tests/engine/manage-http.*.test.ts", "tests/engine/manage-web.*.test.ts"],
+          include: ["tests/engine/manage-http.*.test.ts", "tests/engine/manage-web.*.test.ts", "tests/engine/import-*.test.ts"],
           setupFiles: ["tests/engine/setup/apply-migrations.ts"],
           globals: true,
         },

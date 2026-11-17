@@ -32,6 +32,54 @@ Typical flow: `begin` → upload client files and `materialize` each retained ba
 
 POST requires `Content-Type: application/json`, optionally `charset=utf-8`. PUT requires `application/octet-stream` without parameters; the resource's content type comes from its manifest, not this header. Content-Encoding must be absent or `identity`. A missing PUT body means zero bytes; a nonzero declared Content-Length with no body is invalid. JSON requires a body.
 
+## Selected import
+
+`POST /api/maintenance/import` is a separate, administrator-only interface for
+an operator-approved selection, not an arbitrary source or SQL API. It accepts
+exactly one of the following JSON envelopes; `command` is the normal
+`BeginCommand`, and all selection fields are required:
+
+```ts
+{ op: 'dry_run', selection: { version: 1, inventoryId, selectionId, planId, command }, cursor: null | string }
+{ op: 'apply', selection: { version: 1, inventoryId, selectionId, planId, command } }
+```
+
+The optional import configuration consists of the private R2 binding
+`FORGE_IMPORT_SOURCE` and the JSON string `FORGE_IMPORT_INVENTORIES`; provide
+both or neither. The latter is a nonempty array of at most 1,000 operator-pinned
+approvals, unique by `inventoryId` and `selectionId`. Each approval has exactly
+`inventoryId`, `selectionId`, `sourceInstance`, `objectKey`, `objectVersion`,
+`sha256`, `approvalRef`, `kind` (`synthetic` or `historical`), `g1bRef` (string
+or null), and positive `maxInventoryBytes`. The digest is lowercase SHA-256.
+The protected inventory pins the selected graph and each source object's
+native version, size and SHA-256; the caller cannot supply the source path,
+approval or metadata in place of that inventory. See the
+[inventory types and admission](../domains/catalogue/import.ts).
+
+Dry-run requires a currently established administrator and makes no publication
+writes. It may return `checking` with a continuation cursor, `blocked` with
+issues, or `ready` with plan, source and target digests. A ready result is an
+observation made during that run, not an atomic snapshot of the current source,
+a promise that its objects remain available, or permission to apply. The
+inventory's pinned version and digest are rechecked on each request; the
+continuation binds the plan and target state.
+
+Apply reauthenticates and uses normal Publication staging, streamed byte
+verification, sealing and activation. Each source read must match the approved
+native version and the declared size and SHA-256; an unavailable or changed
+object is refused, never replaced by the latest bytes. Staging can span
+requests and leave unselected bytes on failure; publication activation,
+selected metadata and import receipt are guarded together in the owning D1
+transaction. Replaying the same plan reconciles the recorded result, rather
+than implicitly creating a new publication or rotating a share key.
+
+Finite visibility or shared-key expiries are explicitly blocked as
+`expiring_policy_unsupported`: the current target policy cannot preserve
+their expiry without extending access. Historical import remains unauthorized
+while G1b ownership evidence and approval are unresolved. This interface adds
+no backup/recovery system, collection scheduler, production migration or
+historical-fidelity claim.
+
 ## Request-driven previews and sharing
 
 After commit, the adapter awaits a best-effort enqueue of lightweight OG
@@ -166,7 +214,7 @@ Historical candidate `6de673e523c6211c9781d544f97058b1d3ce1c5b` passed32 tests a
 Subsequent review corrections were exercised by TSC and36 targeted Store/publication-HTTP tests, all passing, after the earlier complete engine run reported271/272. This is not a claim of a fresh complete-suite pass. The corrected physical socket then passed with the exact21 compiler-consumed source hashes, bundle hash, migration bytes and bracketed profile/parser hashes recorded. Its runtime-observer counters were zero only within the declared coverage. Failure-path native pipe/connection/uncaught diagnostics remain visible in unit output; no filter or universal harmlessness claim is applied.
 
 
-This interface adds no MCP business-client proof, F05 serving, GC scheduler or maintenance endpoint. It changes no legacy URLs or Shlink behavior. Real three-client business publication belongs to F08; further cloud operations require separate approval.
+The F04 evidence above adds no MCP business-client proof or GC scheduler and predates the selected-import maintenance endpoint described above. It does not prove a legacy URL or Shlink production change. Real three-client business publication belongs to F08; further cloud operations require separate approval.
 
 ### Post-review contract corrections — 2026-11-14
 
