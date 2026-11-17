@@ -3,6 +3,8 @@ import type { ReadInstanceConfig } from './instance-config'
 import type { SubtreeOrTree } from './routing/grammar'
 import { derivedObjectKey } from '../store/revision-store'
 import type { DerivedDescriptor } from '../store/derived-store'
+import { documentRouteOf } from './revision-paths'
+import type { BeginCommand } from '../publication/types'
 
 export interface SharedPreviewPlan {
   readonly kind: 'unfurl'
@@ -22,6 +24,16 @@ export interface PreviewRequest {
   readonly candidates: readonly string[]
   readonly credentials: ReadCredentials
 }
+/** Mirror the transactional ownership rule for a proposed publication graph. */
+export function importPreviewOwned(command: BeginCommand, pageId: string, path: string): boolean {
+  const page = command.pages.find(p => p.pageId === pageId && p.disposition !== 'drop')
+  const file = command.files.find(f => f.path === path && ['image/jpeg', 'image/png'].includes(f.contentType))
+  if (!page?.documentPath || !file) return false
+  const route = documentRouteOf(page.documentPath)
+  return (route?.kind === 'subtree' && path.startsWith(`/a/${route.slug}/`)) ||
+    command.edges.some(e => e.ownerPageId === pageId && e.path === path && (e.providerArtifactId === null || e.providerArtifactId === command.artifactId))
+}
+
 /** Select an original image only when the admitted revision owns it. */
 export function importPreviewStatements(db: D1Database, pageId: string, artifactId: string, revisionId: string, path: string, assertionId: string): readonly D1PreparedStatement[] {
   return [

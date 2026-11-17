@@ -77,6 +77,11 @@ CASE
   WHEN ?3 = 'disable_principal' AND EXISTS (SELECT 1 FROM principals WHERE principal_id = ?9 AND status = 'disabled') THEN 'invalid_state'
   WHEN ?19 = 1 AND ?3 IN ('create_page', 'publish', 'restore_page') AND ?17 IS NOT NULL AND EXISTS (SELECT 1 FROM revision_resources rr JOIN mounts m ON m.path = rr.path WHERE rr.revision_id = ?17 AND m.artifact_id IS NOT ?7) THEN 'conflict'
   WHEN ?19 = 1 AND ?3 IN ('create_page', 'publish', 'restore_page') AND ?17 IS NOT NULL AND EXISTS (
+    SELECT 1 FROM publication_sessions s JOIN publication_edges e ON e.session_id = s.session_id
+    WHERE s.revision_id = ?17 AND e.provider_artifact_id IS NOT ?7
+      AND NOT EXISTS (SELECT 1 FROM mounts m WHERE m.path = e.path AND m.artifact_id = e.provider_artifact_id AND m.kind IN ('fragment','asset'))
+  ) THEN 'conflict'
+  WHEN ?19 = 1 AND ?3 IN ('create_page', 'publish', 'restore_page') AND ?17 IS NOT NULL AND EXISTS (
     SELECT 1 FROM routes r CROSS JOIN revision_resources rr
     WHERE r.kind = 'subtree' AND r.artifact_id <> ?7
       AND rr.revision_id = ?17
@@ -180,7 +185,7 @@ function ownershipStatements(db: D1Database, actor: ManageActor, ownership: { re
   return statements
 }
 
-export async function executeGuarded(deps: ManageDeps, actor: ManageActor, guards: readonly GuardRequest[], effects: readonly D1PreparedStatement[], ownership?: { readonly revisionId: string; readonly edges: readonly OwnershipEdge[] }, finalEffects: readonly D1PreparedStatement[] = []): Promise<readonly D1Result[]> {
+export async function executeGuarded(deps: ManageDeps, actor: ManageActor, guards: readonly GuardRequest[], effects: readonly D1PreparedStatement[], ownership?: { readonly revisionId: string; readonly edges: readonly OwnershipEdge[] }, finalEffects: readonly D1PreparedStatement[] = [], importDeadline?: number): Promise<readonly D1Result[]> {
   requireManageActor(actor, deps)
   if (guards.length === 0) throw new PolicyError("invalid_state")
   if (ownership?.edges.some(edge => !guards.some(guard =>
@@ -217,7 +222,9 @@ export async function executeGuarded(deps: ManageDeps, actor: ManageActor, guard
         ...g, actor: { principalId: actor.principalId, surface: "manage", expectedAuthorityEpoch: actor.authorityEpoch },
       }, !!ownership?.edges.some(edge => edge.ownerPageId === g.pageId), checkNamespace)
     })
-    return await deps.db.batch([...statements, ...effects, ...(ownership ? ownershipStatements(deps.db, actor, ownership) : []), ...finalEffects])
+    const batch = [...statements, ...effects, ...(ownership ? ownershipStatements(deps.db, actor, ownership) : []), ...finalEffects]
+    if (importDeadline !== undefined && (!Number.isFinite(importDeadline) || performance.now() >= importDeadline)) throw new PolicyError("unavailable", "import_timeout")
+    return await deps.db.batch(batch)
   } catch (error) {
     throw mapPolicyError(error)
   }

@@ -14,12 +14,15 @@ export async function syntheticImport(operations?: (pageId: string) => ImportOpe
   const commandFiles = [...doc.command.files]
   const edges = [...doc.command.edges]
   const extraBytes: { path: string; bytes: Uint8Array<ArrayBuffer> }[] = []
-  for (let i = 0; i < extraFiles; i++) {
+  const extras = await Promise.all(Array.from({ length: extraFiles }, async (_, i) => {
     const path = `/a/synthetic-import/asset-${i}.css`
     const value = await content(`synthetic asset ${i}`)
     const object = await env.FORGE_IMPORT_SOURCE.put(`synthetic/content/asset-${i}.css`, value.bytes)
-    if (!object) throw new Error("Synthetic asset upload failed")
+    if (!object) throw new Error("Synthetic source upload failed")
     const file = { path, kind: "asset" as const, contentType: "text/css", size: value.size, sha256: value.sha256, source: "client" as const }
+    return { path, value, object, file }
+  }))
+  for (const { path, value, object, file } of extras) {
     commandFiles.push(file)
     files.push({ ...file, sourceRef: object.key, sourceVersion: object.version, provenance: "synthetic-publication" })
     edges.push({ ownerPageId: doc.pageId, path, providerArtifactId: null })

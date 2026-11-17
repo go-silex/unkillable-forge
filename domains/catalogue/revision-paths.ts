@@ -15,7 +15,7 @@ export interface RevisionPathInput {
 
 export interface RevisionPathConflict {
   readonly path: string
-  readonly reason: 'reserved' | 'shell' | 'foreign_subtree' | 'dropped_subtree'
+  readonly reason: 'reserved' | 'shell' | 'foreign_subtree' | 'dropped_subtree' | 'foreign_mount'
 }
 
 /** Interpret a canonical document path as its primary route; invalid paths have no route. */
@@ -55,11 +55,13 @@ export async function validateRevisionPaths(deps: RevisionPathDeps, input: Revis
       const slug = subtreeSlugOf(path)
       if (slug !== null) touched.add(slug)
     }
-    const routeChunks = jsonChunks(touched), mountChunks = jsonChunks(resulting)
+    const routeChunks = jsonChunks(touched), mountChunks = jsonChunks(resulting), pathChunks = jsonChunks(input.paths)
     const results = await deps.db.batch([
       deps.db.prepare('SELECT instance_id FROM instance_meta WHERE singleton = 1'),
       ...routeChunks.map(chunk => deps.db.prepare("SELECT route_key, artifact_id FROM routes WHERE kind = 'subtree' AND route_key IN (SELECT value FROM json_each(?))").bind(chunk)),
-      ...mountChunks.map(chunk => deps.db.prepare("SELECT m.path FROM json_each(?1) s JOIN mounts m ON m.path >= '/a/' || s.value || '/' AND m.path < '/a/' || s.value || '0' AND m.artifact_id IS NOT ?2").bind(chunk, input.artifactId)),
+      ...mountChunks.map(chunk => deps.db.prepare("SELECT path FROM (SELECT (SELECT m.path FROM mounts m WHERE m.path >= '/a/' || s.value || '/' AND m.path < '/a/' || s.value || '0' AND m.artifact_id IS NOT ?2 LIMIT 1) AS path FROM json_each(?1) s) WHERE path IS NOT NULL").bind(chunk, input.artifactId)),
+      ...pathChunks.map(chunk => deps.db.prepare("SELECT m.path FROM mounts m JOIN json_each(?1) j ON m.path=j.value WHERE m.artifact_id IS NOT ?2").bind(chunk, input.artifactId)),
+      ...pathChunks.map(chunk => deps.db.prepare("SELECT '/' || r.route_key AS path FROM routes r JOIN json_each(?1) j ON r.kind='tree_page' AND '/' || r.route_key=j.value WHERE r.artifact_id IS NOT ?2").bind(chunk, input.artifactId)),
     ])
     if ((results[0].results[0] as { instance_id: string } | undefined)?.instance_id !== deps.config.instanceId) {
       throw new PolicyError('instance_mismatch')
@@ -77,8 +79,11 @@ export async function validateRevisionPaths(deps: RevisionPathDeps, input: Revis
       } else if (isReservedShellPath(path)) conflicts.push({ path, reason: 'reserved' })
       else if (shellPaths.has(path)) conflicts.push({ path, reason: 'shell' })
     }
-    for (const result of results.slice(1 + routeChunks.length)) {
+    for (const result of results.slice(1 + routeChunks.length, 1 + routeChunks.length + mountChunks.length)) {
       for (const mount of result.results as { path: string }[]) conflicts.push({ path: mount.path, reason: 'foreign_subtree' })
+    }
+    for (const result of results.slice(1 + routeChunks.length + mountChunks.length)) {
+      for (const mount of result.results as { path: string }[]) conflicts.push({ path: mount.path, reason: 'foreign_mount' })
     }
     return conflicts
   } catch (error) {

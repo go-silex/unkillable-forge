@@ -47,7 +47,7 @@ export default defineConfig({
             compatibilityDate: "2025-02-14",
             compatibilityFlags: ["enable_request_signal", "unhandled_rejection_after_microtask_checkpoint"],
             d1Databases: ["DB", "EMPTY_DB", "OTHER_DB"],
-            r2Buckets: ["REVISION_BYTES", "FORGE_IMPORT_SOURCE"],
+            r2Buckets: ["REVISION_BYTES"],
             bindings: {
               ...manageHttpBindings,
               TEST_MIGRATIONS: await readD1Migrations(path.join(root, "migrations")),
@@ -56,7 +56,30 @@ export default defineConfig({
         }))],
         test: {
           name: "manage-http",
-          include: ["tests/engine/manage-http.*.test.ts", "tests/engine/manage-web.*.test.ts", "tests/engine/import-*.test.ts"],
+          include: ["tests/engine/manage-http.*.test.ts", "tests/engine/manage-web.*.test.ts"],
+          setupFiles: ["tests/engine/setup/apply-migrations.ts"],
+          globals: true,
+        },
+      },
+      {
+        plugins: [cloudflareTest(async () => ({
+          main: "./adapters/http/manageWorker.ts",
+          config: false,
+          remoteBindings: false,
+          miniflare: {
+            compatibilityDate: "2025-02-14",
+            compatibilityFlags: ["enable_request_signal", "unhandled_rejection_after_microtask_checkpoint"],
+            d1Databases: ["DB", "EMPTY_DB", "OTHER_DB"],
+            r2Buckets: ["REVISION_BYTES", "FORGE_IMPORT_SOURCE"],
+            bindings: {
+              ...manageHttpBindings,
+              TEST_MIGRATIONS: await readD1Migrations(path.join(root, "migrations")),
+            },
+          },
+        }))],
+        test: {
+          name: "manage-import",
+          include: ["tests/engine/import-*.test.ts"],
           setupFiles: ["tests/engine/setup/apply-migrations.ts"],
           globals: true,
         },

@@ -40,6 +40,14 @@ export class StoreError extends Error {
   }
 }
 
+/** The input stream failed its declared length or digest, not a provider write. */
+export class SourceIntegrityError extends StoreError {
+  constructor() {
+    super('integrity_error')
+    this.name = 'SourceIntegrityError'
+  }
+}
+
 // Workers extends Web Crypto with a streaming digest; DOM's Crypto type does not.
 type WorkersCrypto = Crypto & {
   readonly DigestStream: new (algorithm: string) => WritableStream<ArrayBuffer | ArrayBufferView> & { readonly digest: Promise<ArrayBuffer> }
@@ -89,6 +97,62 @@ function info(object: R2Object): StoredObjectInfo {
 function asStoreError(error: unknown): StoreError {
   return error instanceof StoreError ? error : new StoreError('unavailable')
 }
+type ExpectedBytes = { readonly size: number; readonly sha256: string }
+
+function validateBytes(expected: ExpectedBytes, body: ReadableStream<Uint8Array>): void {
+  if (!expected || !Number.isSafeInteger(expected.size) || expected.size < 0 ||
+      typeof expected.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expected.sha256) ||
+      !body || typeof body.pipeTo !== 'function' || body.locked) throw new StoreError('invalid_input')
+}
+
+// The optional sink receives everything except the final byte until EOF and
+// digest validation succeed, so a fixed-length provider cannot commit early.
+export async function verifyRevisionBytes(expected: ExpectedBytes, body: ReadableStream<Uint8Array>, signal?: AbortSignal, sink?: WritableStreamDefaultWriter<Uint8Array>): Promise<void> {
+  validateBytes(expected, body)
+  const reader = body.getReader()
+  const digest = new (crypto as WorkersCrypto).DigestStream('SHA-256')
+  const digestResult = digest.digest
+  void digestResult.catch(() => {})
+  const writer = digest.getWriter()
+  let completed = false
+  let abort: (() => void) | undefined
+  const cancelled = new Promise<never>((_, reject) => {
+    abort = () => reject(new StoreError('unavailable', { cause: signal?.reason }))
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
+  })
+  try {
+    const verify = async () => {
+      let size = 0, last = 0
+      for (;;) {
+        const chunk = await reader.read()
+        if (chunk.done) break
+        if (!(chunk.value instanceof Uint8Array)) throw new StoreError('unavailable')
+        if (chunk.value.byteLength > expected.size - size) throw new SourceIntegrityError()
+        await writer.write(chunk.value)
+        const writable = Math.max(0, Math.min(chunk.value.byteLength, expected.size - 1 - size))
+        if (sink && writable) await sink.write(chunk.value.subarray(0, writable))
+        const lastIndex = expected.size - 1 - size
+        if (lastIndex >= 0 && lastIndex < chunk.value.byteLength) last = chunk.value[lastIndex]
+        size += chunk.value.byteLength
+      }
+      await writer.close()
+      if (size !== expected.size || hex(await digestResult) !== expected.sha256) throw new SourceIntegrityError()
+      if (sink && expected.size) await sink.write(new Uint8Array([last]))
+    }
+    await Promise.race([verify(), cancelled])
+    completed = true
+  } catch (error) {
+    throw asStoreError(error)
+  } finally {
+    if (abort) signal?.removeEventListener('abort', abort)
+    if (!completed) {
+      void reader.cancel().catch(() => {})
+      void writer.abort().catch(() => {})
+    }
+  }
+}
+
 
 export class RevisionStore {
   readonly instanceId: string
@@ -101,14 +165,11 @@ export class RevisionStore {
   }
 
   async put(ref: RevisionObjectRef, expected: { readonly size: number; readonly sha256: string }, body: ReadableStream<Uint8Array>, signal?: AbortSignal): Promise<StoredObjectInfo> {
-    if (!expected || !Number.isSafeInteger(expected.size) || expected.size < 0 ||
-        typeof expected.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expected.sha256) ||
-        !body || typeof body.pipeTo !== 'function' || body.locked) throw new StoreError('invalid_input')
+    validateBytes(expected, body)
     if (ref?.kind === 'og' && expected.sha256 !== ref.contentSha256) throw new StoreError('invalid_input')
     let abort: (() => void) | undefined
-    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+    const verificationAbort = new AbortController()
     let output: WritableStreamDefaultWriter<Uint8Array> | undefined
-    let digestWriter: WritableStreamDefaultWriter<ArrayBuffer | ArrayBufferView> | undefined
     let completed = false
     const reconcile = (object: R2Object): StoredObjectInfo => {
       const stored = info(object)
@@ -119,7 +180,7 @@ export class RevisionStore {
       const key = await objectKey(this.instanceId, ref)
       if (signal?.aborted) throw new StoreError('unavailable', { cause: signal.reason })
       const cancelled = new Promise<never>((_, reject) => {
-        abort = () => reject(new StoreError('unavailable', { cause: signal?.reason }))
+        abort = () => { verificationAbort.abort(signal?.reason); reject(new StoreError('unavailable', { cause: signal?.reason })) }
         signal?.addEventListener('abort', abort, { once: true })
         if (signal?.aborted) abort()
       })
@@ -129,37 +190,11 @@ export class RevisionStore {
       if (existing) {
         return reconcile(existing)
       }
-      reader = body.getReader()
-      const digest = new (crypto as WorkersCrypto).DigestStream('SHA-256')
-      const digestResult = digest.digest
-      void digestResult.catch(() => {})
-      const hashing = digest.getWriter()
-      digestWriter = hashing
       const stream = new FixedLengthStream(expected.size)
       output = stream.writable.getWriter()
-      const source = reader
       const destination = output
       const pump = async () => {
-        let size = 0
-        let last = 0
-        for (;;) {
-          const chunk = await source.read()
-          if (chunk.done) break
-          if (!(chunk.value instanceof Uint8Array)) throw new StoreError('unavailable')
-          if (chunk.value.byteLength > expected.size - size) throw new StoreError('integrity_error')
-          await hashing.write(chunk.value)
-          const writable = Math.max(0, Math.min(chunk.value.byteLength, expected.size - 1 - size))
-          if (writable) await destination.write(chunk.value.subarray(0, writable))
-          const lastIndex = expected.size - 1 - size
-          if (lastIndex >= 0 && lastIndex < chunk.value.byteLength) last = chunk.value[lastIndex]
-          size += chunk.value.byteLength
-        }
-        await hashing.close()
-        const actual = hex(await digestResult)
-        if (size !== expected.size || actual !== expected.sha256) throw new StoreError('integrity_error')
-        // Holding the last byte prevents R2 from committing before clean EOF
-        // and our integrity verdict, without buffering the object.
-        if (expected.size) await destination.write(new Uint8Array([last]))
+        await verifyRevisionBytes(expected, body, verificationAbort.signal, destination)
         await destination.close()
       }
       const put = () => this.bucket.put(key, stream.readable, {
@@ -169,18 +204,7 @@ export class RevisionStore {
       if (expected.size === 0) {
         // For zero bytes, close the fixed-length writer after validating input;
         // start R2 first so the close is not blocked on an absent reader.
-        const validation = (async () => {
-          for (;;) {
-            const chunk = await source.read()
-            if (chunk.done) break
-            if (!(chunk.value instanceof Uint8Array)) throw new StoreError('unavailable')
-            if (chunk.value.byteLength > 0) throw new StoreError('integrity_error')
-            await hashing.write(chunk.value)
-          }
-          await hashing.close()
-          if (hex(await digestResult) !== expected.sha256) throw new StoreError('integrity_error')
-        })()
-        await Promise.race([validation, cancelled])
+        await Promise.race([verifyRevisionBytes(expected, body, verificationAbort.signal), cancelled])
         const provider = put()
         const close = destination.close()
         ;[result] = await Promise.race([Promise.all([provider, close]), cancelled])
@@ -212,10 +236,9 @@ export class RevisionStore {
     } finally {
       if (abort) signal?.removeEventListener('abort', abort)
       if (!completed) {
-        if (reader) void reader.cancel().catch(() => {})
-        else void body.cancel().catch(() => {})
+        verificationAbort.abort()
+        if (!body.locked) void body.cancel().catch(() => {})
         if (output) void output.abort().catch(() => {})
-        if (digestWriter) void digestWriter.abort().catch(() => {})
       }
     }
   }

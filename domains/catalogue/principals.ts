@@ -37,6 +37,58 @@ export function requireManageActor(actor: unknown, deps: ManageDeps): asserts ac
     throw new PolicyError("unauthenticated")
   }
 }
+declare const importReadContextBrand: unique symbol
+export interface ImportReadContext {
+  readonly [importReadContextBrand]: true
+}
+
+type ImportReadAuthority = {
+  readonly db: ManageDeps["db"]
+  readonly instanceId: string
+  readonly issuer: string
+  readonly subject: string
+  readonly audience: string
+  readonly expiresAt: number
+}
+const importReadContexts = new WeakMap<object, ImportReadAuthority>()
+
+/** Verify an existing administrator without registering a principal or writing audit state. */
+export async function authenticateImportRead(request: Request, deps: ManageDeps): Promise<ImportReadContext> {
+  const instanceId = deps.config.instanceId
+  const teamDomain = deps.config.accessTeamDomain
+  const now = deps.now() / 1000
+  const identity = await authenticate(request, {
+    teamDomain, audiences: [...deps.config.manageAudiences], surface: "manage",
+  }, deps.jwks, now)
+  if (!identity || !identity.subject || !Number.isFinite(now) || identity.expiresAt <= now ||
+      instanceId !== deps.config.instanceId || teamDomain !== deps.config.accessTeamDomain ||
+      !deps.config.manageAudiences.includes(identity.audience)) throw new PolicyError("unauthenticated")
+  const context = Object.freeze({}) as ImportReadContext
+  importReadContexts.set(context, { db: deps.db, instanceId, issuer: identity.issuer, subject: identity.subject, audience: identity.audience, expiresAt: identity.expiresAt })
+  await requireImportReadContext(context, deps)
+  return context
+}
+
+/** Recheck owner provenance, expiry and current primary administrator authority. */
+export async function importReadCursorIdentity(context: unknown, deps: ManageDeps): Promise<{ principalId: string; authorityEpoch: number; expiresAt: number }> {
+  const authority = typeof context === "object" && context !== null ? importReadContexts.get(context) : undefined
+  const now = deps.now()
+  if (!authority || authority.db !== deps.db || !Number.isFinite(now) || now >= authority.expiresAt * 1000 ||
+      authority.instanceId !== deps.config.instanceId ||
+      authority.issuer !== `https://${deps.config.accessTeamDomain}` ||
+      !deps.config.manageAudiences.includes(authority.audience)) throw new PolicyError("unauthenticated")
+  const result = await deps.db.withSession("first-primary").prepare(`SELECT p.principal_id, p.authority_epoch FROM instance_meta i
+    JOIN principals p ON p.issuer = ? AND p.subject = ? AND p.status = 'active'
+    JOIN role_grants g ON g.principal_id = p.principal_id AND g.role = 'admin'
+      AND g.scope_kind = 'installation' AND g.revoked_at IS NULL
+    WHERE i.singleton = 1 AND i.instance_id = ? LIMIT 1`).bind(authority.issuer, authority.subject, authority.instanceId).first<{ principal_id: string; authority_epoch: number }>()
+  if (!result) throw new PolicyError("forbidden")
+  return { principalId: result.principal_id, authorityEpoch: result.authority_epoch, expiresAt: authority.expiresAt }
+}
+
+export async function requireImportReadContext(context: unknown, deps: ManageDeps): Promise<void> {
+  await importReadCursorIdentity(context, deps)
+}
 
 export async function authenticateManage(request: Request, deps: ManageDeps): Promise<ManageActor | null> {
   const now = deps.now() / 1000

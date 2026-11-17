@@ -1,5 +1,4 @@
-import { authenticate } from '../../domains/catalogue/identity'
-import { authenticateManage, type ManageActor } from '../../domains/catalogue/principals'
+import { authenticateImportRead, authenticateManage, type ManageActor } from '../../domains/catalogue/principals'
 import { PolicyError } from '../../domains/catalogue/guard'
 import { admitImportSelection, type ImportSelection } from '../../domains/catalogue/import'
 import { planPublicationImport, applyPublicationImport, type ImportSourceReader } from '../../domains/publication/import'
@@ -43,7 +42,9 @@ async function readRequest(request: Request, options: TransportOptions): Promise
     }
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new InputError('invalid_request')
     const obj = value as Record<string, unknown>
-    if (!(obj.op === 'dry_run' ? exact(obj, ['op', 'selection', 'cursor']) && (obj.cursor === null || typeof obj.cursor === 'string' && obj.cursor.length <= 4096) : obj.op === 'apply' && exact(obj, ['op', 'selection']))) throw new InputError('invalid_request')
+    const validCursor = obj.cursor === null || typeof obj.cursor === 'string' && obj.cursor.length <= 16384
+    if (!(obj.op === 'dry_run' ? exact(obj, ['op', 'selection', 'cursor']) && validCursor :
+      obj.op === 'apply' && (exact(obj, ['op', 'selection']) || exact(obj, ['op', 'selection', 'cursor']) && validCursor))) throw new InputError('invalid_request')
     const selection = obj.selection
     if (!exact(selection, ['version', 'inventoryId', 'selectionId', 'planId', 'command']) || selection.version !== 1 ||
         !['inventoryId', 'selectionId', 'planId'].every(k => typeof selection[k] === 'string' && (selection[k] as string).length > 0 && (selection[k] as string).length <= 128)) throw new InputError('invalid_request')
@@ -51,7 +52,7 @@ async function readRequest(request: Request, options: TransportOptions): Promise
     const commandRequest = new Request('https://localhost/', { method: 'POST', body: JSON.stringify({ op: 'begin', command: selection.command }) })
     const command = await readCommand(commandRequest, options)
     if (command.op !== 'begin') throw new InputError('invalid_request')
-    return { op: obj.op as 'dry_run' | 'apply', selection: { ...selection, command: command.command } as ImportSelection, cursor: obj.op === 'dry_run' ? obj.cursor as string | null : null }
+    return { op: obj.op as 'dry_run' | 'apply', selection: { ...selection, command: command.command } as ImportSelection, cursor: (obj.cursor ?? null) as string | null }
   } catch (error) {
     if (error instanceof InputError) throw error
     throw new InputError('invalid_request')
@@ -62,27 +63,38 @@ async function readRequest(request: Request, options: TransportOptions): Promise
   }
 }
 
-async function requireExistingAdmin(request: Request, runtime: Runtime): Promise<void> {
-  const { deps } = runtime
-  const now = deps.now() / 1000
-  const identity = await authenticate(request, { teamDomain: deps.config.accessTeamDomain, audiences: [...deps.config.manageAudiences], surface: 'manage' }, deps.jwks, now)
-  if (!identity || !identity.subject || identity.expiresAt <= now) throw new PolicyError('unauthenticated')
-  const result = await deps.db.withSession('first-primary').prepare(`SELECT 1 AS ok FROM instance_meta i
-    JOIN principals p ON p.issuer = ? AND p.subject = ? AND p.status = 'active'
-    JOIN role_grants g ON g.principal_id = p.principal_id AND g.role = 'admin'
-      AND g.scope_kind = 'installation' AND g.revoked_at IS NULL
-    WHERE i.singleton = 1 AND i.instance_id = ? LIMIT 1`).bind(identity.issuer, identity.subject, deps.config.instanceId).first()
-  if (!result) throw new PolicyError('forbidden')
-}
 
 class InventoryLimitError extends Error {}
+function importRemaining(deadline: number): number {
+  const remaining = deadline - performance.now()
+  if (remaining <= 0) throw new PolicyError('unavailable', 'import_timeout')
+  return remaining
+}
 
-async function loadInventory(bucket: R2Bucket, key: string, version: string, expectedDigest: string, timeoutMs: number, max: number): Promise<unknown> {
+async function withinImportDeadline<T>(deadline: number, work: () => Promise<T>): Promise<T> {
+  const remaining = importRemaining(deadline)
   let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new InputError('request_timeout')), timeoutMs) })
+  const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new PolicyError('unavailable', 'import_timeout')), remaining) })
+  try {
+    const result = await Promise.race([work(), timeout])
+    importRemaining(deadline)
+    return result
+  } finally { clearTimeout(timer) }
+}
+
+
+async function loadInventory(bucket: R2Bucket, key: string, version: string, expectedDigest: string, timeoutMs: number, max: number, deadline: number): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let expired = false
+  const remaining = importRemaining(deadline)
+  const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => {
+    expired = true
+    reject(remaining <= timeoutMs ? new PolicyError('unavailable', 'import_timeout') : new InputError('request_timeout'))
+  }, Math.min(timeoutMs, remaining)) })
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
   try {
-    const object = await Promise.race([bucket.get(key), timeout])
+    const pending = bucket.get(key).then(object => { if (expired && object) void object.body.cancel().catch(() => {}); return object })
+    const object = await Promise.race([pending, timeout])
     if (!object) throw new StoreError('integrity_error')
     if (object.version !== version || object.size > max) {
       void object.body.cancel().catch(() => {})
@@ -104,8 +116,9 @@ async function loadInventory(bucket: R2Bucket, key: string, version: string, exp
     const bytes = new Uint8Array(size)
     let offset = 0
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
-    const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2, '0')).join('')
+    const hash = Array.from(new Uint8Array(await Promise.race([crypto.subtle.digest('SHA-256', bytes), timeout])), b => b.toString(16).padStart(2, '0')).join('')
     if (hash !== expectedDigest) throw new StoreError('integrity_error')
+    importRemaining(deadline)
     try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) } catch { throw new StoreError('integrity_error') }
   } finally {
     clearTimeout(timer)
@@ -114,9 +127,10 @@ async function loadInventory(bucket: R2Bucket, key: string, version: string, exp
 }
 
 export async function handleImport(request: Request, runtime: Runtime): Promise<unknown> {
+  const deadline = performance.now() + runtime.deps.publication.maxUploadTimeoutMs
   const input = await readRequest(request, runtime.transport)
   let actor: ManageActor | null = null
-  await requireExistingAdmin(request, runtime)
+  const context = await authenticateImportRead(request, runtime.deps)
   if (input.op === 'apply') {
     actor = await authenticateManage(request, runtime.deps)
     if (!actor) throw new PolicyError('unauthenticated')
@@ -127,10 +141,10 @@ export async function handleImport(request: Request, runtime: Runtime): Promise<
   if (!approval) throw new PolicyError('forbidden')
   let admitted
   try {
-    const inventory = await loadInventory(configured.bucket, approval.objectKey, approval.objectVersion, approval.sha256, runtime.transport.commandReadTimeoutMs, approval.maxInventoryBytes)
-    admitted = await admitImportSelection(input.selection, inventory, approval, runtime.deps)
+    const inventory = await loadInventory(configured.bucket, approval.objectKey, approval.objectVersion, approval.sha256, runtime.transport.commandReadTimeoutMs, approval.maxInventoryBytes, deadline)
+    admitted = await withinImportDeadline(deadline, () => admitImportSelection(input.selection, inventory, approval, runtime.deps, context))
   } catch (error) {
-    const admissionIssues = ['g1b_evidence_required', 'selection_graph_mismatch', 'expiring_policy_unsupported', 'missing_policy_evidence']
+    const admissionIssues = ['g1b_evidence_required', 'selection_graph_mismatch', 'expiring_policy_unsupported', 'missing_policy_evidence', 'import_metadata_limit']
     const code = error instanceof InventoryLimitError ? 'inventory_size_exceeds_approved_limit' :
       error instanceof PolicyError && error.detail && admissionIssues.includes(error.detail) ? error.detail : null
     if (input.op === 'apply' && code === 'selection_graph_mismatch') throw new PolicyError('conflict', code)
@@ -154,9 +168,9 @@ export async function handleImport(request: Request, runtime: Runtime): Promise<
       return object.body
     },
   }
-  if (input.op === 'dry_run') return planPublicationImport(runtime.deps, admitted, input.cursor, source)
+  if (input.op === 'dry_run') return planPublicationImport(runtime.deps, admitted, input.cursor, source, deadline)
   try {
-    return await applyPublicationImport(runtime.deps, actor!, admitted, source)
+    return await applyPublicationImport(runtime.deps, actor!, admitted, source, deadline, input.cursor)
   } catch (error) {
     if (error instanceof StoreError && error.code === 'integrity_error') throw new PolicyError('conflict', 'source_integrity')
     throw error

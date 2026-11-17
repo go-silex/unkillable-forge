@@ -100,13 +100,13 @@ export async function commit(deps: PublicationDeps, actor: ManageActor, sessionI
   return (await commitBound(deps, actor, sessionId, null)).publication
 }
 
-export async function commitImport(deps: PublicationDeps, actor: ManageActor, sessionId: string, admitted: AdmittedImportSelection, planId: string, planDigest: string): Promise<{ publication: PublicationReceipt; mappingSummary: ImportMappingSummary }> {
-  const result = await commitBound(deps, actor, sessionId, { admitted, planId, planDigest })
+export async function commitImport(deps: PublicationDeps, actor: ManageActor, sessionId: string, admitted: AdmittedImportSelection, planId: string, planDigest: string, deadline?: number): Promise<{ publication: PublicationReceipt; mappingSummary: ImportMappingSummary }> {
+  const result = await commitBound(deps, actor, sessionId, { admitted, planId, planDigest }, deadline)
   if (!result.mappingSummary) throw new PolicyError('invalid_state')
   return { publication: result.publication, mappingSummary: result.mappingSummary }
 }
 
-async function commitBound(deps: PublicationDeps, actor: ManageActor, sessionId: string, imported: { admitted: AdmittedImportSelection; planId: string; planDigest: string } | null): Promise<{ publication: PublicationReceipt; mappingSummary?: ImportMappingSummary }> {
+async function commitBound(deps: PublicationDeps, actor: ManageActor, sessionId: string, imported: { admitted: AdmittedImportSelection; planId: string; planDigest: string } | null, deadline?: number): Promise<{ publication: PublicationReceipt; mappingSummary?: ImportMappingSummary }> {
   requireManageActor(actor, deps)
   if (typeof sessionId !== 'string' || !/^ps_[a-z2-7]{26}$/.test(sessionId)) throw new PolicyError('invalid_state')
   const db = deps.db
@@ -150,7 +150,7 @@ async function commitBound(deps: PublicationDeps, actor: ManageActor, sessionId:
   const ownership: OwnershipEdge[] = edges.map(e => ({ ownerPageId: e.owner_page_id, path: e.path, providerArtifactId: e.provider_artifact_id }))
     const completion = imported ? await buildImportCompletion(deps, actor, imported.admitted, { sessionId, artifactId: session.artifact_id, revisionId: session.revision_id, planId: imported.planId, planDigest: imported.planDigest, at, publicationReceipt: result }) : null
     if (imported) guards.push({ action: 'import_state', artifactId: session.artifact_id, revisionId: session.revision_id, requestDigest: imported.planDigest, occurredAt: at })
-    await executeGuarded(deps, actor, guards, effects, { revisionId: session.revision_id, edges: ownership }, [activation(deps, session.artifact_id, session.revision_id), ...(completion?.statements ?? [])])
+    await executeGuarded(deps, actor, guards, effects, { revisionId: session.revision_id, edges: ownership }, [activation(deps, session.artifact_id, session.revision_id), ...(completion?.statements ?? [])], deadline)
     return { publication: result, ...(completion ? { mappingSummary: completion.mappingSummary } : {}) }
   } catch (error) {
     const concurrent = await db.prepare("SELECT action,request_digest,receipt_json FROM publication_events WHERE session_id=? AND action='commit'").bind(sessionId).first<Event>()

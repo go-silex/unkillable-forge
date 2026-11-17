@@ -41,7 +41,7 @@ exactly one of the following JSON envelopes; `command` is the normal
 
 ```ts
 { op: 'dry_run', selection: { version: 1, inventoryId, selectionId, planId, command }, cursor: null | string }
-{ op: 'apply', selection: { version: 1, inventoryId, selectionId, planId, command } }
+{ op: 'apply', selection: { version: 1, inventoryId, selectionId, planId, command }, cursor?: null | string }
 ```
 
 The optional import configuration consists of the private R2 binding
@@ -56,23 +56,73 @@ native version, size and SHA-256; the caller cannot supply the source path,
 approval or metadata in place of that inventory. See the
 [inventory types and admission](../domains/catalogue/import.ts).
 
+To prepare an inventory, capture the approved source instance and artefact,
+page-to-route and ownership evidence, graph edges, each client file's private
+object key/native version/length/SHA-256, and the selected policy, alias,
+shortlink and original-preview observations. The inventory and its exact
+Publication command must describe the same selection. Protect it with its
+private source objects, then pin its own R2 object key, version and SHA-256 in
+the operator configuration above. Approval and evidence references are not
+proof by themselves: historical ownership, key and destination provenance
+must actually be established, and G1b remains unresolved.
+
+For an existing target, include the complete retained base graph: kept pages,
+their resources and ownership edges. Omitting a base resource or edge does not
+authorize deletion. Intentional removals belong in the protected inventory's
+`removals` list as typed `resource` or `edge` entries with an `evidenceRef`;
+edge entries also identify owner, path and provider artefact. Existing
+unselected original preview selections must remain owned base resources.
+Derived-only kept previews that cannot be carried forward block the plan,
+rather than triggering a silent regeneration or fallback.
+
+Aliases use Catalogue's same-origin redirect grammar and are team-only routes;
+the importer does not change configured route grammars or manufacture cookie
+credentials. Existing share cookies remain subject to the configured cookie
+policy and the current live grant. Shortlink observations are protected
+metadata; import does not call a provider or retarget a destination.
+
 Dry-run requires a currently established administrator and makes no publication
 writes. It may return `checking` with a continuation cursor, `blocked` with
 issues, or `ready` with plan, source and target digests. A ready result is an
 observation made during that run, not an atomic snapshot of the current source,
 a promise that its objects remain available, or permission to apply. The
 inventory's pinned version and digest are rechecked on each request; the
-continuation binds the plan and target state.
+continuation is signed and binds the operation, instance, current administrator
+and authority epoch, inventory version/hash, plan, phase and expiry. The
+configured Catalogue share-verifier key signs it with a separate import-cursor
+domain. The cursor is not a credential or authority to activate. Expiry or a
+changed actor/plan requires restarting an unfinished check; a removed signing
+key makes its cursor invalid. A committed receipt can be reconciled with fresh
+authority even after cursor expiry. Apply can return `checking` before staging;
+pass its `nextCursor` to the next apply request and continue staged responses
+with their `nextCursor`, or resume an existing session without a cursor.
 
 Apply reauthenticates and uses normal Publication staging, streamed byte
 verification, sealing and activation. Each source read must match the approved
 native version and the declared size and SHA-256; an unavailable or changed
-object is refused, never replaced by the latest bytes. Staging can span
-requests and leave unselected bytes on failure; publication activation,
+source is reported as `blocked` with `source_integrity` and its path, never
+replaced by latest bytes. Staging can span requests and leave inert bytes on
+failure; publication activation,
 selected metadata and import receipt are guarded together in the owning D1
 transaction. Replaying the same plan reconciles the recorded result, rather
 than implicitly creating a new publication or rotating a share key.
 
+Each transfer step admits at most eight files and 32 MiB in total; an individual
+client or base file larger than 32 MiB is blocked. The session binds the plan
+to its initiating actor, authority epoch and configured TTL. Resume with the
+same plan and current authority while the session is open; a closed session
+requires a new plan identity. These limits are import-step limits, not a
+general Publication size limit or a cloud capacity claim.
+
+At activation, the shared Catalogue guard rechecks that every external
+ownership edge still names a live fragment or asset mount of its provider.
+A provider unpublishing that resource after preparation makes activation
+conflict; local edges remain governed by the selected revision. This applies
+to ordinary Publication as well as import, not only to dry-run.
+
+The request deadline includes metadata inspection and byte transfer. A D1
+write already started cannot be cancelled and can outlive that deadline;
+subsequent write phases must not start after expiry.
 Finite visibility or shared-key expiries are explicitly blocked as
 `expiring_policy_unsupported`: the current target policy cannot preserve
 their expiry without extending access. Historical import remains unauthorized
