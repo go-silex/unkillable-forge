@@ -7,6 +7,13 @@ import type { ManageActor } from '../../domains/catalogue/principals'
 import { readPagePolicy, setVisibility, share, rotateShare, revokeShare, revealShare } from '../../domains/catalogue/commands'
 import { listManagedCatalogue, getManagedPage } from '../../domains/catalogue/managed-state'
 import { readArtifactState, readManifest, readRevisions } from '../../domains/publication/state'
+import { readEnrichments, readPageEnrichment } from '../../domains/delivery/enrichment-status'
+import { retryEnrichmentKinds } from '../../domains/delivery/enrichments'
+import { runShortlinkEnrichment } from '../shlink/enrichment-runner'
+import { PolicyError } from '../../domains/catalogue/guard'
+import { triggerShareShortlink } from '../shlink/share-trigger'
+import { enqueuePublicationIntents } from '../../domains/delivery/publication-intents'
+import { runOgJob } from '../render/og-orchestrator'
 
 const id = z.string()
 const integer = z.number().int().safe()
@@ -38,13 +45,32 @@ export function registerTools(server: McpServer, runtime: Runtime, actor: Manage
   tool('forge_artifact_state', 'Read current scoped artifact state and CAS inputs.', z.strictObject({ artifactId: id }), x => readArtifactState(deps, actor, x))
   tool('forge_manifest', 'Read one consistent page of a revision manifest.', z.strictObject({ artifactId: id, revisionId: id.nullable().optional(), section: z.enum(['files', 'pages', 'edges']), ...paging }), x => readManifest(deps, actor, x))
   tool('forge_revisions', 'Read retained and discarded revision metadata.', z.strictObject({ artifactId: id, ...paging }), x => readRevisions(deps, actor, x))
+  tool('forge_enrichments', 'Read freshly authorized compact enrichment status.', z.strictObject({ artifactId: id, revisionId: id, ...paging }), x => readEnrichments(deps, actor, x))
+  tool('forge_retry_enrichments', 'Run selected pending or retryable enrichments under current page and content CAS.', z.strictObject({ artifactId: id, revisionId: id, pageId: id, expectedContentVersion: integer, expectedPolicyEpoch: integer, kinds: z.array(z.enum(['og', 'shortlink'])).min(1).max(2) }), async x => {
+    if (x.kinds.includes('shortlink') && !runtime.shlink) throw new PolicyError('unavailable')
+    if (x.kinds.includes('og') && !runtime.og) throw new PolicyError('unavailable')
+    const jobs = await retryEnrichmentKinds(deps, actor, x)
+    const shortlink = jobs.find(job => job.kind === 'shortlink')
+    if (shortlink && runtime.shlink) {
+      try { await runShortlinkEnrichment(deps, actor, runtime.shlink, shortlink.jobId, 10_000) } catch { /* Retry admission remains durable; report current status below. */ }
+    }
+    const og = jobs.find(job => job.kind === 'og')
+    if (og && runtime.og) {
+      try { await runOgJob(deps, actor, deps.store, runtime.og, og.jobId) } catch { /* Report separately authorized current status. */ }
+    }
+    return readPageEnrichment(deps, actor, x)
+  })
   tool('forge_begin', 'Begin publication with metadata only; upload bytes separately.', z.strictObject({ command: z.strictObject({ idempotencyKey: id, artifactId: id.nullable(), expectedRevisionId: id.nullable(), expectedContentVersion: integer, files: z.array(file), pages: z.array(page), edges: z.array(edge) }) }), async x => {
     if (x.command.files.some(f => f.size > runtime.transport.maxUploadBytes)) throw new InputError('payload_too_large')
     return service.begin(actor, x.command)
   })
   tool('forge_materialize', 'Copy a base revision file into a publication.', z.strictObject({ sessionId: id, path: id }), x => service.materialize(actor, x.sessionId, x.path))
   tool('forge_seal', 'Seal a complete publication.', session, x => service.seal(actor, x.sessionId))
-  tool('forge_commit', 'Commit a sealed publication.', session, x => service.commit(actor, x.sessionId))
+  tool('forge_commit', 'Commit a sealed publication.', session, async x => {
+    const receipt = await service.commit(actor, x.sessionId)
+    try { await enqueuePublicationIntents(deps, actor, receipt) } catch { console.error('Publication OG intent enqueue failed') }
+    return receipt
+  })
   tool('forge_status', 'Read publication session status.', session, x => service.status(actor, x.sessionId))
   tool('forge_abort', 'Abort a publication session.', session, x => service.abort(actor, x.sessionId))
   tool('forge_restore', 'Restore a previously committed revision using CAS.', z.strictObject({ command: z.strictObject({ ...promotion, revisionId: id }) }), x => service.restore(actor, x.command))
@@ -56,7 +82,13 @@ export function registerTools(server: McpServer, runtime: Runtime, actor: Manage
     return { method: 'PUT', url: `https://${deps.config.manageHost}/api/publication/upload?${query}`, contentType: 'application/octet-stream' }
   })
   tool('forge_visibility', 'Set page visibility.', z.strictObject({ ...target, visibility: z.enum(['private', 'public']) }), x => setVisibility(deps, actor, x))
-  tool('forge_share', 'Create a page share grant.', z.strictObject({ ...target, grant }), x => share(deps, actor, { pageId: x.pageId, artifactId: x.artifactId, expectedPolicyEpoch: x.expectedPolicyEpoch, ...x.grant }))
+  tool('forge_share', 'Create a page share grant.', z.strictObject({ ...target, grant }), async x => {
+    const result = await share(deps, actor, { pageId: x.pageId, artifactId: x.artifactId, expectedPolicyEpoch: x.expectedPolicyEpoch, ...x.grant })
+    if (result.key && runtime.shlink && runtime.shortDomain) {
+      try { await triggerShareShortlink(deps, actor, runtime.shlink, runtime.shortDomain, x, result) } catch { /* Enrichment cannot reverse the grant. */ }
+    }
+    return result
+  })
   tool('forge_rotate_share', 'Rotate an existing share grant.', z.strictObject({ ...target, grantId: id, next: grant.optional() }), x => rotateShare(deps, actor, x))
   tool('forge_revoke_share', 'Revoke a share grant.', z.strictObject({ ...target, grantId: id }), x => revokeShare(deps, actor, x))
   tool('forge_reveal_share', 'Reveal a revealable share key.', z.strictObject({ ...target, grantId: id }), x => revealShare(deps, actor, x))

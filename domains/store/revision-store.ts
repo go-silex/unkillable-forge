@@ -3,10 +3,19 @@ export interface RevisionRef {
   readonly revisionId: string
 }
 
-export type RevisionObjectRef = RevisionRef & (
+export interface DerivedObjectRef extends RevisionRef {
+  readonly kind: 'og'
+  readonly pageId: string
+  readonly recipeSha256: string
+  readonly inputSha256: string
+  readonly contentSha256: string
+  readonly extension: 'jpg' | 'png'
+}
+
+export type RevisionObjectRef = (RevisionRef & (
   | { readonly kind: 'manifest' }
   | { readonly kind: 'resource'; readonly path: string }
-)
+)) | DerivedObjectRef
 
 export interface StoredObjectInfo {
   readonly key: string
@@ -48,7 +57,19 @@ function prefix(instanceId: string, ref: RevisionRef): string {
   return `${instanceId}/${ref.artifactId}/${ref.revisionId}/`
 }
 
+export function derivedObjectKey(instanceId: string, ref: DerivedObjectRef): string {
+  if (!/^[a-z][a-z0-9-]{1,39}$/.test(instanceId)) throw new StoreError('invalid_input')
+  prefix(instanceId, ref)
+  if (!/^pg_[a-z2-7]{26}$/.test(ref.pageId) ||
+      !/^[a-f0-9]{64}$/.test(ref.recipeSha256) ||
+      !/^[a-f0-9]{64}$/.test(ref.inputSha256) ||
+      !/^[a-f0-9]{64}$/.test(ref.contentSha256) ||
+      (ref.extension !== 'jpg' && ref.extension !== 'png')) throw new StoreError('invalid_input')
+  return `${instanceId}/derived/v1/${ref.artifactId}/${ref.revisionId}/${ref.pageId}/og/${ref.recipeSha256}/${ref.inputSha256}/${ref.contentSha256}.${ref.extension}`
+}
+
 async function objectKey(instanceId: string, ref: RevisionObjectRef): Promise<string> {
+  if (ref.kind === 'og') return derivedObjectKey(instanceId, ref)
   const base = prefix(instanceId, ref)
   if (ref.kind === 'manifest') return `${base}manifest.json`
   // TextEncoder replaces unpaired surrogates; rejecting them prevents path collisions.
@@ -83,6 +104,7 @@ export class RevisionStore {
     if (!expected || !Number.isSafeInteger(expected.size) || expected.size < 0 ||
         typeof expected.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expected.sha256) ||
         !body || typeof body.pipeTo !== 'function' || body.locked) throw new StoreError('invalid_input')
+    if (ref?.kind === 'og' && expected.sha256 !== ref.contentSha256) throw new StoreError('invalid_input')
     let abort: (() => void) | undefined
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
     let output: WritableStreamDefaultWriter<Uint8Array> | undefined
@@ -219,7 +241,15 @@ export class RevisionStore {
   }
 
   async listRevision(ref: RevisionRef, cursor: string | null): Promise<{ readonly objects: readonly ListedRevisionObject[]; readonly cursor: string | null }> {
-    const revisionPrefix = prefix(this.instanceId, ref)
+    return this.listPrefix(prefix(this.instanceId, ref), cursor)
+  }
+
+  async listDerivedRevision(ref: RevisionRef, cursor: string | null): Promise<{ readonly objects: readonly ListedRevisionObject[]; readonly cursor: string | null }> {
+    prefix(this.instanceId, ref)
+    return this.listPrefix(`${this.instanceId}/derived/v1/${ref.artifactId}/${ref.revisionId}/`, cursor)
+  }
+
+  private async listPrefix(revisionPrefix: string, cursor: string | null): Promise<{ readonly objects: readonly ListedRevisionObject[]; readonly cursor: string | null }> {
     if (cursor !== null && (typeof cursor !== 'string' || !cursor)) throw new StoreError('invalid_input')
     try {
       const page = await this.bucket.list({ prefix: revisionPrefix, limit: 1000, ...(cursor === null ? {} : { cursor }) })

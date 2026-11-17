@@ -2,6 +2,8 @@ import { parseManageConfig } from '../../domains/catalogue/instance-config'
 import { accessJwksSource } from '../../domains/catalogue/identity'
 import { PublicationService, type PublicationDeps, type PublicationOptions } from '../../domains/publication'
 import { RevisionStore } from '../../domains/store/revision-store'
+import type { ShlinkConfig } from '../shlink/client'
+import type { OgRuntime } from '../render/og-orchestrator'
 
 export interface TransportOptions {
   maxCommandBytes: number
@@ -13,6 +15,9 @@ export interface Runtime {
   deps: PublicationDeps
   service: PublicationService
   transport: TransportOptions
+  shlink?: ShlinkConfig
+  shortDomain?: string
+  og?: OgRuntime
 }
 
 function numbers(value: unknown, keys: readonly string[]): Record<string, number> {
@@ -45,5 +50,10 @@ async function createRuntime(env: Record<string, unknown>): Promise<Runtime | nu
       !Number.isSafeInteger(900000 + publication.manageClockSkewMs + publication.readClockSkewMs) ||
       !Number.isSafeInteger(publication.maxUploadTimeoutMs + publication.manageClockSkewMs + publication.readClockSkewMs)) return null
   const deps: PublicationDeps = { db: env.DB as D1Database, config: parsed.config, jwks: accessJwksSource(), now: Date.now, store: new RevisionStore(bucket, parsed.config.instanceId), publication }
-  return { deps, service: new PublicationService(deps), transport }
+  const url = env.SHLINK_API_URL, key = env.SHLINK_API_KEY
+  const shlink = typeof url === 'string' && url && typeof key === 'string' && key ? { collectionUrl: url, apiKey: key } : undefined
+  const shortDomain = typeof env.SHLINK_DOMAIN === 'string' && env.SHLINK_DOMAIN ? env.SHLINK_DOMAIN : undefined
+  const accountId = env.FORGE_BROWSER_ACCOUNT_ID, apiToken = env.FORGE_BROWSER_API_TOKEN
+  const og = typeof accountId === 'string' && /^[a-f0-9]{32}$/i.test(accountId) && typeof apiToken === 'string' && apiToken.length > 0 && !/[\r\n]/.test(apiToken) ? { accountId, apiToken } : undefined
+  return { deps, service: new PublicationService(deps), transport, shlink, shortDomain, og }
 }
