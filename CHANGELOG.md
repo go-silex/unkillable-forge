@@ -49,6 +49,8 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ### Changed
 
+- The [manual packaging runbook](docs/forge-manual-ops.md) now records merged F10 PR #18 and publisher PR #13 on canonical `main` `15bee97ee0346fcfe6d7ef3f367335f26bbaa95b` as CI-qualified source only, and one local synthetic `import_state` code-return from N `f5c8d657a49bbc44105d28c263bb7b9a4dd53b67` to previous `a1f086e1c8e6219bc093c50661b6624e275d50a1`. Frozen client Q remains a review identity, not an installation pin. No release, deployment, historical acceptance or F11 delivery is claimed.
+
 - Automatic release publication and Merge on Green now require explicit repository opt-in. The defaults leave both writers disabled while preserving PR CI; F02 verifies repository-level false overrides before bootstrap to prevent inherited organization variables enabling them.
 - The existing CI workflow accepts manual dispatch; the canonical seed on `main` was dispatched at exact SHA `8d0b2e5330153edf2925160132b9bead908444a0`. The transition runbook records its actual CI, repository guards and engine-first migration boundaries.
 
