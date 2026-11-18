@@ -6,11 +6,12 @@ import { assertPrepareAuthority, assertReplayAuthority } from '../catalogue/read
 import { livePagesFrom, livePagesStatement } from '../catalogue/artifact-pages'
 import { documentRouteOf } from '../catalogue/revision-paths'
 import { canonicalUrl, type SubtreeOrTree } from '../catalogue/routing/grammar'
+import { buildImportCompletion, assertImportReplay, type AdmittedImportSelection, type ImportMappingSummary } from '../catalogue/import'
 import type { PublicationDeps, PublicationReceipt, PromotionCommand, RestoreCommand } from './types'
 
 type Page = { page_id: string; disposition: 'new' | 'keep' | 'drop' | 'restore'; document_path: string | null; metadata_json: string | null; expected_policy_epoch: number | null }
 type ExistingPage = { page_id: string; document_path: string; policy_epoch: number }
-type Session = { session_id: string; instance_id: string; actor_principal_id: string; actor_authority_epoch: number; artifact_id: string; revision_id: string; base_revision_id: string | null; base_content_version: number; expires_at: number; closed_at: number | null; request_digest: string }
+type Session = { session_id: string; instance_id: string; actor_principal_id: string; actor_authority_epoch: number; artifact_id: string; revision_id: string; base_revision_id: string | null; base_content_version: number; expires_at: number; closed_at: number | null; request_digest: string; import_plan_id: string | null; import_plan_digest: string | null }
 type Event = { action: string; request_digest: string; receipt_json: string | null }
 
 function route(path: string): SubtreeOrTree {
@@ -96,6 +97,16 @@ function activation(deps: PublicationDeps, artifactId: string, revisionId: strin
 }
 
 export async function commit(deps: PublicationDeps, actor: ManageActor, sessionId: string): Promise<PublicationReceipt> {
+  return (await commitBound(deps, actor, sessionId, null)).publication
+}
+
+export async function commitImport(deps: PublicationDeps, actor: ManageActor, sessionId: string, admitted: AdmittedImportSelection, planId: string, planDigest: string, deadline?: number): Promise<{ publication: PublicationReceipt; mappingSummary: ImportMappingSummary }> {
+  const result = await commitBound(deps, actor, sessionId, { admitted, planId, planDigest }, deadline)
+  if (!result.mappingSummary) throw new PolicyError('invalid_state')
+  return { publication: result.publication, mappingSummary: result.mappingSummary }
+}
+
+async function commitBound(deps: PublicationDeps, actor: ManageActor, sessionId: string, imported: { admitted: AdmittedImportSelection; planId: string; planDigest: string } | null, deadline?: number): Promise<{ publication: PublicationReceipt; mappingSummary?: ImportMappingSummary }> {
   requireManageActor(actor, deps)
   if (typeof sessionId !== 'string' || !/^ps_[a-z2-7]{26}$/.test(sessionId)) throw new PolicyError('invalid_state')
   const db = deps.db
@@ -106,8 +117,15 @@ export async function commit(deps: PublicationDeps, actor: ManageActor, sessionI
   const existingPageIds = pages.filter(p => p.disposition !== 'new').map(p => p.page_id)
   await assertPrepareAuthority(deps, actor, { artifactId: session?.artifact_id ?? null, pageIds: existingPageIds, requireGlobal: !session || pages.length === 0 || pages.some(p => p.disposition === 'new' || p.disposition === 'restore') })
   if (!session) throw new PolicyError('not_found')
+  if (session.import_plan_id !== (imported?.planId ?? null) || session.import_plan_digest !== (imported?.planDigest ?? null)) throw new PolicyError('conflict')
+  const replayCommit = async (event: Event) => {
+    const publication = await replay(deps, actor, event, 'commit', session.request_digest, session.artifact_id)
+    if (!imported) return { publication }
+    const mappingSummary = await assertImportReplay(deps, actor, imported.admitted, { sessionId, artifactId: session.artifact_id, revisionId: session.revision_id, planId: imported.planId, planDigest: imported.planDigest, publicationReceipt: publication }, deadline)
+    return { publication, mappingSummary }
+  }
   const prior = await db.prepare("SELECT action,request_digest,receipt_json FROM publication_events WHERE session_id=? AND action='commit'").bind(sessionId).first<Event>()
-  if (prior) return replay(deps, actor, prior, 'commit', session.request_digest, session.artifact_id)
+  if (prior) return replayCommit(prior)
   try {
   if (session.closed_at !== null) throw new PolicyError('invalid_state', 'publication_closed')
   if (session.expires_at <= at) throw new PolicyError('invalid_state', 'publication_expired')
@@ -130,11 +148,13 @@ export async function commit(deps: PublicationDeps, actor: ManageActor, sessionI
   for (const p of pages.filter(p => p.disposition === 'restore')) effects.push(...restorePageStatements(db, { pageId: p.page_id, revisionId: session.revision_id, at }))
   const edges = await all<{ owner_page_id: string; path: string; provider_artifact_id: string }>(db.prepare("SELECT e.owner_page_id,e.path,e.provider_artifact_id FROM publication_edges e JOIN publication_pages p ON p.session_id=e.session_id AND p.page_id=e.owner_page_id WHERE e.session_id=? AND p.disposition='new' ORDER BY e.owner_page_id,e.path").bind(sessionId))
   const ownership: OwnershipEdge[] = edges.map(e => ({ ownerPageId: e.owner_page_id, path: e.path, providerArtifactId: e.provider_artifact_id }))
-    await executeGuarded(deps, actor, guards, effects, { revisionId: session.revision_id, edges: ownership }, [activation(deps, session.artifact_id, session.revision_id)])
-    return result
+    const completion = imported ? await buildImportCompletion(deps, actor, imported.admitted, { sessionId, artifactId: session.artifact_id, revisionId: session.revision_id, planId: imported.planId, planDigest: imported.planDigest, at, publicationReceipt: result }) : null
+    if (imported) guards.push({ action: 'import_state', artifactId: session.artifact_id, revisionId: session.revision_id, requestDigest: imported.planDigest, occurredAt: at })
+    await executeGuarded(deps, actor, guards, effects, { revisionId: session.revision_id, edges: ownership }, [activation(deps, session.artifact_id, session.revision_id), ...(completion?.statements ?? [])], deadline)
+    return { publication: result, ...(completion ? { mappingSummary: completion.mappingSummary } : {}) }
   } catch (error) {
     const concurrent = await db.prepare("SELECT action,request_digest,receipt_json FROM publication_events WHERE session_id=? AND action='commit'").bind(sessionId).first<Event>()
-    if (concurrent) return replay(deps, actor, concurrent, 'commit', session.request_digest, session.artifact_id)
+    if (concurrent) return replayCommit(concurrent)
     throw error
   }
 }

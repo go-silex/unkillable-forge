@@ -2,12 +2,13 @@ import { executeGuarded, PolicyError, type GuardRequest, type OwnershipEdge } fr
 import { requireManageActor, type ManageActor } from '../catalogue/principals'
 import { newId } from '../catalogue/ids'
 import { documentRouteOf, validateRevisionPaths } from '../catalogue/revision-paths'
+import { subtreeSlugOf } from '../catalogue/routing/grammar'
 import { assertPrepareAuthority, assertReplayAuthority } from '../catalogue/read'
 import { livePagesStatement, livePagesFrom } from '../catalogue/artifact-pages'
 import { StoreError } from '../store/revision-store'
 import type { BeginCommand, PublicationDeps, PublicationFile, PublicationPage, PublicationStatus, PublicationUploadStatus } from './types'
 
-type Session = { session_id: string; instance_id: string; actor_principal_id: string; actor_authority_epoch: number; request_digest: string; artifact_id: string; artifact_is_new: number; revision_id: string; base_revision_id: string | null; base_content_version: number; expires_at: number; closed_at: number | null }
+type Session = { session_id: string; instance_id: string; actor_principal_id: string; actor_authority_epoch: number; request_digest: string; artifact_id: string; artifact_is_new: number; revision_id: string; base_revision_id: string | null; base_content_version: number; expires_at: number; closed_at: number | null; import_plan_id: string | null; import_plan_digest: string | null }
 type FileRow = { path: string; kind: PublicationFile['kind']; sha256: string; size: number; content_type: string; source: PublicationFile['source']; object_key: string | null; object_version: string | null; stored_at: number | null }
 type PageRow = { page_id: string; disposition: PublicationPage['disposition']; document_path: string | null; metadata_json: string | null; expected_policy_epoch: number | null }
 type PageScope = Pick<PageRow, 'page_id' | 'disposition' | 'expected_policy_epoch'>
@@ -47,10 +48,13 @@ function clock(deps: PublicationDeps): number {
   if (!Number.isSafeInteger(n) || n < 0 || !Number.isSafeInteger(p.sessionTtlMs) || p.sessionTtlMs <= 0 || !Number.isSafeInteger(p.maxUploadTimeoutMs) || p.maxUploadTimeoutMs <= 0 || !Number.isSafeInteger(n + p.sessionTtlMs) || deps.store.instanceId !== deps.config.instanceId) return fail()
   return n
 }
-function validPath(p: unknown): p is string {
-  return typeof p === 'string' && p.length >= 2 && p.length <= 1024 && p.startsWith('/') && !p.endsWith('/') && !p.includes('\\') && !p.includes('//') && !p.split('/').some(x => x === '.' || x === '..') && !/[\u0000-\u001f\u007f?#]/.test(p) && !/%(?:2f|2e|5c|25|0[0-9a-f]|1[0-9a-f]|7f)/i.test(p) && !/^\/(?:s|_revisions|api|registry)(?:\/|$)/.test(p) && p !== '/manifest.json' && p !== '/asset-owners.json'
+function checkImportDeadline(deadline?: number): void {
+  if (deadline !== undefined && (!Number.isFinite(deadline) || performance.now() >= deadline)) throw new PolicyError('unavailable', 'import_timeout')
 }
-function validate(command: BeginCommand): void {
+function validPath(p: unknown): p is string {
+  return typeof p === 'string' && p.length >= 2 && p.length <= 1024 && p.startsWith('/') && !p.endsWith('/') && !p.includes('\\') && !p.includes('//') && !p.split('/').some(x => x === '.' || x === '..') && !/[\u0000-\u001f\u007f?#]/.test(p) && !/%(?:2f|2e|5c|25|0[0-9a-f]|1[0-9a-f]|7f)/i.test(p) && !/^\/(?:s|_revisions|api|registry)(?:\/|$)/.test(p) && !p.startsWith('/_derived/') && p !== '/manifest.json' && p !== '/asset-owners.json'
+}
+export function validateBeginCommand(command: BeginCommand): void {
   if (!command || typeof command.idempotencyKey !== 'string' || !/^[!-~]{1,128}$/.test(command.idempotencyKey) || !(command.artifactId === null || id(command.artifactId, 'ar')) || !(command.expectedRevisionId === null || id(command.expectedRevisionId, 'rv')) || !Number.isSafeInteger(command.expectedContentVersion) || command.expectedContentVersion < 0 || !Array.isArray(command.files) || !Array.isArray(command.pages) || !Array.isArray(command.edges) || command.files.length > 10000 || command.pages.length > 1000 || command.edges.length > 20000 || command.pages.length === 0 || (command.artifactId === null && (command.expectedRevisionId !== null || command.expectedContentVersion !== 0))) fail()
   if (command.pages.every(p => p?.disposition === 'drop')) throw new PolicyError('invalid_state', 'publication_without_page')
   const files = new Map<string, PublicationFile>(), pages = new Map<string, PublicationPage>(), docs = new Set<string>(), edges = new Set<string>()
@@ -120,13 +124,13 @@ function assertion(deps: PublicationDeps, s: Session, now: number, allowSealed =
     ELSE 'ok' END`).bind(s.session_id, now, s.actor_principal_id, null, s.artifact_id, allowSealed ? 1 : 0, assertionId, s.instance_id),
     deps.db.prepare('DELETE FROM publication_assertions WHERE assertion_id = ?').bind(assertionId)]
 }
-async function guarded(deps: PublicationDeps, actor: ManageActor, s: Session, pages: PageRow[], effects: D1PreparedStatement[], allowSealed = false, ownership?: { revisionId: string; edges: OwnershipEdge[] }): Promise<void> {
+async function guarded(deps: PublicationDeps, actor: ManageActor, s: Session, pages: PageRow[], effects: D1PreparedStatement[], allowSealed = false, ownership?: { revisionId: string; edges: OwnershipEdge[] }, importDeadline?: number): Promise<void> {
   const now = clock(deps)
-  await executeGuarded(deps, actor, guards(s, pages, now), [...assertion(deps, s, now, allowSealed), ...effects], ownership)
+  await executeGuarded(deps, actor, guards(s, pages, now), [...assertion(deps, s, now, allowSealed), ...effects], ownership, [], importDeadline)
 }
-async function transferGuarded(deps: PublicationDeps, actor: ManageActor, s: Session, pages: PageScope[], effects: D1PreparedStatement[]): Promise<void> {
+async function transferGuarded(deps: PublicationDeps, actor: ManageActor, s: Session, pages: PageScope[], effects: D1PreparedStatement[], deadline: number): Promise<void> {
   const now = clock(deps)
-  await executeGuarded(deps, actor, [transferGuard(s, pages, now)], [...assertion(deps, s, now), ...effects])
+  await executeGuarded(deps, actor, [transferGuard(s, pages, now)], [...assertion(deps, s, now), ...effects], undefined, [], deadline)
 }
 export async function status(deps: PublicationDeps, actor: ManageActor, sessionId: string): Promise<PublicationStatus> {
   const s = await load(deps, actor, sessionId)
@@ -146,19 +150,8 @@ export async function status(deps: PublicationDeps, actor: ManageActor, sessionI
   }
   return { sessionId, artifactId: s.artifact_id, revisionId: s.revision_id, baseRevisionId: s.base_revision_id, expiresAt: s.expires_at, state: actions.has('commit') ? 'committed' : s.closed_at !== null || s.expires_at <= clock(deps) ? 'closed' : actions.has('seal') ? 'sealed' : 'open', files: r.files.map(f => ({ path: f.path, source: f.source, stored: f.stored_at !== null })) }
 }
-export async function begin(deps: PublicationDeps, actor: ManageActor, command: BeginCommand): Promise<PublicationStatus> {
-  requireManageActor(actor, deps); const now = clock(deps); validate(command)
-  const pageIds = command.pages.filter(p => p.disposition !== 'new').map(p => p.pageId)
-  await assertPrepareAuthority(deps, actor, { artifactId: command.artifactId, pageIds, requireGlobal: pageIds.length === 0 || command.pages.some(p => p.disposition === 'new' || p.disposition === 'restore') })
-  const digest = await hash(canonical(command))
-  const prior = await deps.db.prepare('SELECT * FROM publication_sessions WHERE instance_id = ? AND actor_principal_id = ? AND idempotency_key = ?').bind(deps.config.instanceId, actor.principalId, command.idempotencyKey).first<Session>()
-  if (prior) {
-    if (prior.request_digest !== digest) throw new PolicyError('conflict')
-    return status(deps, actor, prior.session_id)
-  }
-  const artifactId = command.artifactId ?? newId('ar'), sessionId = newId('ps'), revisionId = newId('rv')
-  const s: Session = { session_id: sessionId, instance_id: deps.config.instanceId, actor_principal_id: actor.principalId, actor_authority_epoch: actor.authorityEpoch, request_digest: digest, artifact_id: artifactId, artifact_is_new: command.artifactId === null ? 1 : 0, revision_id: revisionId, base_revision_id: command.expectedRevisionId, base_content_version: command.expectedContentVersion, expires_at: now + deps.publication.sessionTtlMs, closed_at: null }
-  const pageRows: PageRow[] = command.pages.map(p => ({ page_id: p.pageId, disposition: p.disposition, document_path: p.documentPath, metadata_json: p.metadata === null ? null : canonical(p.metadata), expected_policy_epoch: p.expectedPolicyEpoch }))
+export async function inspectBeginCommand(deps: PublicationDeps, command: BeginCommand, artifactId = command.artifactId ?? newId('ar')): Promise<void> {
+  validateBeginCommand(command)
   const slugs = command.pages.filter(p => p.disposition !== 'drop').flatMap(p => {
     const route = p.documentPath === null ? null : documentRouteOf(p.documentPath)
     return route?.kind === 'subtree' ? [route.slug] : []
@@ -166,11 +159,13 @@ export async function begin(deps: PublicationDeps, actor: ManageActor, command: 
   if ((await validateRevisionPaths(deps, { artifactId, paths: command.files.map(f => f.path), resultingSubtreeSlugs: slugs })).length) throw new PolicyError('conflict')
   const baseChunks = chunks(command.files.filter(f => f.source === 'base').map(f => [f.path,f.sha256,f.size,f.kind,f.contentType]))
   const providerChunks = chunks(command.edges.filter(e => e.providerArtifactId !== null && e.providerArtifactId !== artifactId).map(e => [e.path,e.providerArtifactId]))
+  const pageChunks = chunks(command.pages.filter(p => p.disposition === 'new' || p.disposition === 'restore').map(p => [p.pageId,p.disposition,p.expectedPolicyEpoch]))
   const preflight = await deps.db.batch([
     deps.db.prepare('SELECT active_revision_id,content_version FROM artifacts WHERE artifact_id = ?').bind(artifactId),
     livePagesStatement(deps.db, artifactId),
     ...baseChunks.map(chunk => deps.db.prepare(`SELECT 1 FROM json_each(?1) j LEFT JOIN revision_resources r ON r.revision_id = ?2 AND r.path = json_extract(j.value,'$[0]') WHERE r.path IS NULL OR r.sha256 IS NOT json_extract(j.value,'$[1]') OR r.size IS NOT json_extract(j.value,'$[2]') OR r.kind IS NOT json_extract(j.value,'$[3]') OR r.content_type IS NOT json_extract(j.value,'$[4]') LIMIT 1`).bind(chunk, command.expectedRevisionId)),
     ...providerChunks.map(chunk => deps.db.prepare(`SELECT 1 FROM json_each(?1) j WHERE NOT EXISTS (SELECT 1 FROM mounts m WHERE m.path = json_extract(j.value,'$[0]') AND m.artifact_id = json_extract(j.value,'$[1]') AND m.kind IN ('fragment','asset')) LIMIT 1`).bind(chunk)),
+    ...pageChunks.map(chunk => deps.db.prepare(`SELECT 1 FROM json_each(?1) j WHERE (json_extract(j.value,'$[1]')='new' AND EXISTS (SELECT 1 FROM pages p WHERE p.page_id=json_extract(j.value,'$[0]'))) OR (json_extract(j.value,'$[1]')='restore' AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.page_id=json_extract(j.value,'$[0]') AND p.artifact_id=?2 AND p.tombstoned_at IS NOT NULL AND p.policy_epoch=json_extract(j.value,'$[2]'))) LIMIT 1`).bind(chunk, artifactId)),
   ])
   if (command.artifactId !== null) {
     const a = preflight[0].results[0] as {active_revision_id:string|null;content_version:number} | undefined
@@ -185,32 +180,131 @@ export async function begin(deps: PublicationDeps, actor: ManageActor, command: 
     }
   }
   if (preflight.slice(2).some(result => result.results.length > 0)) throw new PolicyError('conflict')
+}
+
+export type BeginInspectionCursor = { phase: 'files' | 'pages' | 'edges' | 'membership'; index: number }
+const INSPECTION_CHUNK = 128
+
+/** Inspect one bounded slice; the caller must bind the cursor to a stable target snapshot. */
+export async function inspectBeginCommandChunk(deps: PublicationDeps, command: BeginCommand, cursor: BeginInspectionCursor, artifactId: string | null = command.artifactId): Promise<BeginInspectionCursor | null> {
+  validateBeginCommand(command)
+  const phases = ['files', 'pages', 'edges', 'membership'] as const
+  if (!cursor || !phases.includes(cursor.phase) || !Number.isSafeInteger(cursor.index) || cursor.index < 0 || cursor.index % INSPECTION_CHUNK !== 0 || (command.artifactId !== null && artifactId !== command.artifactId)) fail()
+  if (cursor.phase !== 'membership' && cursor.index > 0 && cursor.index >= command[cursor.phase].length) fail()
+  const next = (length: number): BeginInspectionCursor | null => {
+    if (cursor.index + INSPECTION_CHUNK < length) return { phase: cursor.phase, index: cursor.index + INSPECTION_CHUNK }
+    const phase = phases[phases.indexOf(cursor.phase) + 1]
+    return phase ? { phase, index: 0 } : null
+  }
+  const db = deps.db
+  const checkArtifact = async (): Promise<void> => {
+    const artifact = await db.prepare('SELECT active_revision_id,content_version FROM artifacts WHERE artifact_id = ?').bind(artifactId).first<{active_revision_id:string|null;content_version:number}>()
+    if (command.artifactId !== null && (!artifact || artifact.active_revision_id !== command.expectedRevisionId || artifact.content_version !== command.expectedContentVersion)) throw new PolicyError('conflict')
+    if (command.artifactId === null && artifact) throw new PolicyError('conflict')
+  }
+  const finish = async (value: BeginInspectionCursor | null): Promise<BeginInspectionCursor | null> => { await checkArtifact(); return value }
+  await checkArtifact()
+
+  if (cursor.phase === 'files') {
+    const files = command.files.slice(cursor.index, cursor.index + INSPECTION_CHUNK)
+    const slugs = new Set(command.pages.flatMap(p => {
+      const route = p.disposition === 'drop' || p.documentPath === null ? null : documentRouteOf(p.documentPath)
+      return route?.kind === 'subtree' ? [route.slug] : []
+    }))
+    const touched = new Set(files.flatMap(f => {
+      const slug = subtreeSlugOf(f.path)
+      return slug !== null && slugs.has(slug) ? [slug] : []
+    }))
+    if ((await validateRevisionPaths(deps, { artifactId, paths: files.map(f => f.path), resultingSubtreeSlugs: [...touched] })).length) throw new PolicyError('conflict')
+    const base = files.filter(f => f.source === 'base').map(f => [f.path,f.sha256,f.size,f.kind,f.contentType])
+    if (base.length && await db.prepare(`SELECT 1 FROM json_each(?1) j LEFT JOIN revision_resources r ON r.revision_id = ?2 AND r.path = json_extract(j.value,'$[0]') WHERE r.path IS NULL OR r.sha256 IS NOT json_extract(j.value,'$[1]') OR r.size IS NOT json_extract(j.value,'$[2]') OR r.kind IS NOT json_extract(j.value,'$[3]') OR r.content_type IS NOT json_extract(j.value,'$[4]') LIMIT 1`).bind(JSON.stringify(base), command.expectedRevisionId).first()) throw new PolicyError('conflict')
+    return finish(next(command.files.length))
+  }
+  if (cursor.phase === 'pages') {
+    const pages = command.pages.slice(cursor.index, cursor.index + INSPECTION_CHUNK)
+    const slugs = pages.flatMap(p => {
+      const route = p.disposition === 'drop' || p.documentPath === null ? null : documentRouteOf(p.documentPath)
+      return route?.kind === 'subtree' ? [route.slug] : []
+    })
+    if ((await validateRevisionPaths(deps, { artifactId, paths: [], resultingSubtreeSlugs: slugs })).length) throw new PolicyError('conflict')
+    const requested = JSON.stringify(pages.map(p => [p.pageId,p.disposition,p.expectedPolicyEpoch]))
+    if (await db.prepare(`SELECT 1 FROM json_each(?1) j WHERE (json_extract(j.value,'$[1]')='new' AND EXISTS (SELECT 1 FROM pages p WHERE p.page_id=json_extract(j.value,'$[0]'))) OR (json_extract(j.value,'$[1]')='restore' AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.page_id=json_extract(j.value,'$[0]') AND p.artifact_id=?2 AND p.tombstoned_at IS NOT NULL AND p.policy_epoch=json_extract(j.value,'$[2]'))) LIMIT 1`).bind(requested, artifactId).first()) throw new PolicyError('conflict')
+    if (command.artifactId !== null && await db.prepare(`SELECT 1 FROM json_each(?1) j WHERE json_extract(j.value,'$[1]') IN ('keep','drop') AND NOT EXISTS (SELECT 1 FROM pages p WHERE p.page_id=json_extract(j.value,'$[0]') AND p.artifact_id=?2 AND p.tombstoned_at IS NULL) LIMIT 1`).bind(requested, artifactId).first()) throw new PolicyError('not_found')
+    return finish(next(command.pages.length))
+  }
+  if (cursor.phase === 'edges') {
+    const edges = command.edges.slice(cursor.index, cursor.index + INSPECTION_CHUNK).filter(e => e.providerArtifactId !== null && e.providerArtifactId !== artifactId).map(e => [e.path,e.providerArtifactId])
+    if (edges.length && await db.prepare(`SELECT 1 FROM json_each(?1) j WHERE NOT EXISTS (SELECT 1 FROM mounts m WHERE m.path = json_extract(j.value,'$[0]') AND m.artifact_id = json_extract(j.value,'$[1]') AND m.kind IN ('fragment','asset')) LIMIT 1`).bind(JSON.stringify(edges)).first()) throw new PolicyError('conflict')
+    return finish(next(command.edges.length))
+  }
+  if (command.artifactId === null) return finish(null)
+  const result = await db.prepare(`SELECT p.page_id,p.policy_epoch,r.kind,r.route_key,r.document_path FROM pages p LEFT JOIN routes r ON r.page_id=p.page_id AND r.kind IN ('subtree','tree_page') WHERE p.page_id IN (SELECT page_id FROM pages WHERE artifact_id=?1 AND tombstoned_at IS NULL ORDER BY page_id LIMIT ?2 OFFSET ?3) ORDER BY p.page_id,r.kind,r.route_key`).bind(artifactId, INSPECTION_CHUNK, cursor.index).all()
+  const live = livePagesFrom(result)
+  const pages = new Map(command.pages.map(p => [p.pageId,p]))
+  for (const p of live) {
+    const requested = pages.get(p.pageId)
+    if (!requested || !['keep','drop'].includes(requested.disposition) || requested.expectedPolicyEpoch !== p.policyEpoch || (requested.disposition === 'keep' && requested.documentPath !== p.documentPath)) throw new PolicyError('conflict')
+  }
+  return finish(live.length === INSPECTION_CHUNK ? { phase: 'membership', index: cursor.index + INSPECTION_CHUNK } : null)
+}
+
+export async function begin(deps: PublicationDeps, actor: ManageActor, command: BeginCommand): Promise<PublicationStatus> {
+  return beginBound(deps, actor, command, null)
+}
+
+export async function beginImport(deps: PublicationDeps, actor: ManageActor, command: BeginCommand, binding: { planId: string; planDigest: string }, deadline?: number): Promise<PublicationStatus> {
+  if (!binding || typeof binding.planId !== 'string' || !/^[!-~]{1,128}$/.test(binding.planId) || !/^[0-9a-f]{64}$/.test(binding.planDigest)) throw new PolicyError('invalid_state')
+  return beginBound(deps, actor, command, binding, deadline)
+}
+
+async function beginBound(deps: PublicationDeps, actor: ManageActor, command: BeginCommand, binding: { planId: string; planDigest: string } | null, deadline?: number): Promise<PublicationStatus> {
+  requireManageActor(actor, deps); const now = clock(deps); validateBeginCommand(command)
+  const pageIds = command.pages.filter(p => p.disposition !== 'new').map(p => p.pageId)
+  await assertPrepareAuthority(deps, actor, { artifactId: command.artifactId, pageIds, requireGlobal: pageIds.length === 0 || command.pages.some(p => p.disposition === 'new' || p.disposition === 'restore') })
+  const digest = await hash(canonical(command))
+  const prior = binding
+    ? await deps.db.prepare('SELECT * FROM publication_sessions WHERE instance_id = ? AND import_plan_id = ?').bind(deps.config.instanceId, binding.planId).first<Session>()
+    : await deps.db.prepare('SELECT * FROM publication_sessions WHERE instance_id = ? AND actor_principal_id = ? AND idempotency_key = ?').bind(deps.config.instanceId, actor.principalId, command.idempotencyKey).first<Session>()
+  if (prior) {
+    if (prior.request_digest !== digest || prior.import_plan_id !== (binding?.planId ?? null) || prior.import_plan_digest !== (binding?.planDigest ?? null) || prior.actor_principal_id !== actor.principalId) throw new PolicyError('conflict')
+    return status(deps, actor, prior.session_id)
+  }
+  const artifactId = command.artifactId ?? newId('ar'), sessionId = newId('ps'), revisionId = newId('rv')
+  const s: Session = { session_id: sessionId, instance_id: deps.config.instanceId, actor_principal_id: actor.principalId, actor_authority_epoch: actor.authorityEpoch, request_digest: digest, artifact_id: artifactId, artifact_is_new: command.artifactId === null ? 1 : 0, revision_id: revisionId, base_revision_id: command.expectedRevisionId, base_content_version: command.expectedContentVersion, expires_at: now + deps.publication.sessionTtlMs, closed_at: null, import_plan_id: binding?.planId ?? null, import_plan_digest: binding?.planDigest ?? null }
+  const pageRows: PageRow[] = command.pages.map(p => ({ page_id: p.pageId, disposition: p.disposition, document_path: p.documentPath, metadata_json: p.metadata === null ? null : canonical(p.metadata), expected_policy_epoch: p.expectedPolicyEpoch }))
+  await inspectBeginCommand(deps, command, artifactId)
   const db = deps.db
   const beginAssertionId = newId('pe')
   const effects: D1PreparedStatement[] = [
     db.prepare(`INSERT INTO publication_assertions (assertion_id, verdict) SELECT ?, CASE WHEN EXISTS (SELECT 1 FROM publication_events WHERE instance_id = ? AND actor_principal_id = ? AND idempotency_key = ?) THEN 'conflict' ELSE 'ok' END`).bind(beginAssertionId, s.instance_id, actor.principalId, command.idempotencyKey),
     db.prepare('DELETE FROM publication_assertions WHERE assertion_id = ?').bind(beginAssertionId),
-    db.prepare('INSERT INTO publication_sessions (session_id,instance_id,actor_principal_id,actor_authority_epoch,idempotency_key,request_digest,artifact_id,artifact_is_new,revision_id,base_revision_id,base_content_version,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(sessionId, s.instance_id, actor.principalId, actor.authorityEpoch, command.idempotencyKey, digest, artifactId, s.artifact_is_new, revisionId, s.base_revision_id, s.base_content_version, now, s.expires_at),
+    db.prepare('INSERT INTO publication_sessions (session_id,instance_id,actor_principal_id,actor_authority_epoch,idempotency_key,request_digest,artifact_id,artifact_is_new,revision_id,base_revision_id,base_content_version,created_at,expires_at,import_plan_id,import_plan_digest) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(sessionId, s.instance_id, actor.principalId, actor.authorityEpoch, command.idempotencyKey, digest, artifactId, s.artifact_is_new, revisionId, s.base_revision_id, s.base_content_version, now, s.expires_at, s.import_plan_id, s.import_plan_digest),
   ]
   for (const chunk of chunks(command.files)) effects.push(db.prepare(`INSERT INTO publication_files (session_id,path,kind,sha256,size,content_type,source) SELECT ?1,json_extract(value,'$.path'),json_extract(value,'$.kind'),json_extract(value,'$.sha256'),json_extract(value,'$.size'),json_extract(value,'$.contentType'),json_extract(value,'$.source') FROM json_each(?2)`).bind(sessionId,chunk))
   for (const chunk of chunks(pageRows)) effects.push(db.prepare(`INSERT INTO publication_pages (session_id,page_id,disposition,document_path,metadata_json,expected_policy_epoch) SELECT ?1,json_extract(value,'$.page_id'),json_extract(value,'$.disposition'),json_extract(value,'$.document_path'),json_extract(value,'$.metadata_json'),json_extract(value,'$.expected_policy_epoch') FROM json_each(?2)`).bind(sessionId,chunk))
   for (const chunk of chunks(command.edges.map(e => ({...e,providerArtifactId:e.providerArtifactId ?? artifactId})))) effects.push(db.prepare(`INSERT INTO publication_edges (session_id,owner_page_id,path,provider_artifact_id) SELECT ?1,json_extract(value,'$.ownerPageId'),json_extract(value,'$.path'),json_extract(value,'$.providerArtifactId') FROM json_each(?2)`).bind(sessionId,chunk))
   effects.push(...assertion(deps,s,now))
+  checkImportDeadline(deadline)
   try {
-    await executeGuarded(deps,actor,guards(s,pageRows,now),effects)
+    await executeGuarded(deps,actor,guards(s,pageRows,now),effects,undefined,[],deadline)
   } catch (error) {
-    const winner = await db.prepare('SELECT request_digest FROM publication_sessions WHERE instance_id = ? AND actor_principal_id = ? AND idempotency_key = ?').bind(s.instance_id, actor.principalId, command.idempotencyKey).first<{request_digest:string}>()
+    if (error instanceof PolicyError && error.detail === 'import_timeout') throw error
+    const winner = binding
+      ? await db.prepare('SELECT * FROM publication_sessions WHERE instance_id = ? AND import_plan_id = ?').bind(s.instance_id, binding.planId).first<Session>()
+      : await db.prepare('SELECT * FROM publication_sessions WHERE instance_id = ? AND actor_principal_id = ? AND idempotency_key = ?').bind(s.instance_id, actor.principalId, command.idempotencyKey).first<Session>()
     if (!winner) throw error
-    if (winner.request_digest !== digest) throw new PolicyError('conflict')
-    return begin(deps,actor,command)
+    if (winner.request_digest !== digest || winner.actor_principal_id !== actor.principalId || winner.import_plan_id !== s.import_plan_id || winner.import_plan_digest !== s.import_plan_digest) throw new PolicyError('conflict')
+    return beginBound(deps,actor,command,binding,deadline)
   }
   return status(deps,actor,sessionId)
 }
-async function transfer(deps: PublicationDeps, actor: ManageActor, sessionId: string, path: string, source: 'client'|'base', body?: ReadableStream<Uint8Array>): Promise<PublicationUploadStatus> {
+async function transfer(deps: PublicationDeps, actor: ManageActor, sessionId: string, path: string, source: 'client'|'base', body?: ReadableStream<Uint8Array>, budgetMs = deps.publication.maxUploadTimeoutMs): Promise<PublicationUploadStatus> {
   requireManageActor(actor, deps)
-  const deadline = performance.now() + deps.publication.maxUploadTimeoutMs
+  const duration = Math.min(deps.publication.maxUploadTimeoutMs, budgetMs)
+  if (!Number.isFinite(duration) || duration <= 0) { if (body) void body.cancel().catch(() => {}); throw new PolicyError('unavailable','publication_upload_timeout') }
+  const deadline = performance.now() + duration
   const timeout = new PolicyError('unavailable','publication_upload_timeout')
-  const controller = new AbortController(), timer = setTimeout(() => controller.abort(timeout), deps.publication.maxUploadTimeoutMs)
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(timeout), duration)
   try {
     const s = await load(deps,actor,sessionId)
     const [fileResult, pageResult, eventResult, sessionResult] = await deps.db.batch([
@@ -233,7 +327,7 @@ async function transfer(deps: PublicationDeps, actor: ManageActor, sessionId: st
     if (!f || f.source !== source) throw new PolicyError('not_found')
     if (f.stored_at !== null && f.object_key !== null && f.object_version !== null) return {sessionId,path,stored:true,state}
     if (state !== 'open') throw new PolicyError('conflict')
-    await transferGuarded(deps,actor,s,pages,[])
+    await transferGuarded(deps,actor,s,pages,[],deadline)
     if (controller.signal.aborted || performance.now() >= deadline) throw timeout
     if (source === 'base') {
       if (!s.base_revision_id) fail()
@@ -251,16 +345,18 @@ async function transfer(deps: PublicationDeps, actor: ManageActor, sessionId: st
     if (!body) fail()
     if (controller.signal.aborted || performance.now() >= deadline) { void body!.cancel().catch(() => {}); throw timeout }
     const stored = await deps.store.put({ artifactId:s.artifact_id, revisionId:s.revision_id, kind:'resource', path }, { size:f.size, sha256:f.sha256 }, body!, controller.signal)
-    await transferGuarded(deps,actor,s,pages,[deps.db.prepare('UPDATE publication_files SET object_key = ?, object_version = ?, stored_at = ? WHERE session_id = ? AND path = ?').bind(stored.key,stored.version,clock(deps),sessionId,path)])
+    await transferGuarded(deps,actor,s,pages,[deps.db.prepare('UPDATE publication_files SET object_key = ?, object_version = ?, stored_at = ? WHERE session_id = ? AND path = ?').bind(stored.key,stored.version,clock(deps),sessionId,path)],deadline)
     return {sessionId,path,stored:true,state:'open'}
   } catch (error) {
-    if (error === timeout || (error instanceof StoreError && error.cause === timeout)) throw timeout
+    if (error === timeout || (error instanceof StoreError && error.cause === timeout) || (error instanceof PolicyError && error.detail === 'import_timeout')) throw timeout
     throw error
   } finally { clearTimeout(timer) }
 }
 export function upload(deps: PublicationDeps, actor: ManageActor, sessionId: string, path: string, body: ReadableStream<Uint8Array>): Promise<PublicationUploadStatus> { return transfer(deps,actor,sessionId,path,'client',body) }
 export function materialize(deps: PublicationDeps, actor: ManageActor, sessionId: string, path: string): Promise<PublicationUploadStatus> { return transfer(deps,actor,sessionId,path,'base') }
-export async function seal(deps: PublicationDeps, actor: ManageActor, sessionId: string): Promise<PublicationStatus> {
+export function uploadImport(deps: PublicationDeps, actor: ManageActor, sessionId: string, path: string, body: ReadableStream<Uint8Array>, budgetMs: number): Promise<PublicationUploadStatus> { return transfer(deps,actor,sessionId,path,'client',body,budgetMs) }
+export function materializeImport(deps: PublicationDeps, actor: ManageActor, sessionId: string, path: string, budgetMs: number): Promise<PublicationUploadStatus> { return transfer(deps,actor,sessionId,path,'base',undefined,budgetMs) }
+export async function seal(deps: PublicationDeps, actor: ManageActor, sessionId: string, importDeadline?: number): Promise<PublicationStatus> {
   requireManageActor(actor, deps)
   const deadline = performance.now() + deps.publication.maxUploadTimeoutMs
   const timeout = new PolicyError('unavailable','publication_upload_timeout')
@@ -273,20 +369,24 @@ export async function seal(deps: PublicationDeps, actor: ManageActor, sessionId:
     if (replay.state === 'closed') throw new PolicyError('invalid_state', s.closed_at !== null ? 'publication_closed' : 'publication_expired')
     return replay
   }
-  await guarded(deps,actor,s,r.pages,[])
+  checkImportDeadline(importDeadline)
+  await guarded(deps,actor,s,r.pages,[],false,undefined,importDeadline)
   if (r.files.some(f => f.stored_at === null || f.object_key === null || f.object_version === null)) throw new PolicyError('invalid_state','incomplete')
   const manifest = canonical({ files:r.files.map(f => ({path:f.path,kind:f.kind,sha256:f.sha256,size:f.size,contentType:f.content_type})), pages:r.pages.map(p => ({pageId:p.page_id,disposition:p.disposition,documentPath:p.document_path,metadata:p.metadata_json === null ? null : JSON.parse(p.metadata_json),expectedPolicyEpoch:p.expected_policy_epoch})), edges:r.edges.map(e => ({ownerPageId:e.owner_page_id,path:e.path,providerArtifactId:e.provider_artifact_id})) })
   const bytes = new TextEncoder().encode(manifest), digest = await hash(manifest)
+  checkImportDeadline(importDeadline)
   if (controller.signal.aborted || performance.now() >= deadline) throw timeout
   const stored = await deps.store.put({artifactId:s.artifact_id,revisionId:s.revision_id,kind:'manifest'},{size:bytes.length,sha256:digest},new Blob([bytes]).stream(),controller.signal)
   const db = deps.db, now = clock(deps), effects: D1PreparedStatement[] = []
-  if (s.artifact_is_new) effects.push(db.prepare("INSERT INTO artifacts (artifact_id,origin,created_at,created_by) VALUES (?,'published',?,?)").bind(s.artifact_id,now,actor.principalId))
-  effects.push(db.prepare("INSERT INTO revisions (revision_id,artifact_id,origin,manifest_sha256,manifest_object_key,manifest_object_version,manifest_size,sealed_at,sealed_by) VALUES (?,?,'published',?,?,?,?,?,?)").bind(s.revision_id,s.artifact_id,digest,stored.key,stored.version,bytes.length,now,actor.principalId))
+  const origin = s.import_plan_id === null ? 'published' : 'imported'
+  if (s.artifact_is_new) effects.push(db.prepare('INSERT INTO artifacts (artifact_id,origin,created_at,created_by) VALUES (?,?,?,?)').bind(s.artifact_id,origin,now,actor.principalId))
+  effects.push(db.prepare('INSERT INTO revisions (revision_id,artifact_id,origin,manifest_sha256,manifest_object_key,manifest_object_version,manifest_size,sealed_at,sealed_by) VALUES (?,?,?,?,?,?,?,?,?)').bind(s.revision_id,s.artifact_id,origin,digest,stored.key,stored.version,bytes.length,now,actor.principalId))
   effects.push(db.prepare('INSERT INTO revision_resources (revision_id,path,kind,object_key,sha256,size,content_type,object_version) SELECT ?1,path,kind,object_key,sha256,size,content_type,object_version FROM publication_files WHERE session_id = ?2').bind(s.revision_id,sessionId))
   effects.push(db.prepare("INSERT INTO revision_pages (revision_id,page_id,document_path,metadata_json) SELECT ?1,page_id,document_path,metadata_json FROM publication_pages WHERE session_id = ?2 AND disposition IN ('keep','restore')").bind(s.revision_id,sessionId))
   effects.push(db.prepare("INSERT INTO publication_events (event_id,action,session_id,instance_id,artifact_id,revision_id,actor_principal_id,request_digest,occurred_at,verdict) VALUES (?,'seal',?,?,?,?,?,?,?,'ok')").bind(newId('pe'),sessionId,s.instance_id,s.artifact_id,s.revision_id,actor.principalId,s.request_digest,now))
   const edges = r.edges.filter(e => r.pages.some(p => p.page_id === e.owner_page_id && (p.disposition === 'keep' || p.disposition === 'restore'))).map(e => ({ownerPageId:e.owner_page_id,path:e.path,providerArtifactId:e.provider_artifact_id}))
-  await guarded(deps,actor,s,r.pages,effects,false,{revisionId:s.revision_id,edges})
+  checkImportDeadline(importDeadline)
+  await guarded(deps,actor,s,r.pages,effects,false,{revisionId:s.revision_id,edges},importDeadline)
   return status(deps,actor,sessionId)
   } catch (error) {
     if (error === timeout || (error instanceof StoreError && error.cause === timeout) || (error instanceof PolicyError && error.code === 'conflict')) {

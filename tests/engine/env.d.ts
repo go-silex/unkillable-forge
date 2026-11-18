@@ -6,6 +6,7 @@ declare global {
       DB: D1Database
       EMPTY_DB: D1Database
       REVISION_BYTES: R2Bucket
+      FORGE_IMPORT_SOURCE: R2Bucket
       TEST_MIGRATIONS: D1Migration[]
     }
   }

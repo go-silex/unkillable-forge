@@ -20,6 +20,18 @@ existing clients; the public canonical repository `go-silex/unkillable-forge`
 exists. The designed new engine is not yet implemented. Plugin identity and
 distribution remain legacy until F08. See the
 [transition runbook](docs/forge-canonical-transition.md).
+For preparation only, see the [manual engine packaging and code-return runbook](docs/forge-manual-ops.md); it is not an F11 delivery or production authorization.
+
+The new engine source also includes request-driven preview enrichment, separate
+from the legacy deployment described below. Commit attempts to enqueue lightweight
+OG intents; an authenticated operator explicitly runs pending or retryable work
+through `forge_retry_enrichments` and reads status with `forge_enrichments`.
+Automatic Shlink enrichment additionally requires configured Shlink and a
+revealable newly minted share. Without a share-sealing key, the primary share
+still works but no shortlink job is created or available for retry.
+Optional Browser Run and Shlink configuration, trusted-author boundaries, and
+recovery limitations are described in [manage HTTP](docs/forge-manage-http.md).
+This source does not imply a production cutover or historical import.
 
 ---
 

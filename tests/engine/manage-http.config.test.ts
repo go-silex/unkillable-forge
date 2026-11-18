@@ -15,6 +15,9 @@ describe("manage runtime configuration", () => {
     const transport = JSON.parse(manageHttpBindings.FORGE_MANAGE_TRANSPORT)
     const cases: Record<string, unknown>[] = [
       { DB: undefined }, { REVISION_BYTES: undefined }, { REVISION_BYTES: {} },
+      { FORGE_IMPORT_SOURCE: env.REVISION_BYTES },
+      { FORGE_IMPORT_INVENTORIES: "[]" },
+      { FORGE_IMPORT_SOURCE: env.REVISION_BYTES, FORGE_IMPORT_INVENTORIES: "[]" },
       { FORGE_INSTANCE: "{" }, { FORGE_SHARE_VERIFIER_KEYS: "[]" },
       { FORGE_PUBLICATION_OPTIONS: undefined }, { FORGE_PUBLICATION_OPTIONS: "{" },
       { FORGE_PUBLICATION_OPTIONS: publication }, { FORGE_PUBLICATION_OPTIONS: JSON.stringify({ ...publication, maxUploadTimeoutMs: 2147483648 }) },
