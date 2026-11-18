@@ -1,0 +1,9 @@
+{
+  "name": "unkillable-forge",
+  "description": "Profile-isolated local publisher for Unkillable Forge.",
+  "author": {
+    "name": "Silex",
+    "url": "https://github.com/go-silex"
+  },
+  "version": "1.0.0"
+}

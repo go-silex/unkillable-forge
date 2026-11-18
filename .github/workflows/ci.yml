@@ -16,6 +16,64 @@ permissions:
   pull-requests: read
 
 jobs:
+  # This producer runs even for draft source commit S, before payloads exist.
+  publisher-native-producer:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04, target: linux-x64 }
+          - { runner: ubuntu-22.04-arm, target: linux-arm64 }
+          - { runner: macos-15-intel, target: darwin-x64 }
+          - { runner: macos-15, target: darwin-arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm ci --prefix plugins/unkillable-forge
+      - name: Build exact source candidate
+        env:
+          FORGE_INPUT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          test "$(node -p 'process.platform + "-" + process.arch')" = "$EXPECTED_TARGET"
+          rm -rf plugins/unkillable-forge/dist
+          node plugins/unkillable-forge/scripts/build-native.mjs --ci
+          node plugins/unkillable-forge/scripts/build.mjs --local
+      - name: Exercise native source on this architecture
+        run: npx vitest run --project publisher
+      - uses: actions/upload-artifact@v4
+        with:
+          name: publisher-native-${{ matrix.target }}
+          path: plugins/unkillable-forge/dist/native/
+          if-no-files-found: error
+
+  # Unlike the producer, this matrix never compiles/replaces the committed addon.
+  publisher-committed:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-22.04-arm, macos-15-intel, macos-15]
+        node: ["22", "26"]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      - run: npm ci --prefix plugins/unkillable-forge
+      - run: npm run check:publisher
+      - run: npx vitest run --project publisher
+
   check:
     if: (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     runs-on: ubuntu-latest
@@ -147,6 +205,8 @@ jobs:
 
       - name: Install JS test deps
         run: npm ci
+      - name: Install publisher package dependencies
+        run: npm ci --prefix plugins/unkillable-forge
 
       - name: TypeScript typecheck
         run: npm run typecheck

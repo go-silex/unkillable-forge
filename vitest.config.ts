@@ -21,6 +21,14 @@ export default defineConfig({
         },
       },
       {
+        test: {
+          name: "publisher",
+          environment: "node",
+          include: ["tests/publisher/**/*.test.ts"],
+          globals: true,
+        },
+      },
+      {
         plugins: [cloudflareTest(async () => ({
           miniflare: {
             compatibilityDate: "2025-02-14",

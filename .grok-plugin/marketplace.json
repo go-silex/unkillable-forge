@@ -1,9 +1,15 @@
 {
-  "name": "silex-forge",
-  "version": "1.20.1",
-  "description": "Team HTML artifact host on Cloudflare Pages — forge-publish and forge-setup.",
-  "owner": { "name": "Silex" },
+  "name": "unkillable-forge",
+  "version": "1.0.0",
+  "description": "Local streaming MCP publisher for explicitly configured Forge instances.",
+  "owner": { "name": "Unkillable Companies" },
   "plugins": [{
+    "name": "unkillable-forge",
+    "version": "1.0.0",
+    "description": "Private OAuth grants and direct local-file streaming; no Cloudflare administration credentials.",
+    "source": "./plugins/unkillable-forge",
+    "category": "productivity"
+  }, {
     "name": "silex-forge",
     "version": "1.20.1",
     "description": "Cloudflare Pages upload for forge hosts — publish plus fail-closed setup and doctor.",

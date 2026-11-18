@@ -1,0 +1,11 @@
+{
+  "extends": "./plugins/unkillable-forge/tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "include": [
+    "plugins/unkillable-forge/src/**/*.ts",
+    "tests/publisher/**/*.ts"
+  ]
+}
