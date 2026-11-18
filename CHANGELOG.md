@@ -11,6 +11,19 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ### Added
 
+- F10 adds an administrator-only selected-import endpoint using a protected,
+  operator-approved inventory and pinned source versions, sizes and hashes.
+  Bounded dry-run readiness is an observation, not an atomic live-source
+  snapshot; apply revalidates the approved bytes and uses guarded Publication
+  activation and metadata reconciliation. Metadata checks use signed,
+  actor-bound continuation; retained graph and original preview evidence are
+  preserved or explicitly refused. The shared activation guard also rechecks
+  current external resource-provider mounts. Finite legacy visibility or share
+  expiry is explicitly blocked because the target cannot preserve it. G1b
+  historical import remains unauthorized; this adds no recovery system, GC
+  scheduler, production migration or historical-fidelity proof. See
+  `docs/forge-manage-http.md`.
+
 - F09 source adds authorized preview/card delivery, immutable derived OG bytes,
   request-driven enrichment intents and explicit retry/status tools. A freshly
   minted, revealable share can request a create-only Shlink mapping when Shlink

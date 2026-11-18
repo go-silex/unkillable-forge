@@ -7,6 +7,7 @@ import { admitManageRequest, publicError } from './manage-edge'
 import { handleManageWeb } from '../web/manage'
 import { handleMcp } from '../mcp/handler'
 import { enqueuePublicationIntents } from '../../domains/delivery/publication-intents'
+import { handleImport } from './import'
 
 const headers = {
   'Cache-Control': 'no-store',
@@ -45,12 +46,13 @@ async function fetchManage(request: Request, env: Record<string, unknown>): Prom
     if (admission) return errorResponse(request, admission.status, admission.code)
     const isCommand = url.pathname === '/api/publication'
     const isUpload = url.pathname === '/api/publication/upload'
-    if (!isCommand && !isUpload) return errorResponse(request, 404, 'not_found')
-    const method = isCommand ? 'POST' : 'PUT'
+    const isImport = url.pathname === '/api/maintenance/import'
+    if (!isCommand && !isUpload && !isImport) return errorResponse(request, 404, 'not_found')
+    const method = isUpload ? 'PUT' : 'POST'
     if (request.method !== method) return errorResponse(request, 405, 'method_not_allowed', method)
     let sessionId = ''
     let path = ''
-    if (isCommand) {
+    if (!isUpload) {
       if (url.search) throw new InputError('invalid_request')
     } else {
       let count = 0
@@ -60,6 +62,7 @@ async function fetchManage(request: Request, env: Record<string, unknown>): Prom
       path = url.searchParams.get('path')!
     }
     checkFraming(request, isUpload, isUpload ? transport.maxUploadBytes : transport.maxCommandBytes)
+    if (isImport) return response(request, 200, { ok: true, result: await handleImport(request, runtime) })
     const actor = await authenticateManage(request, deps)
     if (!actor) return errorResponse(request, 401, 'unauthenticated')
     if (isUpload) {

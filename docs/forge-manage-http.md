@@ -32,6 +32,114 @@ Typical flow: `begin` → upload client files and `materialize` each retained ba
 
 POST requires `Content-Type: application/json`, optionally `charset=utf-8`. PUT requires `application/octet-stream` without parameters; the resource's content type comes from its manifest, not this header. Content-Encoding must be absent or `identity`. A missing PUT body means zero bytes; a nonzero declared Content-Length with no body is invalid. JSON requires a body.
 
+## Selected import
+
+`POST /api/maintenance/import` is a separate, administrator-only interface for
+an operator-approved selection, not an arbitrary source or SQL API. It accepts
+exactly one of the following JSON envelopes; `command` is the normal
+`BeginCommand`, and all selection fields are required:
+
+```ts
+{ op: 'dry_run', selection: { version: 1, inventoryId, selectionId, planId, command }, cursor: null | string }
+{ op: 'apply', selection: { version: 1, inventoryId, selectionId, planId, command }, cursor?: null | string }
+```
+
+The optional import configuration consists of the private R2 binding
+`FORGE_IMPORT_SOURCE` and the JSON string `FORGE_IMPORT_INVENTORIES`; provide
+both or neither. The latter is a nonempty array of at most 1,000 operator-pinned
+approvals, unique by `inventoryId` and `selectionId`. Each approval has exactly
+`inventoryId`, `selectionId`, `sourceInstance`, `objectKey`, `objectVersion`,
+`sha256`, `approvalRef`, `kind` (`synthetic` or `historical`), `g1bRef` (string
+or null), and positive `maxInventoryBytes`. The digest is lowercase SHA-256.
+The protected inventory pins the selected graph and each source object's
+native version, size and SHA-256; the caller cannot supply the source path,
+approval or metadata in place of that inventory. See the
+[inventory types and admission](../domains/catalogue/import.ts).
+
+To prepare an inventory, capture the approved source instance and artefact,
+page-to-route and ownership evidence, graph edges, each client file's private
+object key/native version/length/SHA-256, and the selected policy, alias,
+shortlink and original-preview observations. The inventory and its exact
+Publication command must describe the same selection. Protect it with its
+private source objects, then pin its own R2 object key, version and SHA-256 in
+the operator configuration above. Approval and evidence references are not
+proof by themselves: historical ownership, key and destination provenance
+must actually be established, and G1b remains unresolved.
+
+For an existing target, include the complete retained base graph: kept pages,
+their resources and ownership edges. Omitting a base resource or edge does not
+authorize deletion. Intentional removals belong in the protected inventory's
+`removals` list as typed `resource` or `edge` entries with an `evidenceRef`;
+edge entries also identify owner, path and provider artefact. Existing
+unselected original preview selections must remain owned base resources.
+Derived-only kept previews that cannot be carried forward block the plan,
+rather than triggering a silent regeneration or fallback.
+
+Aliases use Catalogue's same-origin redirect grammar and are team-only routes;
+the importer does not change configured route grammars or manufacture cookie
+credentials. Existing share cookies remain subject to the configured cookie
+policy and the current live grant. Shortlink observations are protected
+metadata; import does not call a provider or retarget a destination.
+
+Dry-run requires a currently established administrator and makes no publication
+writes. It may return `checking` with a continuation cursor, `blocked` with
+issues, or `ready` with plan, source and target digests. A ready result is an
+observation made during that run, not an atomic snapshot of the current source,
+a promise that its objects remain available, or permission to apply. The
+inventory's pinned version and digest are rechecked on each request. Plan and
+source identities use separate domain-separated HMACs: the plan binds the
+selection and exact approved inventory pin, and the source digest binds the
+file descriptors. Neither exposes raw keys, destinations or an unkeyed digest
+of protected inventory. Existing sessions select their original plan identity
+from the retained verifier-key ring; new plans use its primary key.
+The continuation is signed and binds the operation, instance, current
+administrator and authority epoch, plan, phase and expiry. Target observations
+remain keyed under the verifier key selected when the continuation starts;
+new cursors are signed with the current primary key. Retaining the original
+plan and observation keys across rotation permits unfinished checks and
+sessions to continue; removing either required key prevents reconciliation.
+Cursor MACs are verified against their indicated retained key. The cursor is not
+a credential or authority to activate. Expiry or a changed actor/plan requires
+restarting an unfinished check; a committed receipt can be reconciled with fresh authority
+after cursor expiry while its plan key remains retained. Apply can return `checking`
+before staging; pass its `nextCursor` to the next apply request and continue
+staged responses with their `nextCursor`, or resume an existing session without
+a cursor.
+
+Apply reauthenticates and uses normal Publication staging, streamed byte
+verification, sealing and activation. Each source read must match the approved
+native version and the declared size and SHA-256; an unavailable or changed
+source is reported as `blocked` with `source_integrity` and its path, never
+replaced by latest bytes. Staging can span requests and leave inert bytes on
+failure; publication activation,
+selected metadata and import receipt are guarded together in the owning D1
+transaction. Replaying the same plan reconciles the recorded result, rather
+than implicitly creating a new publication or rotating a share key.
+
+Each transfer step admits at most eight files and 32 MiB in total; an individual
+client or base file larger than 32 MiB is blocked. The session binds the plan
+to its initiating actor, authority epoch and configured TTL. Resume with the
+same plan and current authority while the session is open; a closed session
+requires a new plan identity. These limits are import-step limits, not a
+general Publication size limit or a cloud capacity claim.
+
+At activation, the shared Catalogue guard rechecks that every external
+ownership edge still names a live fragment or asset mount of its provider.
+A provider unpublishing that resource after preparation makes activation
+conflict; local edges remain governed by the selected revision. This applies
+to ordinary Publication as well as import, not only to dry-run.
+
+The request deadline includes metadata inspection and byte transfer. Each
+guarded transfer write checks the deadline immediately before D1 dispatch; no
+new write batch may start after expiry. A D1 write already submitted cannot be
+cancelled and may settle after the deadline; its outcome is awaited.
+Finite visibility or shared-key expiries are explicitly blocked as
+`expiring_policy_unsupported`: the current target policy cannot preserve
+their expiry without extending access. Historical import remains unauthorized
+while G1b ownership evidence and approval are unresolved. This interface adds
+no backup/recovery system, collection scheduler, production migration or
+historical-fidelity claim.
+
 ## Request-driven previews and sharing
 
 After commit, the adapter awaits a best-effort enqueue of lightweight OG
@@ -166,7 +274,7 @@ Historical candidate `6de673e523c6211c9781d544f97058b1d3ce1c5b` passed32 tests a
 Subsequent review corrections were exercised by TSC and36 targeted Store/publication-HTTP tests, all passing, after the earlier complete engine run reported271/272. This is not a claim of a fresh complete-suite pass. The corrected physical socket then passed with the exact21 compiler-consumed source hashes, bundle hash, migration bytes and bracketed profile/parser hashes recorded. Its runtime-observer counters were zero only within the declared coverage. Failure-path native pipe/connection/uncaught diagnostics remain visible in unit output; no filter or universal harmlessness claim is applied.
 
 
-This interface adds no MCP business-client proof, F05 serving, GC scheduler or maintenance endpoint. It changes no legacy URLs or Shlink behavior. Real three-client business publication belongs to F08; further cloud operations require separate approval.
+The F04 evidence above adds no MCP business-client proof or GC scheduler and predates the selected-import maintenance endpoint described above. It does not prove a legacy URL or Shlink production change. Real three-client business publication belongs to F08; further cloud operations require separate approval.
 
 ### Post-review contract corrections — 2026-11-14
 

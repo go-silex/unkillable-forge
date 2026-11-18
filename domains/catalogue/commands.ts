@@ -49,13 +49,32 @@ async function currentGrant(deps: ManageDeps, pageId: string): Promise<ExistingG
   try { return await deps.db.prepare('SELECT grant_id, mode, pinned_revision_id, sealed_key, seal_kid FROM share_grants WHERE page_id = ? AND revoked_at IS NULL').bind(pageId).first<ExistingGrant>() }
   catch { throw new PolicyError('unavailable') }
 }
-async function newGrant(deps: ManageDeps, pageId: string, key: string, mode: GrantMode, at: number, actor: string, origin: 'minted' | 'imported') {
-  const grantId = newId('gr')
+async function newGrant(deps: ManageDeps, pageId: string, key: string, mode: GrantMode, at: number, actor: string, origin: 'minted' | 'imported', id?: string, reuse = false) {
+  const grantId = id ?? newId('gr')
   const [digest] = await shareKeyDigests(deps.config.shareVerifierKeys.slice(0, 1), deps.config.instanceId, key)
   const seal = deps.config.shareSealKey
   const sealed = seal ? await sealShareKey(seal, deps.config.instanceId, pageId, grantId, key) : null
-  const statement = deps.db.prepare(`INSERT INTO share_grants (grant_id,page_id,key_kid,key_hmac,mode,pinned_revision_id,origin,sealed_key,seal_kid,created_at,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(grantId, pageId, digest.kid, digest.hmac, mode.mode, mode.mode === 'pinned' ? mode.revisionId : null, origin, sealed, seal?.kid ?? null, at, actor)
+  const statement = deps.db.prepare(`INSERT INTO share_grants (grant_id,page_id,key_kid,key_hmac,mode,pinned_revision_id,origin,sealed_key,seal_kid,created_at,created_by) SELECT ?,?,?,?,?,?,?,?,?,?,?${reuse ? ' WHERE NOT EXISTS (SELECT 1 FROM share_grants WHERE grant_id=?)' : ''}`).bind(...[grantId, pageId, digest.kid, digest.hmac, mode.mode, mode.mode === 'pinned' ? mode.revisionId : null, origin, sealed, seal?.kid ?? null, at, actor, ...(reuse ? [grantId] : [])])
   return { grantId, statement, revealable: sealed !== null }
+}
+export async function importPagePolicyStatements(deps: ManageDeps, actor: ManageActor, input: { pageId: string; visibility: 'private' | 'public' | 'shared'; key: string | null; grantId: string | null; at: number }): Promise<readonly D1PreparedStatement[]> {
+  const statements: D1PreparedStatement[] = []
+  if (input.visibility === 'shared') {
+    if (!input.key || !input.grantId || !isShareKey(input.key)) throw new PolicyError('invalid_state')
+    const keys = await shareKeyDigests(deps.config.shareVerifierKeys, deps.config.instanceId, input.key)
+    const alternatives = keys.map(() => '(key_kid=? AND key_hmac=?)').join(' OR ')
+    statements.push(deps.db.prepare(`INSERT INTO import_assertions(assertion_id,verdict) SELECT ?, CASE WHEN NOT EXISTS (SELECT 1 FROM share_grants WHERE grant_id=?) OR EXISTS (SELECT 1 FROM share_grants WHERE grant_id=? AND page_id=? AND revoked_at IS NULL AND mode='follow_active' AND pinned_revision_id IS NULL AND origin='imported' AND (${alternatives})) THEN 'ok' ELSE 'conflict' END`).bind(newId('ev'), input.grantId, input.grantId, input.pageId, ...keys.flatMap(k => [k.kid, k.hmac])))
+    statements.push(deps.db.prepare("UPDATE share_grants SET revoked_at=?, revoked_by=?, revoked_reason='visibility', sealed_key=NULL, seal_kid=NULL WHERE page_id=? AND revoked_at IS NULL AND grant_id<>?").bind(input.at, actor.principalId, input.pageId, input.grantId))
+    const grant = await newGrant(deps, input.pageId, input.key, { mode: 'follow_active' }, input.at, actor.principalId, 'imported', input.grantId, true)
+    statements.push(grant.statement)
+  } else statements.push(revoke(deps.db, input.pageId, input.at, actor.principalId, 'visibility'))
+  statements.push(updatePage(deps.db, input.pageId, input.visibility))
+  return statements
+}
+
+export function importAliasStatement(db: D1Database, input: { kind: 'redirect_exact' | 'redirect_prefix'; key: string; to: string; status: 301 | 302 | 307 | 308; targetPageId: string | null; at: number }): D1PreparedStatement {
+  if (!['redirect_exact', 'redirect_prefix'].includes(input.kind) || !isValidAliasPath(input.key) || (input.kind === 'redirect_prefix' && !input.key.endsWith('/')) || !isValidAliasDestination(input.to) || ![301, 302, 307, 308].includes(input.status)) throw new PolicyError('invalid_state')
+  return db.prepare('INSERT OR IGNORE INTO routes (kind,route_key,redirect_to,redirect_status,target_page_id,created_at) VALUES (?,?,?,?,?,?)').bind(input.kind, input.key, input.to, input.status, input.targetPageId, input.at)
 }
 
 export async function setVisibility(deps: ManageDeps, actor: ManageActor, cmd: PageTarget & { readonly visibility: 'private' | 'public' }): Promise<{ readonly policyEpoch: number }> {
