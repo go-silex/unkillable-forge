@@ -2,9 +2,14 @@
 // ImportSelection and inventory drafts. This module does not open files,
 // discover captures, decide access, or contact a provider. Native R2 versions
 // are filled only by assignSourcePins after a real local PUT.
-import { parseRequest } from "../domains/catalogue/routing/grammar.ts"
-import { importPreviewOwned } from "../domains/catalogue/previews.ts"
+import { parseRequest, isReservedShellPath, subtreeSlugOf } from "../domains/catalogue/routing/grammar.ts"
+import { importPreviewOwned, orderedOriginalImageCandidatePaths } from "../domains/catalogue/previews.ts"
 import { conflictingImportOperationIndexes } from "../domains/catalogue/import-operation-set.ts"
+import { validateReaderProfile } from "../domains/catalogue/instance-config.ts"
+import { documentRouteOf } from "../domains/catalogue/revision-paths.ts"
+import { validateBeginCommand } from "../domains/publication/staging.ts"
+import { isValidAliasPath, isValidAliasDestination, aliasMatchesPath, aliasLocation } from "../domains/catalogue/alias-validation.ts"
+import { validShortlinkIdentity } from "../domains/catalogue/shortlink-identity.ts"
 
 
 const ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
@@ -76,12 +81,12 @@ function engineId(prefix) {
   return `${prefix}_${opaque()}`
 }
 export function emptyLedger() {
-  return { version: 1, pages: {}, grants: {}, sourceArtifacts: {}, idempotencyKeys: {}, inventoryIds: {}, selectionIds: {}, planIds: {}, operationIds: {} }
+  return { version: 2, pages: {}, grants: {}, idempotencyKeys: {}, inventoryIds: {}, selectionIds: {}, planIds: {}, operationIds: {} }
 }
 function ledgerOf(value) {
   const ledger = emptyLedger()
   if (value == null) return ledger
-  if (!exact(value, Object.keys(ledger)) || value.version !== 1) return null
+  if (!exact(value, Object.keys(ledger)) || value.version !== 2) return null
   for (const key of Object.keys(ledger)) {
     if (key === "version") continue
     if (!record(value[key]) || Object.values(value[key]).some(item => typeof item !== "string" || !item)) return null
@@ -95,7 +100,7 @@ function remember(map, key, mint) {
 }
 function note(code, extra = {}) {
   const row = { code }
-  for (const key of ["path", "sourcePageId", "unitId"]) if (extra[key]) row[key] = extra[key]
+  for (const key of ["path", "sourcePageId", "unitId", "basis"]) if (extra[key]) row[key] = extra[key]
   if (extra.budget) row.budget = extra.budget
   return row
 }
@@ -107,23 +112,16 @@ function validPath(path, allowReserved = false) {
     path !== "/manifest.json" && path !== "/asset-owners.json"))
 }
 function slugOf(path) {
-  if (!path.startsWith("/a/")) return null
-  const slug = path.slice(3).split("/", 1)[0]
-  return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) ? slug : null
+  return subtreeSlugOf(path)
 }
-function documentRoute(path) {
-  const slug = slugOf(path)
-  if (slug !== null) return path === `/a/${slug}/index.html` ? { kind: "subtree", slug } : null
-  if (!path.startsWith("/") || path.startsWith("/a/")) return null
-  const pageRef = path.slice(1)
-  return /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.html$/.test(pageRef) && !pageRef.includes("..") ? { kind: "tree_page", pageRef } : null
-}
+const documentRoute = documentRouteOf
 function routeOf(path) {
   const route = documentRoute(path)
   return route ? route.kind === "subtree" ? `/a/${route.slug}/` : `/${route.pageRef}` : null
 }
-function shellPath(path, declared) {
-  return declared.has(path) || path === "/index.html" || path === "/login.html" || path === "/404.html" || path === "/login"
+function shellPath(path, declared, resulting = new Set()) {
+  const slug = subtreeSlugOf(path)
+  return slug !== null ? !resulting.has(slug) : isReservedShellPath(path) || declared.has(path)
 }
 function safeRelative(value) {
   if (typeof value !== "string" || !value || value.startsWith("/") || value.includes("\\") || value.includes("\0")) return false
@@ -154,35 +152,10 @@ function header(input) {
   if (input.kind === "historical" ? !text(input.g1bRef) : input.g1bRef !== null) return "g1b_evidence_required"
   const limits = input.limits
   if (!exact(limits, ["maxCommandBytes", "maxJsonDepth", "maxUploadBytes", "maxInventoryBytes"]) || [limits.maxCommandBytes, limits.maxUploadBytes, limits.maxInventoryBytes].some(item => !integer(item) || item <= 0) || !integer(limits.maxJsonDepth) || limits.maxJsonDepth < 1 || limits.maxJsonDepth > 64) return "invalid_limits"
-  const grammar = input.reader
-  if (!exact(grammar, ["canonicalHost", "aliasHosts", "routeGrammars", "shareGrammars", "shareCookie", "shellPaths"]) || !text(grammar.canonicalHost) || !Array.isArray(grammar.aliasHosts) || grammar.aliasHosts.some(host => !text(host)) || typeof grammar.shareCookie !== "boolean" || !Array.isArray(grammar.shellPaths) || !Array.isArray(grammar.routeGrammars) || !Array.isArray(grammar.shareGrammars) || grammar.routeGrammars.length === 0 || grammar.routeGrammars.some(item => item !== "tree" && item !== "subtree") || grammar.shareGrammars.some(item => item !== "slug" && item !== "page" && item !== "card")) return "invalid_grammar"
+  if (!exact(input.reader, ["canonicalHost", "aliasHosts", "routeGrammars", "shareGrammars", "shareCookie", "shellPaths"]) || !validateReaderProfile(input.reader).ok) return "invalid_grammar"
   if (["captureRoots", "entries", "pages", "owners", "aliases", "shortlinks", "previews", "consumerUrls", "exclusions", "providerMounts"].some(key => !Array.isArray(input[key]))) return "invalid_selection"
   if (input.captureRoots.some(root => typeof root !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(root)) || new Set(input.captureRoots).size !== input.captureRoots.length) return "invalid_capture_root"
   return null
-}
-function aliasPath(value) {
-  if (typeof value !== "string" || !/^\/[!-~]+$/.test(value) || value.startsWith("//")) return false
-  let path = value
-  for (;;) {
-    if (/[\\\u0000-\u001f\u007f?#]/.test(path) || path.includes("//") || /%(?:2f|2e|5c)/i.test(path) || path.split("/").some(part => part === "." || part === "..")) return false
-    if (!path.includes("%")) break
-    try {
-      const decoded = decodeURIComponent(path)
-      if (decoded === path) break
-      path = decoded
-    } catch { return false }
-  }
-  try { return new URL(value, "https://alias.invalid").origin === "https://alias.invalid" } catch { return false }
-}
-function shortlinkIdentity(link) {
-  try {
-    const provider = new URL(link.providerOrigin)
-    const domain = new URL(`https://${link.shortDomain}`)
-    const url = new URL(link.shortUrl)
-    return provider.protocol === "https:" && provider.origin === link.providerOrigin && !provider.username && !provider.password && provider.pathname === "/" && !provider.search && !provider.hash &&
-      domain.host === link.shortDomain && !domain.username && !domain.password && domain.pathname === "/" && !domain.search && !domain.hash &&
-      (url.protocol === "https:" || url.protocol === "http:") && url.host === link.shortDomain && !url.username && !url.password && !url.search && !url.hash && url.pathname === `/${encodeURIComponent(link.shortCode)}` && url.href === link.shortUrl
-  } catch { return false }
 }
 async function digest(value) {
   const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)))
@@ -195,12 +168,24 @@ function parsedConsumer(url, reader) {
     return parseRequest(new Request(parsed.href), reader).parsed
   } catch { return null }
 }
-function targetMatches(parsed, page, entries) {
+function targetMatches(parsed, page, entries, ownersByPath, previewByPage) {
   const expected = documentRoute(page.documentPath)
   const matches = route => expected && route.kind === expected.kind && (route.kind === "subtree" ? route.slug === expected.slug : route.pageRef === expected.pageRef)
-  const selected = path => entries.get(path)?.placement?.sourceArtifactId === page.membership.sourceArtifactId
+  const selected = path => {
+    const entry = entries.get(path)
+    if (entry?.placement?.sourceArtifactId !== page.membership.sourceArtifactId) return false
+    if (path === page.documentPath) return true
+    if (expected?.kind === "subtree") return path.startsWith(`/a/${expected.slug}/`)
+    return (ownersByPath.get(path) ?? []).some(owner => owner.ownerSourcePageId === page.sourcePageId)
+  }
   if (parsed?.kind === "share") return matches(parsed.route) && parsed.candidates.some(selected)
-  if (parsed?.kind === "card") return parsed.targets.length === 1 && matches(parsed.targets[0].route) && selected(parsed.targets[0].path)
+  if (parsed?.kind === "card") {
+    if (parsed.targets.length !== 1 || !matches(parsed.targets[0].route)) return false
+    const eligible = path => selected(path) && ["image/jpeg", "image/png"].includes(entries.get(path)?.contentType)
+    const explicit = previewByPage.get(page.sourcePageId)
+    const winning = explicit && eligible(explicit) ? explicit : orderedOriginalImageCandidatePaths(expected).find(eligible)
+    return winning === parsed.targets[0].path
+  }
   if (parsed?.kind === "subtree") return expected?.kind === "subtree" && parsed.slug === expected.slug && parsed.candidates.some(selected)
   if (parsed?.kind === "tree") return expected?.kind === "tree_page" && parsed.pageRef === expected.pageRef && parsed.candidates.some(selected)
   return false
@@ -222,7 +207,7 @@ function budget(selection, inventoryBytes, limits) {
 }
 function rejectedCensus(input) {
   const kinds = [["entry", "entries"], ["page", "pages"], ["owner", "owners"], ["alias", "aliases"], ["shortlink", "shortlinks"], ["preview", "previews"], ["exclusion", "exclusions"], ["providerMount", "providerMounts"], ["consumerUrl", "consumerUrls"]]
-  return kinds.flatMap(([kind, key]) => Array.isArray(input?.[key]) ? input[key].map((_row, ordinal) => ({ kind, ordinal, unitId: null, disposition: "rejected" })) : [])
+  return kinds.flatMap(([kind, key]) => Array.isArray(input?.[key]) ? input[key].map((_row, ordinal) => ({ kind, ordinal, unitId: null, affectedUnitIds: [], disposition: "rejected" })) : [])
 }
 
 
@@ -236,13 +221,13 @@ export async function preflightSelection(input, ledgerInput = null) {
     seen.add(path)
     accounting.push({ path, disposition, unitId: unitId ?? entries.get(path)?.placement?.sourceArtifactId ?? null, reason })
   }
-  const fatal = header(input)
   const ledger = ledgerOf(ledgerInput)
+  try { input = structuredClone(input) } catch {
+    return { kind: "fatal", result: { ok: false, fatal: "invalid_selection", schema: SELECTED_IMPORT_SCHEMA, ledger: ledger ?? emptyLedger(), accounting, census: rejectedCensus(input), units: [], compatibility: { represented: [], unsupported: [note("invalid_selection")], notObserved: [] }, warnings } }
+  }
+  const fatal = header(input)
   if (fatal || !ledger) {
     return { kind: "fatal", result: { ok: false, fatal: fatal ?? "invalid_ledger", schema: SELECTED_IMPORT_SCHEMA, ledger: ledger ?? emptyLedger(), accounting, census: rejectedCensus(input), units: [], compatibility: { represented: [], unsupported: [note(fatal ?? "invalid_ledger")], notObserved: [] }, warnings } }
-  }
-  try { input = structuredClone(input) } catch {
-    return { kind: "fatal", result: { ok: false, fatal: "invalid_selection", schema: SELECTED_IMPORT_SCHEMA, ledger, accounting, census: rejectedCensus(input), units: [], compatibility: { represented: [], unsupported: [note("invalid_selection")], notObserved: [] }, warnings } }
   }
   const roots = new Set(input.captureRoots)
   const shells = new Set(input.reader.shellPaths.filter(path => typeof path === "string"))
@@ -252,7 +237,7 @@ export async function preflightSelection(input, ledgerInput = null) {
     const path = record(entry) && typeof entry.path === "string" ? entry.path : undefined
     const nonContent = one(entry?.graphClass, ["shell", "excluded", "unresolved"])
     const validFingerprint = exact(entry?.expected, ["size", "sha256"]) && integer(entry.expected.size) && entry.expected.size >= 0 && hex(entry.expected.sha256)
-    if (!exact(entry, ["path", "graphClass", "locator", "contentType", "provenance", "expected", "placement"]) || !validPath(entry.path, nonContent) || !one(entry.graphClass, ["page_document", "subdocument", "fragment", "asset", "shell", "excluded", "unresolved"]) || !(nonContent ? entry.placement === null : exact(entry.placement, ["sourceArtifactId", "evidenceRef"]) && text(entry.placement.sourceArtifactId) && text(entry.placement.evidenceRef)) || !exact(entry.locator, ["root", "relative"]) || !(validFingerprint || (nonContent && entry.expected === null)) || !text(entry.provenance) || !(entry.contentType === null || text(entry.contentType, 255))) {
+    if (!exact(entry, ["path", "graphClass", "locator", "contentType", "provenance", "expected", "placement"]) || !validPath(entry.path, true) || !one(entry.graphClass, ["page_document", "subdocument", "fragment", "asset", "shell", "excluded", "unresolved"]) || !(nonContent ? entry.placement === null : exact(entry.placement, ["sourceArtifactId", "evidenceRef"]) && text(entry.placement.sourceArtifactId) && text(entry.placement.evidenceRef)) || !exact(entry.locator, ["root", "relative"]) || !(validFingerprint || (nonContent && entry.expected === null)) || !text(entry.provenance) || !(entry.contentType === null || text(entry.contentType, 255))) {
       contradictory = true
       compatibility.unsupported.push(note("contradictory_entry", { path }))
       if (path) account(path, "blocked", null, "contradictory_entry")
@@ -279,7 +264,6 @@ export async function preflightSelection(input, ledgerInput = null) {
     for (const path of entries.keys()) account(path, "blocked", null, "contradictory_input")
     return { kind: "fatal", result: { ok: false, fatal: "contradictory_input", schema: SELECTED_IMPORT_SCHEMA, ledger, accounting, census: rejectedCensus(input), units: [], compatibility, warnings, sourceInstance: input.sourceInstance, kind: input.kind } }
   }
-  const placed = new Map()
   const pages = []
   for (const page of input.pages) {
     if (!exact(page, ["sourcePageId", "documentPath", "metadata", "ownershipEvidenceRef", "membership", "visibility", "share"]) || !exact(page.membership, ["sourceArtifactId", "evidenceRef"]) || !text(page.membership.sourceArtifactId) || !text(page.membership.evidenceRef) || !text(page.sourcePageId) || !validPath(page.documentPath) || !text(page.ownershipEvidenceRef) || ENGINE_ID.test(page.sourcePageId)) {
@@ -308,6 +292,16 @@ export async function preflightSelection(input, ledgerInput = null) {
     members.push(page)
     selectedByUnit.set(unitId, members)
   }
+  const pageKey = page => stable([input.sourceInstance, page.membership.sourceArtifactId, page.sourcePageId])
+  const proposalKey = (unitId, ...parts) => stable([input.sourceInstance, unitId, input.selectionRef, input.selectionDigest, ...parts])
+  const mountPaths = new Set(input.providerMounts.filter(record).map(mount => mount.path))
+  const ownerUnitsByPath = new Map()
+  for (const owner of input.owners) {
+    const unitId = pageBySource.get(owner?.ownerSourcePageId)?.membership.sourceArtifactId
+    if (!unitId) continue
+    const list = ownerUnitsByPath.get(owner.path) ?? new Set()
+    list.add(unitId); ownerUnitsByPath.set(owner.path, list)
+  }
   const relationshipCensus = []
   let unassignable = pages.length !== input.pages.length || pageBySource.size !== pages.length || pageByPath.size !== pages.length
   const relationships = [
@@ -324,11 +318,11 @@ export async function preflightSelection(input, ledgerInput = null) {
       const unitId = page?.membership.sourceArtifactId ?? null
       if (!unitId) unassignable = true
       let valid = exact(row, keys)
-      if (valid && kind === "owner") valid = text(row.path) && text(row.evidenceRef) && row.basis === "declared" && (["fragment", "asset"].includes(entries.get(row.path)?.graphClass) || input.providerMounts.some(mount => record(mount) && mount.path === row.path))
-      if (valid && kind === "alias") valid = one(row.aliasKind, ["redirect_exact", "redirect_prefix"]) && aliasPath(row.path) && aliasPath(row.to) && [301, 302, 307, 308].includes(row.status) && row.capturedBehavior === "team_fallback" && (row.aliasKind !== "redirect_prefix" || row.path.endsWith("/"))
-      if (valid && kind === "shortlink") valid = text(row.mappingId) && text(row.providerOrigin) && (row.providerId === null || text(row.providerId)) && text(row.shortDomain) && text(row.shortCode) && text(row.shortUrl) && text(row.destination, 4096) && integer(row.observedAt) && row.observedAt >= 0 && shortlinkIdentity(row)
+      if (valid && kind === "owner") valid = text(row.path) && text(row.evidenceRef) && row.basis === "declared" && (["fragment", "asset"].includes(entries.get(row.path)?.graphClass) || mountPaths.has(row.path))
+      if (valid && kind === "alias") valid = one(row.aliasKind, ["redirect_exact", "redirect_prefix"]) && isValidAliasPath(row.path) && isValidAliasDestination(row.to) && [301, 302, 307, 308].includes(row.status) && row.capturedBehavior === "team_fallback" && (row.aliasKind !== "redirect_prefix" || row.path.endsWith("/"))
+      if (valid && kind === "shortlink") valid = text(row.mappingId) && text(row.providerOrigin) && (row.providerId === null || text(row.providerId)) && text(row.shortDomain) && text(row.shortCode) && text(row.shortUrl) && text(row.destination, 4096) && integer(row.observedAt) && row.observedAt >= 0 && validShortlinkIdentity(row.providerOrigin, row.shortDomain, row.shortCode, row.shortUrl)
       if (valid && kind === "preview") valid = validPath(row.path) && one(row.kind, ["original", "derived_only"]) && entries.has(row.path)
-      const identity = valid ? stable([kind, row]) : null
+      const identity = valid ? kind === "owner" ? stable([kind, row.ownerSourcePageId, row.path]) : stable([kind, row]) : null
       if (identity && relationshipKeys.has(identity)) valid = false
       if (identity) relationshipKeys.add(identity)
       if (!valid) {
@@ -340,7 +334,7 @@ export async function preflightSelection(input, ledgerInput = null) {
   }
   for (const exclusion of input.exclusions) if (!entries.has(exclusion.path)) unassignable = true
   for (const mount of input.providerMounts) {
-    const dependents = input.owners.filter(owner => owner?.path === mount?.path).map(owner => pageBySource.get(owner.ownerSourcePageId)?.membership.sourceArtifactId).filter(Boolean)
+    const dependents = [...(ownerUnitsByPath.get(mount?.path) ?? [])]
     if (!exact(mount, ["artifactId", "path", "kind"]) || !ENGINE_ID.test(mount.artifactId) || !mount.artifactId.startsWith("ar_") || !validPath(mount.path) || !one(mount.kind, ["fragment", "asset"]) || !dependents.length) unassignable = true
     for (const unitId of dependents) {
       relationshipBlocked.add(unitId)
@@ -374,7 +368,11 @@ export async function preflightSelection(input, ledgerInput = null) {
     const unitId = page.membership.sourceArtifactId
     const entry = entries.get(page.documentPath)
     let code = null
-    if (!entry || entry.graphClass !== "page_document" || entry.placement?.sourceArtifactId !== unitId) code = page.visibility.state === "present" && ["public", "shared"].includes(page.visibility.value) ? "or1_missing_document" : "page_without_document"
+    if (!entry) code = page.visibility.state === "present" && ["public", "shared"].includes(page.visibility.value) ? "or1_missing_document" : "page_without_document"
+    else if (entry.graphClass !== "page_document" || entry.placement?.sourceArtifactId !== unitId) {
+      code = "document_placement_conflict"
+      if (entry.placement?.sourceArtifactId) blockedUnits.add(entry.placement.sourceArtifactId)
+    }
     else if (page.sourcePageId !== (slugOf(page.documentPath) ?? page.documentPath.slice(1))) code = "source_identity_mismatch"
     else if (page.metadata === null) code = "missing_metadata"
     else {
@@ -390,9 +388,12 @@ export async function preflightSelection(input, ledgerInput = null) {
     if (!code && visibility.state === "present" && visibility.value === "shared" && (share.state !== "present" || typeof share.key !== "string" || !SHARE_KEY.test(share.key))) code = share.state === "absent" ? "share_key_absent" : "invalid_share_key"
     if (code) {
       blockedUnits.add(unitId)
-      compatibility.unsupported.push(note(code, { path: page.documentPath, sourcePageId: page.sourcePageId, unitId }))
+      compatibility.unsupported.push(note(code, { path: page.documentPath, sourcePageId: page.sourcePageId, unitId, basis: !entry ? "missing_inventory_entry" : code === "document_placement_conflict" ? "conflicting_placement" : null }))
       if (code === "visibility_unknown" || code === "visibility_unreadable" || code === "share_key_unknown" || code === "share_key_unreadable") compatibility.notObserved.push(note(code, { sourcePageId: page.sourcePageId, unitId }))
     }
+    if (!code && visibility.state === "present" && !["private", "public", "shared"].includes(visibility.value)) warnings.push(note("unknown_visibility_private", { sourcePageId: page.sourcePageId, unitId }))
+    if (!code && visibility.state === "absent") compatibility.represented.push(note("visibility_absent_private", { sourcePageId: page.sourcePageId, unitId }))
+    if (!code && visibility.value !== "shared" && share.state === "present") compatibility.unsupported.push(note("share_key_not_imported", { sourcePageId: page.sourcePageId, unitId }))
   }
   for (const entry of entries.values()) if (entry.placement && !selectedByUnit.has(entry.placement.sourceArtifactId)) {
     const unitId = entry.placement.sourceArtifactId
@@ -400,11 +401,16 @@ export async function preflightSelection(input, ledgerInput = null) {
     blockedUnits.add(unitId)
     compatibility.unsupported.push(note("placement_without_membership", { path: entry.path, unitId }))
   }
-  if (input.targetBasis !== "empty") for (const unitId of selectedByUnit.keys()) blockedUnits.add(unitId)
+  if (input.targetBasis !== "empty") for (const unitId of selectedByUnit.keys()) {
+    blockedUnits.add(unitId)
+    compatibility.unsupported.push(note("target_basis_unknown", { unitId }))
+  }
   for (const entry of entries.values()) {
     if (!entry.placement) continue
     let code = null
     if (!roots.has(entry.locator.root) || !safeRelative(entry.locator.relative) || !text(`capture/${entry.locator.root}/${entry.locator.relative}`)) code = "unsafe_locator"
+    else if (exclusions.has(entry.path)) code = "excluded_content_contradiction"
+    else if (entry.graphClass === "fragment" && !(ownersByPath.get(entry.path)?.length)) code = "fragment_without_owner"
     else if (entry.contentType === null || !MIME.test(entry.contentType) || (entry.graphClass === "asset" && entry.path.endsWith(".html")) || (entry.graphClass === "page_document" && (!documentRoute(entry.path) || entry.contentType !== "text/html")) || (entry.graphClass === "subdocument" && (entry.contentType !== "text/html" || !entry.path.endsWith(".html"))) || (entry.graphClass === "fragment" && entry.contentType !== "text/html")) code = "contradictory_class"
     else if ((ownersByPath.get(entry.path)?.length ?? 0) > LIMITS.owners) code = "uncapped_owners"
     else if (entry.expected.size > Math.min(input.limits.maxUploadBytes, LIMITS.fileBytes)) code = "file_bytes"
@@ -431,7 +437,7 @@ export async function preflightSelection(input, ledgerInput = null) {
       compatibility.unsupported.push(note("derived_preview_unsupported", { path: preview.path, sourcePageId: page.sourcePageId, unitId }))
       continue
     }
-    const pageId = remember(ledger.pages, page.sourcePageId, () => engineId("pg"))
+    const pageId = remember(ledger.pages, pageKey(page), () => engineId("pg"))
     const entry = entries.get(preview.path)
     const files = entry?.placement?.sourceArtifactId === unitId ? [{ path: entry.path, contentType: entry.contentType }] : []
     const edges = (ownersByPath.get(preview.path) ?? []).filter(owner => owner.ownerSourcePageId === page.sourcePageId).map(() => ({ ownerPageId: pageId, path: preview.path, providerArtifactId: null }))
@@ -440,29 +446,69 @@ export async function preflightSelection(input, ledgerInput = null) {
       compatibility.unsupported.push(note("preview_not_owned", { path: preview.path, sourcePageId: page.sourcePageId, unitId }))
     }
   }
+  const previewByPage = new Map(input.previews.filter(row => row?.kind === "original").map(row => [row.sourcePageId, row.path]))
+  const mappings = new Map(), aliasExact = new Map(), aliasPrefix = new Map()
+  const selectedSubtreeSlugs = new Set(pages.map(page => documentRoute(page.documentPath)).filter(route => route?.kind === "subtree").map(route => route.slug))
+  for (const mapping of input.shortlinks) {
+    if (!text(mapping?.mappingId)) continue
+    const list = mappings.get(mapping.mappingId) ?? []; list.push(mapping); mappings.set(mapping.mappingId, list)
+  }
+  for (const alias of input.aliases) {
+    if (!record(alias)) continue
+    const index = alias.aliasKind === "redirect_exact" ? aliasExact : aliasPrefix
+    if (!index.has(alias.path)) index.set(alias.path, alias)
+  }
   const consumerChecks = []
   for (let ordinal = 0; ordinal < input.consumerUrls.length; ordinal++) {
     const row = input.consumerUrls[ordinal]
-    const mapping = record(row) && typeof row.mappingRef === "string" ? input.shortlinks.find(link => link.mappingId === row.mappingRef) : null
-    const page = record(row) ? pageBySource.get(row.targetSourcePageId ?? mapping?.targetSourcePageId) : null
-    if (!page || (mapping && row.targetSourcePageId !== null && row.targetSourcePageId !== mapping.targetSourcePageId)) { unassignable = true; continue }
+    const mappingRows = typeof row?.mappingRef === "string" ? mappings.get(row.mappingRef) ?? [] : []
+    const mapping = mappingRows.length === 1 ? mappingRows[0] : null
+    const directPage = typeof row?.targetSourcePageId === "string" ? pageBySource.get(row.targetSourcePageId) : null
+    const mappedPages = mappingRows.map(item => pageBySource.get(item.targetSourcePageId)).filter(Boolean)
+    const mappedPage = mapping ? mappedPages[0] : null
+    const page = directPage ?? mappedPages[0]
+    if (!page) { unassignable = true; continue }
     const unitId = page.membership.sourceArtifactId
-    let valid = exact(row, ["url", "purpose", "targetSourcePageId", "mappingRef"]) && typeof row.url === "string" && one(row.purpose, ["share", "card", "alias", "shortlink", "document"])
+    const unitIds = [...new Set([directPage?.membership.sourceArtifactId, ...mappedPages.map(item => item.membership.sourceArtifactId)].filter(Boolean))]
+    const referencesValid = (row.targetSourcePageId === null || !!directPage) && (row.mappingRef === null || !!mapping) && (!directPage || !mappedPage || directPage === mappedPage)
+    let valid = referencesValid && exact(row, ["url", "purpose", "targetSourcePageId", "mappingRef"]) && typeof row.url === "string" && one(row.purpose, ["share", "card", "alias", "shortlink", "document"])
     const parsed = valid ? parsedConsumer(row.url, input.reader) : null
     if (valid && row.purpose === "shortlink") valid = !!mapping && mapping.shortUrl === row.url
     else if (valid && row.purpose === "alias") {
       try {
-        const target = new URL(row.url)
-        valid = target.protocol === "https:" && !target.username && !target.password && !target.port && [input.reader.canonicalHost, ...input.reader.aliasHosts].includes(target.hostname) && input.aliases.some(alias => alias.path === target.pathname && alias.targetSourcePageId === page.sourcePageId)
+        const url = new URL(row.url)
+        if (url.protocol !== "https:" || url.username || url.password) throw new Error("invalid_consumer")
+        const result = parseRequest(new Request(url.href), input.reader)
+        const path = result.aliasPath
+        const primary = result.parsed.kind === "tree" ? result.parsed.candidates.some(candidate => entries.has(candidate)) : result.parsed.kind === "subtree" ? selectedSubtreeSlugs.has(result.parsed.slug) : result.parsed.kind === "resource" && entries.has(result.parsed.path)
+        let alias = path && !primary ? aliasExact.get(path) : null
+        if (!alias && path && !primary) {
+          let prefix = path
+          while (prefix.includes("/")) {
+            prefix = prefix.slice(0, prefix.lastIndexOf("/") + 1)
+            if (aliasPrefix.has(prefix)) { alias = aliasPrefix.get(prefix); break }
+            if (prefix === "/") break
+            prefix = prefix.slice(0, -1)
+          }
+        }
+        valid = !!alias && alias.targetSourcePageId === page.sourcePageId && aliasMatchesPath(alias.aliasKind, alias.path, path)
+        if (valid) {
+          const location = aliasLocation(alias.aliasKind, alias.path, alias.to, path)
+          const destination = parsedConsumer(new URL(location, url.origin).href, input.reader)
+          valid = (location === "/" && page.documentPath === "/index.html") || !!destination && targetMatches(destination, page, entries, ownersByPath, previewByPage)
+        }
       } catch { valid = false }
     } else if (valid) {
       const kindMatches = row.purpose === "share" ? parsed?.kind === "share" : row.purpose === "card" ? parsed?.kind === "card" : parsed?.kind === "tree" || parsed?.kind === "subtree"
-      valid = !!parsed && kindMatches && targetMatches(parsed, page, entries)
+      valid = !!parsed && kindMatches && targetMatches(parsed, page, entries, ownersByPath, previewByPage)
       if (valid && (parsed.kind === "share" || parsed.kind === "card")) valid = page.visibility.state === "present" && page.visibility.value === "shared" && page.share.state === "present" && parsed.key === page.share.key
     }
     const code = parsed?.kind === "card" && parsed.targets.length > 1 ? "two_candidate_card" : "consumer_url_unsupported"
-    if (!valid) blockedUnits.add(unitId)
-    consumerChecks.push({ ordinal, page, unitId, valid: !!valid, code })
+    if (!valid) for (const affected of unitIds) {
+      blockedUnits.add(affected)
+      compatibility.unsupported.push(note(code, { unitId: affected }))
+    }
+    consumerChecks.push({ ordinal, page, unitId, unitIds, valid: !!valid, code })
   }
   if (unassignable) {
     compatibility.unsupported.push(note("unassignable_record"))
@@ -473,40 +519,40 @@ export async function preflightSelection(input, ledgerInput = null) {
   for (const page of pages) {
     const unitId = page.membership.sourceArtifactId
     if (blockedUnits.has(unitId)) continue
-    const pageId = remember(ledger.pages, page.sourcePageId, () => engineId("pg"))
+    const pageId = remember(ledger.pages, pageKey(page), () => engineId("pg"))
     const visibilityValue = page.visibility.state === "present" ? page.visibility.value : null
     const shareKey = page.share.state === "present" ? page.share.key : null
-    const grantId = visibilityValue === "shared" ? remember(ledger.grants, page.sourcePageId, () => engineId("gr")) : null
-    const operation = { kind: "page_policy", policy: { operationId: remember(ledger.operationIds, `policy:${page.sourcePageId}`, () => `op${opaque()}`), sourcePageId: page.sourcePageId, pageId, expectedPolicyEpoch: null, grantId, visibility: { captured: true, value: visibilityValue, metadataV: page.visibility.state === "present" ? page.visibility.metadataV : null, expiresAt: null }, share: { captured: true, key: shareKey, expiresAt: page.share.state === "present" ? page.share.expiresAt : null } } }
+    const grantId = visibilityValue === "shared" ? remember(ledger.grants, pageKey(page), () => engineId("gr")) : null
+    const operation = { kind: "page_policy", policy: { operationId: remember(ledger.operationIds, proposalKey(unitId, "policy", page.sourcePageId), () => `op${opaque()}`), sourcePageId: page.sourcePageId, pageId, expectedPolicyEpoch: null, grantId, visibility: { captured: true, value: visibilityValue, metadataV: page.visibility.state === "present" ? page.visibility.metadataV : null, expiresAt: null }, share: { captured: true, key: shareKey, expiresAt: page.share.state === "present" ? page.share.expiresAt : null } } }
     policyOperations.set(page.sourcePageId, operation)
     addProposal(operation, unitId)
   }
   for (const alias of input.aliases) {
     const page = pageBySource.get(alias?.targetSourcePageId), unitId = page?.membership.sourceArtifactId
-    if (!page || blockedUnits.has(unitId) || !exact(alias, ["aliasKind", "path", "to", "status", "targetSourcePageId", "capturedBehavior"]) || !one(alias.aliasKind, ["redirect_exact", "redirect_prefix"]) || !aliasPath(alias.path) || !aliasPath(alias.to) || ![301, 302, 307, 308].includes(alias.status) || alias.capturedBehavior !== "team_fallback") continue
-    const operation = { kind: "alias", operationId: remember(ledger.operationIds, `alias:${alias.path}`, () => `op${opaque()}`), aliasKind: alias.aliasKind, path: alias.path, to: alias.to, status: alias.status, targetPageId: policyOperations.get(page.sourcePageId).policy.pageId }
+    if (!page || blockedUnits.has(unitId) || !exact(alias, ["aliasKind", "path", "to", "status", "targetSourcePageId", "capturedBehavior"]) || !one(alias.aliasKind, ["redirect_exact", "redirect_prefix"]) || !isValidAliasPath(alias.path) || !isValidAliasDestination(alias.to) || ![301, 302, 307, 308].includes(alias.status) || alias.capturedBehavior !== "team_fallback") continue
+    const operation = { kind: "alias", operationId: remember(ledger.operationIds, proposalKey(unitId, "alias", alias.aliasKind, alias.path), () => `op${opaque()}`), aliasKind: alias.aliasKind, path: alias.path, to: alias.to, status: alias.status, targetPageId: policyOperations.get(page.sourcePageId).policy.pageId }
     relationshipOperations.set(alias, operation); addProposal(operation, unitId)
   }
   for (const link of input.shortlinks) {
     const page = pageBySource.get(link?.targetSourcePageId), unitId = page?.membership.sourceArtifactId
-    if (!page || blockedUnits.has(unitId) || !exact(link, ["mappingId", "providerOrigin", "providerId", "shortDomain", "shortCode", "shortUrl", "targetSourcePageId", "destination", "observedAt"]) || !text(link.mappingId) || !text(link.destination, 4096) || !integer(link.observedAt) || link.observedAt < 0 || !shortlinkIdentity(link)) continue
+    if (!page || blockedUnits.has(unitId) || !exact(link, ["mappingId", "providerOrigin", "providerId", "shortDomain", "shortCode", "shortUrl", "targetSourcePageId", "destination", "observedAt"]) || !text(link.mappingId) || !text(link.destination, 4096) || !integer(link.observedAt) || link.observedAt < 0 || !validShortlinkIdentity(link.providerOrigin, link.shortDomain, link.shortCode, link.shortUrl)) continue
     const policy = policyOperations.get(page.sourcePageId).policy
     const parsed = parsedConsumer(link.destination, input.reader)
     const keyed = parsed?.kind === "share" || parsed?.kind === "card"
-    const validTarget = parsed && targetMatches(parsed, page, entries)
+    const validTarget = parsed && targetMatches(parsed, page, entries, ownersByPath, previewByPage)
     const grantId = validTarget && keyed && policy.visibility.value === "shared" && parsed.key === policy.share.key ? policy.grantId : null
     if (!validTarget || (keyed && !grantId)) {
       blockedUnits.add(unitId)
       compatibility.unsupported.push(note("shortlink_destination_unverified", { sourcePageId: page.sourcePageId, unitId }))
       continue
     }
-    const operation = { kind: "shortlink", operationId: remember(ledger.operationIds, `shortlink:${link.mappingId}`, () => `op${opaque()}`), mapping: { mappingId: link.mappingId, providerOrigin: link.providerOrigin, providerId: link.providerId, shortDomain: link.shortDomain, shortCode: link.shortCode, shortUrl: link.shortUrl, pageId: policy.pageId, grantId, destination: link.destination, source: "imported", observedAt: link.observedAt, destinationDigest: await digest(link.destination) } }
+    const operation = { kind: "shortlink", operationId: remember(ledger.operationIds, proposalKey(unitId, "shortlink", link.mappingId), () => `op${opaque()}`), mapping: { mappingId: link.mappingId, providerOrigin: link.providerOrigin, providerId: link.providerId, shortDomain: link.shortDomain, shortCode: link.shortCode, shortUrl: link.shortUrl, pageId: policy.pageId, grantId, destination: link.destination, source: "imported", observedAt: link.observedAt, destinationDigest: await digest(link.destination) } }
     relationshipOperations.set(link, operation); addProposal(operation, unitId)
   }
   for (const preview of input.previews) {
     const page = pageBySource.get(preview?.sourcePageId), unitId = page?.membership.sourceArtifactId
     if (!page || blockedUnits.has(unitId) || preview.kind !== "original" || !validPath(preview.path)) continue
-    const operation = { kind: "preview_selection", operationId: remember(ledger.operationIds, `preview:${preview.sourcePageId}:${preview.path}`, () => `op${opaque()}`), pageId: policyOperations.get(page.sourcePageId).policy.pageId, path: preview.path }
+    const operation = { kind: "preview_selection", operationId: remember(ledger.operationIds, proposalKey(unitId, "preview", preview.sourcePageId, preview.path), () => `op${opaque()}`), pageId: policyOperations.get(page.sourcePageId).policy.pageId, path: preview.path }
     relationshipOperations.set(preview, operation); addProposal(operation, unitId)
   }
   for (const index of conflictingImportOperationIndexes(proposed)) {
@@ -526,17 +572,23 @@ export async function preflightSelection(input, ledgerInput = null) {
       compatibility.unsupported.push(note("budget_exceeded", { unitId }))
     }
   }
-  const staticEntries = new Map(), staticEdges = new Map(), staticOperations = new Map(), staticBudgets = new Map()
+  const subtreesByUnit = new Map()
+  for (const [unitId, members] of selectedByUnit) subtreesByUnit.set(unitId, new Set(members.map(page => documentRoute(page.documentPath)).filter(route => route?.kind === "subtree").map(route => route.slug)))
+  const staticEntries = new Map(), staticEdges = new Map(), staticOperations = new Map(), staticBudgets = new Map(), compiled = new Map()
   for (const entry of entries.values()) if (entry.placement) {
     const unitId = entry.placement.sourceArtifactId
     const list = staticEntries.get(unitId) ?? []; list.push(entry); staticEntries.set(unitId, list)
-    if (shellPath(entry.path, shells)) blockedUnits.add(unitId)
+    const resulting = subtreesByUnit.get(unitId) ?? new Set()
+    if (shellPath(entry.path, shells, resulting)) {
+      blockedUnits.add(unitId)
+      compatibility.unsupported.push(note("reserved_path", { path: entry.path, unitId }))
+    }
   }
   for (const [path, list] of ownersByPath) for (const owner of list) {
     const unitId = pageBySource.get(owner.ownerSourcePageId)?.membership.sourceArtifactId
     if (!unitId) continue
     const rows = staticEdges.get(unitId) ?? []
-    rows.push({ ownerPageId: ledger.pages[owner.ownerSourcePageId], path, providerArtifactId: null, evidenceRef: owner.evidenceRef })
+    rows.push({ ownerPageId: ledger.pages[pageKey(pageBySource.get(owner.ownerSourcePageId))], path, providerArtifactId: null, evidenceRef: owner.evidenceRef })
     staticEdges.set(unitId, rows)
   }
   for (let index = 0; index < proposed.length; index++) {
@@ -549,349 +601,158 @@ export async function preflightSelection(input, ledgerInput = null) {
     const files = sourceEntries.map(entry => ({ path: entry.path, kind: entry.graphClass === "page_document" ? "document" : entry.graphClass, sha256: entry.expected.sha256, size: entry.expected.size, contentType: entry.contentType, source: "client" }))
     const pagesOut = members.map(page => ({ pageId: policyOperations.get(page.sourcePageId).policy.pageId, disposition: "new", documentPath: page.documentPath, metadata: page.metadata, expectedPolicyEpoch: null })).sort((a, b) => a.pageId < b.pageId ? -1 : 1)
     const edges = staticEdges.get(unitId) ?? []
-    const command = { idempotencyKey: remember(ledger.idempotencyKeys, unitId, () => `k${opaque()}`), artifactId: null, expectedRevisionId: null, expectedContentVersion: 0, files, pages: pagesOut, edges: edges.map(({ evidenceRef: _evidence, ...edge }) => edge) }
-    const inventoryId = remember(ledger.inventoryIds, unitId, () => `inv${opaque()}`)
-    const selectionId = remember(ledger.selectionIds, unitId, () => `sel${opaque()}`)
-    const selection = { version: 1, inventoryId, selectionId, planId: remember(ledger.planIds, unitId, () => `plan${opaque()}`), command }
+    const key = proposalKey(unitId)
+    const command = { idempotencyKey: remember(ledger.idempotencyKeys, key, () => `k${opaque()}`), artifactId: null, expectedRevisionId: null, expectedContentVersion: 0, files, pages: pagesOut, edges: edges.map(({ evidenceRef: _evidence, ...edge }) => edge) }
+    const inventoryId = remember(ledger.inventoryIds, key, () => `inv${opaque()}`)
+    const selectionId = remember(ledger.selectionIds, key, () => `sel${opaque()}`)
+    const selection = { version: 1, inventoryId, selectionId, planId: remember(ledger.planIds, key, () => `plan${opaque()}`), command }
     const inventory = { version: 1, inventoryId, selectionId, sourceInstance: input.sourceInstance, sourceArtifactId: unitId, approvalRef: input.approvalRef, kind: input.kind, command,
       pageMappings: members.map(page => ({ sourcePageId: page.sourcePageId, pageId: policyOperations.get(page.sourcePageId).policy.pageId, documentPath: page.documentPath, route: routeOf(page.documentPath), ownershipEvidenceRef: page.ownershipEvidenceRef })).sort((a, b) => a.pageId < b.pageId ? -1 : 1),
       edgeEvidence: edges, evidence: { selectionDigest: input.selectionDigest, corpusDigest: input.corpusDigest, mappingRef: input.mappingRef, capturedAt: input.capturedAt, complete: true, g1bRef: input.g1bRef },
       files: sourceEntries.map(entry => ({ path: entry.path, kind: entry.graphClass === "page_document" ? "document" : entry.graphClass, contentType: entry.contentType, size: entry.expected.size, sha256: entry.expected.sha256, sourceRef: `capture/${entry.locator.root}/${entry.locator.relative}`, sourceVersion: null, provenance: entry.provenance })), operations: staticOperations.get(unitId) ?? [] }
+    try { validateBeginCommand(command) } catch {
+      blockedUnits.add(unitId)
+      compatibility.unsupported.push(note("invalid_begin_command", { unitId }))
+    }
+    for (const operation of inventory.operations) if (operation.kind === "preview_selection" && !importPreviewOwned(command, operation.pageId, operation.path)) {
+      blockedUnits.add(unitId)
+      compatibility.unsupported.push(note("preview_not_owned", { unitId, path: operation.path }))
+    }
     const cost = budget(selection, utf8(stable(inventory)), input.limits)
     staticBudgets.set(unitId, cost)
     if (cost.failed.length) {
       blockedUnits.add(unitId)
       compatibility.unsupported.push(note("budget_exceeded", { unitId, budget: cost }))
     }
+    compiled.set(unitId, { command, selection, inventory, cost })
   }
-  for (const unitId of selectedByUnit.keys()) {
-    remember(ledger.idempotencyKeys, unitId, () => `k${opaque()}`)
-    remember(ledger.inventoryIds, unitId, () => `inv${opaque()}`)
-    remember(ledger.selectionIds, unitId, () => `sel${opaque()}`)
-    remember(ledger.planIds, unitId, () => `plan${opaque()}`)
+  const issuesByUnit = new Map()
+  for (const issue of compatibility.unsupported) if (issue.unitId) {
+    const list = issuesByUnit.get(issue.unitId) ?? []
+    list.push(issue); issuesByUnit.set(issue.unitId, list)
   }
-  const readOrdinals = [], protectedOrdinals = []
+  const units = [...selectedByUnit].map(([unitId, members]) => {
+    const draft = compiled.get(unitId), unitEntries = staticEntries.get(unitId) ?? []
+    const blocked = blockedUnits.has(unitId) || !draft
+    return {
+      unitId, status: blocked ? "blocked" : "representable", pinState: blocked ? "blocked" : "awaiting_source",
+      blockers: issuesByUnit.get(unitId) ?? [],
+      budget: draft?.cost ?? { files: unitEntries.length, pages: members.length, edges: (staticEdges.get(unitId) ?? []).length, largestFile: 0, commandBytes: 0, envelopeBytes: 0, inventoryBytes: 0, failed: [] },
+      dependencies: [],
+      sourceEvidence: { membership: members.map(page => ({ sourcePageId: page.sourcePageId, evidenceRef: page.membership.evidenceRef })), placement: unitEntries.map(entry => ({ path: entry.path, evidenceRef: entry.placement.evidenceRef })) },
+      command: blocked ? null : draft.command, selection: blocked ? null : draft.selection, inventory: blocked ? null : draft.inventory,
+      sourceArtifactId: unitId, maxInventoryBytes: input.limits.maxInventoryBytes,
+    }
+  }).sort((a, b) => a.unitId < b.unitId ? -1 : 1)
+  const facts = []
+  const rowFact = (kind, ordinal, unitIds, disposition, extra = {}) => facts.push({ kind, ordinal, unitIds: [...new Set(unitIds.filter(Boolean))], disposition, ...extra })
+  const reads = [], protectedLocators = []
   for (let ordinal = 0; ordinal < input.entries.length; ordinal++) {
-    const entry = input.entries[ordinal]
-    const read = entry.placement && !blockedUnits.has(entry.placement.sourceArtifactId) && !shellPath(entry.path, shells) && roots.has(entry.locator.root) && safeRelative(entry.locator.relative)
-    ;(read ? readOrdinals : protectedOrdinals).push(ordinal)
-  }
-  let finished = false
-  return { kind: "prepared", readOrdinals, protectedOrdinals, async finish(observations = {}) {
-  if (finished) throw new Error("preflight_already_finished")
-  finished = true
-  for (const entry of entries.values()) {
-    const path = entry.path
-    if (entry.placement && blockedUnits.has(entry.placement.sourceArtifactId)) {
-      account(path, "blocked", entry.placement.sourceArtifactId, "preflight_blocked")
-      continue
-    }
-    if (entry.graphClass === "shell" || entry.graphClass === "excluded" || shellPath(path, shells)) {
-      const exclusion = exclusions.get(path)
-      if (!exclusion) {
-        compatibility.unsupported.push(note("exclusion_evidence_required", { path }))
-        account(path, "blocked", null, "exclusion_evidence_required")
-      } else {
-        compatibility.represented.push(note("excluded", { path }))
-        account(path, "excluded", null, exclusion.reason)
-      }
-      continue
-    }
-    if (entry.graphClass === "unresolved") {
-      compatibility.unsupported.push(note("unresolved_path", { path }))
-      account(path, "blocked", null, "unresolved_path")
-      continue
-    }
-    if (!roots.has(entry.locator.root) || !safeRelative(entry.locator.relative) || !text(`capture/${entry.locator.root}/${entry.locator.relative}`)) {
-      compatibility.unsupported.push(note("unsafe_locator", { path }))
-      account(path, "blocked", null, "unsafe_locator")
-      continue
-    }
-    const observed = observationOf(observations, path)
-    if (!observed) {
-      compatibility.unsupported.push(note("contradictory_capture", { path }))
-      account(path, "blocked", null, "contradictory_capture")
-      continue
-    }
-    const page = pageByPath.get(path)
-    if (observed.state !== "present") {
-      const publicMissing = page && (page.visibility.state === "present" && (page.visibility.value === "public" || page.visibility.value === "shared"))
-      const code = observed.state === "absent" && publicMissing ? "or1_missing_document" : observed.state === "absent" ? "capture_absent" : observed.state === "unreadable" ? "capture_unreadable" : "capture_unknown"
-      compatibility.unsupported.push(note(code, { path, sourcePageId: page?.sourcePageId }))
-      if (observed.state === "unknown" || observed.state === "unreadable") compatibility.notObserved.push(note(code, { path, sourcePageId: page?.sourcePageId }))
-      account(path, "blocked", null, code)
-      continue
-    }
-    if (observed.size !== entry.expected.size || observed.sha256 !== entry.expected.sha256) {
-      compatibility.unsupported.push(note("capture_fingerprint_mismatch", { path }))
-      account(path, "blocked", null, "capture_fingerprint_mismatch")
-      continue
-    }
-    if (entry.contentType === null || !MIME.test(entry.contentType) || (entry.graphClass === "asset" && path.endsWith(".html")) || (entry.graphClass === "page_document" && (!documentRoute(path) || entry.contentType !== "text/html")) || (entry.graphClass === "subdocument" && (entry.contentType !== "text/html" || !path.endsWith(".html"))) || (entry.graphClass === "fragment" && entry.contentType !== "text/html")) {
-      compatibility.unsupported.push(note("contradictory_class", { path }))
-      account(path, "blocked", null, "contradictory_class")
-      continue
-    }
-    if ((ownersByPath.get(path)?.length ?? 0) > LIMITS.owners) {
-      compatibility.unsupported.push(note("uncapped_owners", { path }))
-      account(path, "blocked", null, "uncapped_owners")
-      continue
-    }
-    placed.set(path, { entry, observed })
-  }
-  const pageState = new Map()
-  for (const page of pages) {
-    const item = placed.get(page.documentPath)
-    if (!item || item.entry.graphClass !== "page_document") {
-      if (!entries.has(page.documentPath)) {
-        const code = page.visibility.state === "present" && ["public", "shared"].includes(page.visibility.value) ? "or1_missing_document" : "page_without_document"
-        compatibility.unsupported.push(note(code, { path: page.documentPath, sourcePageId: page.sourcePageId }))
-        account(page.documentPath, "blocked", null, code)
-      } else compatibility.unsupported.push(note("page_without_document", { path: page.documentPath, sourcePageId: page.sourcePageId }))
-      continue
-    }
-    const expected = slugOf(page.documentPath) ?? page.documentPath.slice(1)
-    if (page.sourcePageId !== expected) {
-      compatibility.unsupported.push(note("source_identity_mismatch", { path: page.documentPath, sourcePageId: page.sourcePageId }))
-      placed.delete(page.documentPath)
-      account(page.documentPath, "blocked", null, "source_identity_mismatch")
-      continue
-    }
-    if (page.metadata === null) {
-      compatibility.unsupported.push(note("missing_metadata", { path: page.documentPath, sourcePageId: page.sourcePageId }))
-      placed.delete(page.documentPath)
-      account(page.documentPath, "blocked", null, "missing_metadata")
-      continue
-    }
-    let metadataLength = Infinity
-    try { metadataLength = stable(page.metadata).length } catch { /* Invalid JSON metadata is rejected below. */ }
-    if (metadataLength > 8192) {
-      compatibility.unsupported.push(note("metadata_too_large", { path: page.documentPath, sourcePageId: page.sourcePageId }))
-      placed.delete(page.documentPath)
-      account(page.documentPath, "blocked", null, "metadata_too_large")
-      continue
-    }
-    const visibility = page.visibility
-    const share = page.share
-    if (visibility.state === "unknown" || visibility.state === "unreadable" || share.state === "unknown" || share.state === "unreadable") {
-      const code = visibility.state === "unknown" || visibility.state === "unreadable" ? `visibility_${visibility.state}` : `share_key_${share.state}`
-      compatibility.unsupported.push(note(code, { path: page.documentPath, sourcePageId: page.sourcePageId }))
-      compatibility.notObserved.push(note(code, { sourcePageId: page.sourcePageId }))
-      placed.delete(page.documentPath)
-      account(page.documentPath, "blocked", null, code)
-      continue
-    }
-    let visibilityValue = null
-    if (visibility.state === "absent") compatibility.represented.push(note("visibility_absent_private", { sourcePageId: page.sourcePageId }))
-    else if (visibility.metadataV !== null && visibility.metadataV !== visibility.value) {
-      compatibility.unsupported.push(note("visibility_metadata_mismatch", { sourcePageId: page.sourcePageId, path: page.documentPath }))
-      placed.delete(page.documentPath)
-      account(page.documentPath, "blocked", null, "visibility_metadata_mismatch")
-      continue
-    } else if (visibility.value !== null && !["private", "public", "shared"].includes(visibility.value)) {
-      warnings.push(note("unknown_visibility_private", { sourcePageId: page.sourcePageId }))
-      visibilityValue = visibility.value
-    } else visibilityValue = visibility.value
-    if ((visibility.state === "present" && visibility.expiresAt !== null) || (visibilityValue === "shared" && share.state === "present" && share.expiresAt !== null)) {
-      compatibility.unsupported.push(note("expiring_policy_unsupported", { sourcePageId: page.sourcePageId, path: page.documentPath }))
-      placed.delete(page.documentPath)
-      account(page.documentPath, "blocked", null, "expiring_policy_unsupported")
-      continue
-    }
-    let shareKey = null
-    if (visibilityValue === "shared") {
-      if (share.state !== "present" || typeof share.key !== "string" || !SHARE_KEY.test(share.key)) {
-        const code = share.state === "absent" ? "share_key_absent" : share.state === "unknown" ? "share_key_unknown" : "invalid_share_key"
-        compatibility.unsupported.push(note(code, { sourcePageId: page.sourcePageId, path: page.documentPath }))
-        if (share.state === "unknown" || share.state === "unreadable") compatibility.notObserved.push(note(code, { sourcePageId: page.sourcePageId }))
-        placed.delete(page.documentPath)
-        account(page.documentPath, "blocked", null, code)
-        continue
-      }
-      shareKey = share.key
-    } else if (share.state === "present" && share.key !== null) {
-      shareKey = share.key
-      compatibility.unsupported.push(note("share_key_not_imported", { sourcePageId: page.sourcePageId }))
-    }
-    const policy = policyOperations.get(page.sourcePageId).policy
-    pageState.set(page.sourcePageId, { page, pageId: policy.pageId, grantId: policy.grantId, visibilityValue: policy.visibility.value, shareKey: policy.share.key, metadataV: policy.visibility.metadataV })
-  }
-  for (const [path, item] of [...placed]) {
-    if (item.entry.graphClass !== "fragment") continue
-    const live = (ownersByPath.get(path) ?? []).filter(owner => pageState.has(owner.ownerSourcePageId))
-    if (!live.length) {
-      compatibility.unsupported.push(note("fragment_without_owner", { path }))
-      placed.delete(path)
-      account(path, "blocked", null, "fragment_without_owner")
-    }
-  }
-  const groups = new Map([...selectedByUnit.keys()].map(unitId => [unitId, []]))
-  for (const page of pages) {
-    const unitId = page.membership.sourceArtifactId
-    if (!groups.has(unitId)) groups.set(unitId, [])
-    const state = pageState.get(page.sourcePageId)
-    if (state && placed.has(page.documentPath)) groups.get(unitId).push(state)
-  }
-  for (const entry of entries.values()) {
-    if (entry.placement && !groups.has(entry.placement.sourceArtifactId)) {
-      unassignable = true
-      compatibility.unsupported.push(note("placement_without_membership", { path: entry.path }))
-      account(entry.path, "blocked", entry.placement.sourceArtifactId, "placement_without_membership")
-    }
-  }
-  const assigned = new Set()
-  const units = []
-  const entriesByUnit = new Map()
-  for (const entry of entries.values()) if (entry.placement) {
-    const list = entriesByUnit.get(entry.placement.sourceArtifactId) ?? []
-    list.push(entry)
-    entriesByUnit.set(entry.placement.sourceArtifactId, list)
-  }
-  for (const [unitId, list] of [...groups].sort(([left], [right]) => left < right ? -1 : 1)) {
-    const sources = new Set(list.map(item => item.page.sourcePageId))
-    const local = new Set()
-    const edges = []
-    const dependencies = []
-    for (const entry of entriesByUnit.get(unitId) ?? []) if (placed.has(entry.path)) local.add(entry.path)
-    for (const path of local) assigned.add(path)
-    const files = [...local].sort().map(path => {
-      const item = placed.get(path)
-      return { path, kind: item.entry.graphClass === "page_document" ? "document" : item.entry.graphClass, sha256: item.observed.sha256, size: item.observed.size, contentType: item.entry.contentType, source: "client" }
-    })
-    for (const [path, listOwners] of ownersByPath) {
-      for (const owner of listOwners) {
-        if (!sources.has(owner.ownerSourcePageId) || !pageState.has(owner.ownerSourcePageId)) continue
-        if (local.has(path)) edges.push({ ownerPageId: pageState.get(owner.ownerSourcePageId).pageId, path, providerArtifactId: null, evidenceRef: owner.evidenceRef })
-        else {
-          dependencies.push({ path, providerArtifactId: null, state: "missing" })
-          compatibility.unsupported.push(note("provider_mount_required", { path, unitId }))
-        }
-      }
-    }
-    const pagesOut = list.filter(item => local.has(item.page.documentPath)).map(item => ({ pageId: item.pageId, disposition: "new", documentPath: item.page.documentPath, metadata: item.page.metadata, expectedPolicyEpoch: null })).sort((left, right) => left.pageId < right.pageId ? -1 : 1)
-    const operations = []
-    for (const item of list) {
-      if (!local.has(item.page.documentPath)) continue
-      operations.push(policyOperations.get(item.page.sourcePageId))
-    }
-    for (const alias of input.aliases) {
-      if (!exact(alias, ["aliasKind", "path", "to", "status", "targetSourcePageId", "capturedBehavior"]) || !one(alias.aliasKind, ["redirect_exact", "redirect_prefix"]) || !one(alias.capturedBehavior, ["team_fallback", "public", "query_forward", "rewrite", "unobserved"])) {
-        compatibility.unsupported.push(note("contradictory_alias", { unitId }))
-        continue
-      }
-      if (!sources.has(alias.targetSourcePageId)) continue
-      if (alias.capturedBehavior !== "team_fallback") {
-        compatibility.unsupported.push(note(alias.capturedBehavior === "query_forward" ? "alias_query_not_forwarded" : alias.capturedBehavior === "public" ? "alias_public_unsupported" : "alias_behavior_unobserved", { path: alias.path, unitId }))
-        continue
-      }
-      if (!aliasPath(alias.path) || !aliasPath(alias.to) || ![301, 302, 307, 308].includes(alias.status) || (alias.aliasKind === "redirect_prefix" && !alias.path.endsWith("/"))) {
-        compatibility.unsupported.push(note("alias_invalid", { path: alias.path, unitId }))
-        continue
-      }
-      operations.push(relationshipOperations.get(alias))
-      compatibility.represented.push(note("alias_team_fallback", { path: alias.path, unitId }))
-    }
-    for (const link of input.shortlinks) {
-      if (!exact(link, ["mappingId", "providerOrigin", "providerId", "shortDomain", "shortCode", "shortUrl", "targetSourcePageId", "destination", "observedAt"]) || !sources.has(link.targetSourcePageId)) continue
-      if (!text(link.mappingId) || !text(link.providerOrigin) || !(link.providerId === null || text(link.providerId)) || !text(link.shortDomain) || !text(link.shortCode) || !text(link.shortUrl) || !text(link.destination, 4096) || !integer(link.observedAt) || link.observedAt < 0 || !shortlinkIdentity(link)) {
-        compatibility.unsupported.push(note("shortlink_invalid", { sourcePageId: link.targetSourcePageId, unitId }))
-        continue
-      }
-      operations.push(relationshipOperations.get(link))
-      compatibility.represented.push(note("shortlink_exact_destination", { sourcePageId: link.targetSourcePageId, unitId }))
-    }
-    for (const preview of input.previews) {
-      if (!exact(preview, ["sourcePageId", "path", "kind"]) || !one(preview.kind, ["original", "derived_only"])) {
-        compatibility.unsupported.push(note("contradictory_preview", { unitId }))
-        continue
-      }
-      if (!sources.has(preview.sourcePageId)) continue
-      if (preview.kind !== "original") {
-        compatibility.unsupported.push(note("derived_preview_unsupported", { path: preview.path, sourcePageId: preview.sourcePageId, unitId }))
-        continue
-      }
-      const page = pageState.get(preview.sourcePageId)
-      const owned = importPreviewOwned({ artifactId: null, files, pages: pagesOut, edges }, page.pageId, preview.path)
-      if (!owned) {
-        compatibility.unsupported.push(note("preview_not_owned", { path: preview.path, sourcePageId: preview.sourcePageId, unitId }))
-        continue
-      }
-      operations.push(relationshipOperations.get(preview))
-      compatibility.represented.push(note("original_preview", { path: preview.path, sourcePageId: preview.sourcePageId, unitId }))
-    }
-    const commandEdges = edges.map(({ evidenceRef: _evidence, ...edge }) => edge)
-    const command = { idempotencyKey: remember(ledger.idempotencyKeys, unitId, () => `k${opaque()}`), artifactId: null, expectedRevisionId: null, expectedContentVersion: 0, files, pages: pagesOut, edges: commandEdges }
-    const inventory = {
-      version: 1,
-      inventoryId: remember(ledger.inventoryIds, unitId, () => `inv${opaque()}`),
-      selectionId: remember(ledger.selectionIds, unitId, () => `sel${opaque()}`),
-      sourceInstance: input.sourceInstance,
-      sourceArtifactId: unitId,
-      approvalRef: input.approvalRef,
-      kind: input.kind,
-      command,
-      pageMappings: list.filter(item => local.has(item.page.documentPath)).map(item => ({ sourcePageId: item.page.sourcePageId, pageId: item.pageId, documentPath: item.page.documentPath, route: routeOf(item.page.documentPath), ownershipEvidenceRef: item.page.ownershipEvidenceRef })).sort((left, right) => left.pageId < right.pageId ? -1 : 1),
-      edgeEvidence: edges.map(edge => ({ ownerPageId: edge.ownerPageId, path: edge.path, providerArtifactId: edge.providerArtifactId, evidenceRef: edge.evidenceRef })),
-      evidence: { selectionDigest: input.selectionDigest, corpusDigest: input.corpusDigest, mappingRef: input.mappingRef, capturedAt: input.capturedAt, complete: true, g1bRef: input.g1bRef },
-      files: files.map(file => ({ path: file.path, kind: file.kind, contentType: file.contentType, size: file.size, sha256: file.sha256, sourceRef: `capture/${placed.get(file.path).entry.locator.root}/${placed.get(file.path).entry.locator.relative}`, sourceVersion: null, provenance: placed.get(file.path).entry.provenance })),
-      operations,
-    }
-    const selection = { version: 1, inventoryId: inventory.inventoryId, selectionId: inventory.selectionId, planId: remember(ledger.planIds, unitId, () => `plan${opaque()}`), command }
-    const missing = dependencies.some(item => item.state === "missing")
-    const cost = staticBudgets.get(unitId) ?? budget(selection, utf8(stable(inventory)), input.limits)
-    const unitEntries = entriesByUnit.get(unitId) ?? []
-    const invalidMember = (selectedByUnit.get(unitId) ?? []).some(page => !pageState.has(page.sourcePageId) || entries.get(page.documentPath)?.placement?.sourceArtifactId !== unitId)
-    const missingMember = unitEntries.some(entry => !placed.has(entry.path))
-    const relationshipFailure = relationshipBlocked.has(unitId) || compatibility.unsupported.some(issue => issue.unitId === unitId)
-    let status = input.targetBasis !== "empty" || missing || cost.failed.length || !pagesOut.length || invalidMember || missingMember || relationshipFailure ? "blocked" : "representable"
-    if (invalidMember || missingMember) compatibility.unsupported.push(note("incomplete_source_artifact", { unitId }))
-    if (input.targetBasis !== "empty") compatibility.unsupported.push(note("target_basis_unknown", { unitId }))
-    if (cost.failed.length) compatibility.unsupported.push(note("budget_exceeded", { unitId, budget: cost }))
-    if (status === "representable") compatibility.represented.push(note("publication_unit", { unitId }))
-    for (const path of local) account(path, status === "representable" ? "placed" : "blocked", unitId, status)
-    const sourceEvidence = {
-      membership: (selectedByUnit.get(unitId) ?? []).map(page => ({ sourcePageId: page.sourcePageId, evidenceRef: page.membership.evidenceRef })),
-      placement: unitEntries.map(entry => ({ path: entry.path, evidenceRef: entry.placement.evidenceRef })),
-    }
-    units.push({ unitId, status, pinState: status === "representable" ? "awaiting_source" : "blocked", blockers: status === "representable" ? [] : compatibility.unsupported.filter(item => item.unitId === unitId), budget: cost, dependencies, sourceEvidence, command: status === "representable" ? command : null, selection: status === "representable" ? selection : null, inventory: status === "representable" ? inventory : null, sourceArtifactId: inventory.sourceArtifactId, maxInventoryBytes: input.limits.maxInventoryBytes })
-  }
-  for (const [path, item] of placed) {
-    if (assigned.has(path) || seen.has(path)) continue
-    const code = item.entry.graphClass === "asset" && !(ownersByPath.get(path)?.length) ? "unowned_asset_unplaced" : "unplaced_path"
-    compatibility.unsupported.push(note(code, { path }))
-    account(path, "blocked", null, code)
-  }
-  for (const path of entries.keys()) if (!seen.has(path)) account(path, "blocked", null, "unaccounted_path")
-  const consumerCensus = []
-  const fatalConsumer = false
-  for (const check of consumerChecks) {
-    if (check.valid && !blockedUnits.has(check.unitId)) compatibility.represented.push(note("consumer_url_represented", { sourcePageId: check.page.sourcePageId, unitId: check.unitId }))
-    else if (!check.valid) compatibility.unsupported.push(note(check.code, { unitId: check.unitId }))
-    consumerCensus.push({ kind: "consumerUrl", ordinal: check.ordinal, unitId: check.unitId, disposition: check.valid ? "represented" : "rejected" })
-  }
-  for (const row of accounting) if (row.unitId === null && entries.get(row.path)?.placement) row.unitId = entries.get(row.path).placement.sourceArtifactId
-  const unitStatuses = new Map(units.map(unit => [unit.unitId, unit.status]))
-  const accountingByPath = new Map(accounting.map(row => [row.path, row]))
-  const census = []
-  for (let ordinal = 0; ordinal < input.entries.length; ordinal++) {
-    const entry = input.entries[ordinal]
-    const result = accountingByPath.get(entry.path)
-    census.push({ kind: "entry", ordinal, unitId: result?.unitId ?? null, disposition: result?.disposition === "excluded" ? "excluded" : result?.disposition === "placed" ? "represented" : "rejected" })
+    const entry = input.entries[ordinal], unitId = entry.placement?.sourceArtifactId ?? null
+    const resulting = subtreesByUnit.get(unitId) ?? new Set()
+    const protectedPath = exclusions.has(entry.path) || entry.graphClass === "shell" || entry.graphClass === "excluded" || (subtreeSlugOf(entry.path) === null && shellPath(entry.path, shells, resulting))
+    const excluded = !entry.placement && protectedPath && exclusions.has(entry.path)
+    const disposition = excluded ? "excluded" : !entry.placement || blockedUnits.has(unitId) || protectedPath ? "rejected" : "represented"
+    rowFact("entry", ordinal, [unitId, pageByPath.get(entry.path)?.membership.sourceArtifactId], disposition, { path: entry.path, reason: excluded ? exclusions.get(entry.path).reason : disposition === "represented" ? "representable" : !entry.placement ? entry.graphClass === "unresolved" ? "unresolved_path" : "exclusion_evidence_required" : "preflight_blocked" })
+    if (protectedPath) protectedLocators.push({ ordinal, locator: entry.locator })
+    else if (disposition === "represented") reads.push({ ordinal, path: entry.path, locator: entry.locator, expected: entry.expected, unitId, sourcePageId: pageByPath.get(entry.path)?.sourcePageId ?? null, publicDocument: !!pageByPath.get(entry.path) && ["public", "shared"].includes(pageByPath.get(entry.path).visibility.value) })
+    if (!entry.placement && !excluded) compatibility.unsupported.push(note(entry.graphClass === "unresolved" ? "unresolved_path" : "exclusion_evidence_required", { path: entry.path }))
+    if (excluded) compatibility.represented.push(note("excluded", { path: entry.path }))
   }
   for (let ordinal = 0; ordinal < input.pages.length; ordinal++) {
-    const unitId = input.pages[ordinal].membership.sourceArtifactId
-    census.push({ kind: "page", ordinal, unitId, disposition: unitStatuses.get(unitId) === "representable" ? "represented" : "rejected" })
+    const page = input.pages[ordinal]
+    rowFact("page", ordinal, [page.membership.sourceArtifactId], "represented", entries.has(page.documentPath) ? {} : { missingPath: page.documentPath })
   }
-  for (const row of relationshipCensus) census.push({ ...row, disposition: row.disposition === "pending" && unitStatuses.get(row.unitId) === "representable" ? "represented" : "rejected" })
+  for (const row of relationshipCensus) rowFact(row.kind, row.ordinal, [row.unitId], row.disposition === "pending" ? "represented" : "rejected")
   for (let ordinal = 0; ordinal < input.exclusions.length; ordinal++) {
-    const result = accountingByPath.get(input.exclusions[ordinal].path)
-    census.push({ kind: "exclusion", ordinal, unitId: null, disposition: result?.disposition === "excluded" ? "represented" : "rejected" })
+    const entry = entries.get(input.exclusions[ordinal].path)
+    rowFact("exclusion", ordinal, [entry?.placement?.sourceArtifactId], entry && !entry.placement ? "represented" : "rejected")
   }
-  for (let ordinal = 0; ordinal < input.providerMounts.length; ordinal++) census.push({ kind: "providerMount", ordinal, unitId: null, disposition: "rejected" })
-  for (const row of consumerCensus) census.push({ ...row, disposition: row.disposition === "represented" && unitStatuses.get(row.unitId) === "representable" ? "represented" : "rejected" })
-  accounting.sort((left, right) => left.path < right.path ? -1 : 1)
-  return { ok: !fatalConsumer && !unassignable && accounting.every(row => row.disposition !== "blocked") && compatibility.unsupported.length === 0, fatal: fatalConsumer || unassignable ? "unassignable_record" : null, schema: SELECTED_IMPORT_SCHEMA, kind: input.kind, sourceInstance: input.sourceInstance, targetBasis: input.targetBasis, ledger, accounting, census, units, compatibility, warnings, approvalRef: input.approvalRef, g1bRef: input.g1bRef }
+  for (let ordinal = 0; ordinal < input.providerMounts.length; ordinal++) rowFact("providerMount", ordinal, [...(ownerUnitsByPath.get(input.providerMounts[ordinal].path) ?? [])], "rejected")
+  for (const check of consumerChecks) {
+    rowFact("consumerUrl", check.ordinal, check.unitIds, check.valid ? "represented" : "rejected")
+    if (check.valid) compatibility.represented.push(note("consumer_url_represented", { sourcePageId: check.page.sourcePageId, unitId: check.unitId }))
+  }
+  for (const unit of units) compatibility.represented.push(note("publication_unit", { unitId: unit.unitId }))
+  for (const row of relationshipCensus) {
+    const codes = { alias: "alias_team_fallback", shortlink: "shortlink_exact_destination", preview: "original_preview" }
+    if (row.disposition === "pending" && codes[row.kind]) compatibility.represented.push(note(codes[row.kind], { unitId: row.unitId }))
+  }
+  for (const [category, issues] of Object.entries({ represented: compatibility.represented, unsupported: compatibility.unsupported, notObserved: compatibility.notObserved, warnings })) {
+    for (const issue of issues) facts.push({ kind: "diagnostic", category, unitIds: issue.unitId ? [issue.unitId] : [], issue })
+  }
+  const base = { ok: false, fatal: null, schema: SELECTED_IMPORT_SCHEMA, kind: input.kind, sourceInstance: input.sourceInstance, targetBasis: input.targetBasis, ledger, facts, units, approvalRef: input.approvalRef, g1bRef: input.g1bRef }
+  let finished = false
+  return { kind: "prepared", reads: structuredClone(reads), protectedLocators: structuredClone(protectedLocators), reader: structuredClone(input.reader), limits: structuredClone(input.limits), captureRoots: [...input.captureRoots], async finish(observations = {}) {
+    if (finished) throw new Error("preflight_already_finished")
+    finished = true
+    const failures = []
+    for (const read of reads) {
+      const observed = observationOf(observations, read.path)
+      let code = null
+      if (!observed) code = "contradictory_capture"
+      else if (observed.state !== "present") code = observed.state === "absent" && read.publicDocument ? "or1_missing_document" : `capture_${observed.state}`
+      else if (observed.size !== read.expected.size || observed.sha256 !== read.expected.sha256) code = "capture_fingerprint_mismatch"
+      if (code) {
+        failures.push({ unitId: read.unitId, code })
+        const issue = note(code, { path: read.path, sourcePageId: read.sourcePageId, unitId: read.unitId, basis: observed?.state === "absent" ? "observed_absent" : null })
+        facts.push({ kind: "diagnostic", category: "unsupported", unitIds: [read.unitId], issue })
+        if (code === "capture_unknown" || code === "capture_unreadable") facts.push({ kind: "diagnostic", category: "notObserved", unitIds: [read.unitId], issue })
+      }
+    }
+    return projectTranslation(base, failures)
   } }
+}
+
+// Projection is deliberately monotone: observations and pin failures may only
+// demote a unit, never make a rejected fact or unit representable.
+export function projectTranslation(translation, pinFailures = []) {
+  const failures = new Map()
+  for (const failure of pinFailures) {
+    if (!text(failure?.unitId) || !text(failure?.code)) throw new Error("invalid_pin_failure")
+    const list = failures.get(failure.unitId) ?? []
+    list.push(note(failure.code, { unitId: failure.unitId })); failures.set(failure.unitId, list)
+  }
+  const knownUnits = new Set(translation.units.map(unit => unit.unitId))
+  const facts = [...translation.facts]
+  const knownIssues = new Set(facts.filter(fact => fact.kind === "diagnostic" && fact.category === "unsupported").map(fact => stable([fact.issue.unitId ?? null, fact.issue.code])))
+  for (const [unitId, issues] of failures) {
+    if (!knownUnits.has(unitId)) throw new Error("invalid_pin_failure")
+    for (const issue of issues) {
+      const key = stable([unitId, issue.code])
+      if (!knownIssues.has(key)) {
+        facts.push({ kind: "diagnostic", category: "unsupported", unitIds: [unitId], issue })
+        knownIssues.add(key)
+      }
+    }
+  }
+  const units = translation.units.map(unit => {
+    const issues = failures.get(unit.unitId) ?? []
+    if (unit.status === "blocked" || issues.length) {
+      const { approval: _approval, ...rest } = unit
+      return { ...rest, status: "blocked", pinState: "blocked", command: null, selection: null, inventory: null, blockers: [...unit.blockers, ...issues] }
+    }
+    return unit
+  })
+  const blocked = new Set(units.filter(unit => unit.status === "blocked").map(unit => unit.unitId))
+  const census = [], accounting = []
+  const compatibility = { represented: [], unsupported: [], notObserved: [] }, warnings = []
+  for (const fact of facts) {
+    const demoted = fact.unitIds.some(unitId => blocked.has(unitId))
+    if (fact.kind === "diagnostic") {
+      if (fact.category === "represented" && demoted) continue
+      if (fact.category === "warnings") warnings.push(fact.issue)
+      else compatibility[fact.category].push(fact.issue)
+      continue
+    }
+    const disposition = fact.disposition === "represented" && demoted ? "rejected" : fact.disposition
+    const unitId = fact.unitIds.length === 1 ? fact.unitIds[0] : null
+    census.push({ kind: fact.kind, ordinal: fact.ordinal, unitId, affectedUnitIds: fact.unitIds, disposition })
+    if (fact.kind === "entry") accounting.push({ path: fact.path, unitId, disposition: disposition === "represented" ? "placed" : disposition === "excluded" ? "excluded" : "blocked", reason: demoted ? "unit_blocked" : fact.reason })
+    if (fact.kind === "page" && fact.missingPath) accounting.push({ path: fact.missingPath, unitId, disposition: "blocked", reason: "missing_inventory_document" })
+  }
+  accounting.sort((a, b) => a.path < b.path ? -1 : 1)
+  return { ...translation, facts, units, census, accounting, compatibility, warnings, ok: !translation.fatal && census.every(row => row.disposition !== "rejected") && compatibility.unsupported.length === 0 }
 }
 
 export function assignSourcePins(unit, pins) {

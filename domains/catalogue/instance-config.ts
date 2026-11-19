@@ -4,6 +4,15 @@ export type RouteGrammar = "subtree" | "tree"
 export type ShareGrammar = "slug" | "page" | "card"
 export type LoginMode = "serve-shell" | "redirect-access-login"
 
+export interface ReaderProfile {
+  readonly canonicalHost: string
+  readonly aliasHosts: readonly string[]
+  readonly routeGrammars: readonly RouteGrammar[]
+  readonly shareGrammars: readonly ShareGrammar[]
+  readonly shareCookie: boolean
+  readonly shellPaths: readonly string[]
+}
+
 export interface ShareVerifierKey { readonly kid: string; readonly key: CryptoKey }
 export interface ShareSealKey { readonly kid: string; readonly key: CryptoKey }
 export interface InstanceBase {
@@ -73,6 +82,36 @@ function strings(value: unknown, name: string, errors: string[], nonempty = fals
   return result
 }
 
+/** Validate the reader-facing projection without requiring runtime bindings. */
+export function validateReaderProfile(value: unknown): ConfigResult<ReaderProfile> {
+  const errors: string[] = []
+  const data = object(value) ? value : {}
+  if (!object(value)) errors.push("reader profile must be an object")
+  const canonicalHost = data.canonicalHost
+  if (!hostname(canonicalHost)) errors.push("canonicalHost is invalid")
+  const aliasHosts = strings(data.aliasHosts, "aliasHosts", errors)
+  if (aliasHosts.some(host => !hostname(host))) errors.push("aliasHosts contains an invalid host")
+  if (typeof canonicalHost === "string" && aliasHosts.includes(canonicalHost)) errors.push("canonicalHost must not be an alias")
+  const routes = strings(data.routeGrammars, "routeGrammars", errors, true)
+  const shares = strings(data.shareGrammars, "shareGrammars", errors, true)
+  if (routes.some(route => route !== "tree" && route !== "subtree")) errors.push("routeGrammars contains an unknown grammar")
+  if (shares.some(share => share !== "slug" && share !== "page" && share !== "card")) errors.push("shareGrammars contains an unknown grammar")
+  if (shares.includes("page") && !routes.includes("tree")) errors.push("page shares require tree routes")
+  if (shares.includes("slug") && !routes.includes("subtree")) errors.push("slug shares require subtree routes")
+  if (shares.includes("card") && !routes.includes("tree") && !routes.includes("subtree")) errors.push("card shares require a route grammar")
+  if (typeof data.shareCookie !== "boolean") errors.push("shareCookie must be a boolean")
+  if (data.shareCookie === true && (!shares.includes("page") || !routes.includes("tree"))) errors.push("shareCookie requires page shares and tree routes")
+  const shellPaths = strings(data.shellPaths, "shellPaths", errors, true)
+  if (!shellPaths.includes("/login")) errors.push("shellPaths must include /login")
+  for (const path of shellPaths) {
+    if (!path.startsWith("/") || path.startsWith("//") || /[?#\\\x00-\x1f\x7f%]/.test(path) || path.split("/").some((segment, index, segments) => index > 0 && (segment === "." || segment === ".." || (segment === "" && index < segments.length - 1)))) {
+      errors.push("shellPaths contains a malformed path")
+    } else if (isReservedShellPath(path)) errors.push("shellPaths contains a reserved path")
+  }
+  if (errors.length) return { ok: false, errors }
+  return { ok: true, config: { canonicalHost: canonicalHost as string, aliasHosts, routeGrammars: routes as RouteGrammar[], shareGrammars: shares as ShareGrammar[], shareCookie: data.shareCookie as boolean, shellPaths } }
+}
+
 function keyBytes(value: unknown): Uint8Array<ArrayBuffer> | null {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value) || value.length % 4 === 1) return null
   try {
@@ -120,31 +159,17 @@ async function parse(env: Readonly<Record<string, unknown>>, surface: "read" | "
   ], "FORGE_INSTANCE", errors)
   const instanceId = data.instanceId
   if (typeof instanceId !== "string" || !/^[a-z][a-z0-9-]{1,39}$/.test(instanceId)) errors.push("instanceId is invalid")
-  const canonicalHost = data.canonicalHost
+  const reader = validateReaderProfile(data)
+  if (!reader.ok) errors.push(...reader.errors)
   const manageHost = data.manageHost
-  if (!hostname(canonicalHost)) errors.push("canonicalHost is invalid")
   if (!hostname(manageHost)) errors.push("manageHost is invalid")
-  const aliasHosts = strings(data.aliasHosts, "aliasHosts", errors)
-  if (aliasHosts.some(host => !hostname(host))) errors.push("aliasHosts contains an invalid host")
-  if (typeof canonicalHost === "string" && aliasHosts.includes(canonicalHost)) errors.push("canonicalHost must not be an alias")
-  if (typeof manageHost === "string" && (manageHost === canonicalHost || aliasHosts.includes(manageHost))) errors.push("manageHost must be distinct from read hosts")
+  if (typeof manageHost === "string" && (manageHost === data.canonicalHost || (Array.isArray(data.aliasHosts) && data.aliasHosts.includes(manageHost)))) errors.push("manageHost must be distinct from read hosts")
   const accessTeamDomain = data.accessTeamDomain
   if (typeof accessTeamDomain !== "string" || !/^[a-z0-9-]+\.cloudflareaccess\.com$/.test(accessTeamDomain) || !hostname(accessTeamDomain)) errors.push("accessTeamDomain is invalid")
   const readAudiences = strings(data.readAudiences, "readAudiences", errors, true)
   const manageAudiences = strings(data.manageAudiences, "manageAudiences", errors, true)
   if (readAudiences.some(audience => manageAudiences.includes(audience))) errors.push("readAudiences and manageAudiences must be disjoint")
-  const routes = strings(data.routeGrammars, "routeGrammars", errors, true)
-  const shares = strings(data.shareGrammars, "shareGrammars", errors, true)
-  if (routes.some(route => route !== "tree" && route !== "subtree")) errors.push("routeGrammars contains an unknown grammar")
-  if (shares.some(share => share !== "slug" && share !== "page" && share !== "card")) errors.push("shareGrammars contains an unknown grammar")
-  if (shares.includes("page") && !routes.includes("tree")) errors.push("page shares require tree routes")
-  if (shares.includes("slug") && !routes.includes("subtree")) errors.push("slug shares require subtree routes")
-  if (shares.includes("card") && !routes.includes("tree") && !routes.includes("subtree")) errors.push("card shares require a route grammar")
-  if (typeof data.shareCookie !== "boolean") errors.push("shareCookie must be a boolean")
-  if (data.shareCookie === true && (!shares.includes("page") || !routes.includes("tree"))) errors.push("shareCookie requires page shares and tree routes")
   if (data.login !== "serve-shell" && data.login !== "redirect-access-login") errors.push("login is invalid")
-  const shellPaths = strings(data.shellPaths, "shellPaths", errors, true)
-  if (!shellPaths.includes("/login")) errors.push("shellPaths must include /login")
   const verifierInput = json(env.FORGE_SHARE_VERIFIER_KEYS, "FORGE_SHARE_VERIFIER_KEYS", errors)
   const verifierKeys: ShareVerifierKey[] = []
   if (!Array.isArray(verifierInput) || verifierInput.length < 1 || verifierInput.length > 2) errors.push("FORGE_SHARE_VERIFIER_KEYS must contain one or two keys")
@@ -160,22 +185,18 @@ async function parse(env: Readonly<Record<string, unknown>>, surface: "read" | "
   if (surface === "manage" && "FORGE_SHARE_SEAL_KEY" in env) {
     sealKey = await importKey(json(env.FORGE_SHARE_SEAL_KEY, "FORGE_SHARE_SEAL_KEY", errors), "seal", errors)
   }
+  if (!reader.ok || errors.length) return { ok: false, errors }
   const base: InstanceBase = {
     instanceId: typeof instanceId === "string" ? instanceId : "",
-    canonicalHost: typeof canonicalHost === "string" ? canonicalHost : "",
-    aliasHosts,
+    canonicalHost: reader.config.canonicalHost,
+    aliasHosts: reader.config.aliasHosts,
     accessTeamDomain: typeof accessTeamDomain === "string" ? accessTeamDomain : "",
-    routeGrammars: routes as RouteGrammar[],
-    shareGrammars: shares as ShareGrammar[],
+    routeGrammars: reader.config.routeGrammars,
+    shareGrammars: reader.config.shareGrammars,
     shareVerifierKeys: verifierKeys,
   }
-  for (const path of shellPaths) {
-    if (!path.startsWith("/") || path.startsWith("//") || /[?#\\\x00-\x1f\x7f%]/.test(path) || path.split("/").some((segment, index, segments) => index > 0 && (segment === "." || segment === ".." || (segment === "" && index < segments.length - 1)))) {
-      errors.push("shellPaths contains a malformed path")
-    } else if (isReservedShellPath(path)) errors.push("shellPaths contains a reserved path")
-  }
-  if (errors.length) return { ok: false, errors }
-  if (surface === "read") return { ok: true, config: { ...base, surface, manageHost: manageHost as string, readAudiences, login: data.login as LoginMode, shareCookie: data.shareCookie as boolean, shellPaths } }
+  const shellPaths = reader.config.shellPaths
+  if (surface === "read") return { ok: true, config: { ...base, surface, manageHost: manageHost as string, readAudiences, login: data.login as LoginMode, shareCookie: reader.config.shareCookie, shellPaths } }
   return { ok: true, config: { ...base, surface, manageHost: manageHost as string, manageAudiences, shellPaths, shareSealKey: sealKey } }
 }
 

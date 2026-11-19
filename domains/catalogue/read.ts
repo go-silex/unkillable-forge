@@ -6,6 +6,7 @@ import type { ManageDeps, PagePolicyView } from './commands'
 import { PolicyError } from './guard'
 import { requireManageActor, type ManageActor } from './principals'
 import { activeGrantSql } from './artifact-pages'
+import { aliasLocation } from './alias-validation'
 interface PinnedReadProof {
   readonly instanceId: string; readonly pageId: string; readonly revisionId: string; readonly policyEpoch: number
   readonly basis: { readonly kind: 'public' } | { readonly kind: 'team' } | { readonly kind: 'grant'; readonly grantId: string }
@@ -198,7 +199,7 @@ async function decideReadAuthorized(db: D1Database, config: ReadInstanceConfig, 
     const aliasDecision = (): ReadDecision | null => {
       const row = rows(alias)[0]
       if (!row || !team || (row.target_page_id !== null && !row.target_live)) return null
-      return { kind: 'alias', status: row.redirect_status, location: row.redirect_to + (row.kind === 'redirect_prefix' ? aliasPath!.slice(row.route_key.length) : '') }
+      return { kind: 'alias', status: row.redirect_status, location: aliasLocation(row.kind, row.route_key, row.redirect_to, aliasPath!) }
     }
     const mounted = (row: Row | undefined): ReadDecision | null => {
       if (!row) return null

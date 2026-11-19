@@ -71,35 +71,52 @@ Node 22.12 or later is required. The offline CLI bundles the fixed repository
 translator and Catalogue parser in memory using the existing toolchain; it
 does not require Node's experimental TypeScript loading. Selector, workspace
 and state use the shipped private descriptor checks, including effective access
-checks rather than mode bits alone. Protected and content locators are checked
-across root aliases before any selected body is opened.
+checks rather than mode bits alone. All candidate and explicitly protected
+locators are resolved across root aliases and their available physical identities
+checked before the first body read. Descriptor metadata inspection is not a body
+read; identities are checked again when bytes are read. The authorized read and
+protected-locator sets are not complements: omission of ordinary content from a
+blocked unit does not make its inode a protected exclusion.
 
 Before body reads the selector receives a whole-record preflight and indexed
-census, including malformed relationships. An unassignable contradiction is
-a fatal selector failure, distinct from a valid exclusions-only selection.
-Each attributed missing or unreadable member blocks its complete source
-artifact, not just the missing file; independent units may still proceed.
+census, including malformed relationships. It compiles one complete proposal;
+finishing observations checks that snapshot rather than recompiling a smaller
+selection. An unassignable contradiction is a fatal selector failure, distinct
+from a valid exclusions-only selection. Each attributed missing or unreadable
+member blocks its complete source artifact, not just the missing file;
+independent units may still proceed. The ID ledger scopes identity by the full
+source tuple, including source instance and original artifact.
+
 Unknown or unreadable policy capture blocks its unit, whereas an observed
-unrecognized visibility value is retained for the native warning.
-Literal shortlink destination preservation is distinct from proving its target,
-key and grant association; neither a selected URL nor a dry-run proves an
-actual consumer HTTP response.
+unrecognized visibility value is retained for the native warning. Static
+recognition, representation by an eligible unit, native `ready`, and actual
+consumer HTTP authorization are separate outcomes. Literal shortlink destination
+preservation does not prove the target, key or grant association; a dry-run
+does not prove an actual consumer HTTP response.
 
 Preparation creates isolated local D1 and R2 state, a synthetic administrator and
 signing material, then pins native object versions and a separately approved
 inventory. Planning reopens those pins, authenticates to the actual manage Worker
 and consumes its bounded dry-run continuations. It does not apply, publish,
 discover providers, use a host provider transport or claim operating-system
-network isolation. Late inventory byte-budget failures are reported per unit;
-planning groups no more than 1,000 approvals per Worker binding. The nonsecret
-receipt distinguishes fatal, exclusions-only and partial preparations, and
-reports compatibility separately from each native `ready` or `blocked`
-outcome. It compares logical database contents and both bucket inventories
-before and after completed runs. If dispatch, decoding or continuation is
-interrupted, store equality is unknown unless the after-snapshot completes.
+network isolation. Expected source reread failures and late inventory byte-budget
+failures block the affected unit without invalidating independently sealed units;
+one atomic private checkpoint records the resulting outcomes. This is not a
+crash-recovery guarantee. Planning groups no more than 1,000 approvals per
+Worker binding and uses a fresh fixture assertion for each unit's planning
+window without extending native cursor expiry. The nonsecret receipt
+distinguishes fatal, exclusions-only and partial preparations, and reports
+compatibility separately from each native `ready` or `blocked`
+outcome. Warning codes and counts are sanitized through a public allowlist;
+unknown codes use a fixed category, and private values are not emitted. The
+receipt compares logical database contents and both bucket inventories before
+and after completed runs. If dispatch, decoding or continuation is interrupted,
+store equality is unknown unless the after-snapshot completes.
 A ready unit does not resolve an `or1_missing_document` blocker in another
 selection, activate a provider, or establish historical fidelity or F10
-acceptance. Historical execution requires separate current authority and evidence.
+acceptance. G1b is closed only for the verified capped historical ownership
+graph; Claude native publication is deferred and no private operation grant
+is active. Historical execution requires separate current authority and evidence.
 
 
 `POST /api/maintenance/import` is a separate, administrator-only interface for

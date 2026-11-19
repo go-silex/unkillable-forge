@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { preflightSelection, assignSourcePins, sealInventory, stable, type Translation, type Unit, type RepresentableUnit } from '../scripts/forge-import-selected.mjs'
+import { preflightSelection, projectTranslation, assignSourcePins, sealInventory, stable, type Translation, type Unit, type RepresentableUnit } from '../scripts/forge-import-selected.mjs'
+import type { ImportOperation } from '../domains/catalogue/import'
 import { makeSelectedFixture } from './engine/fixtures/import-selected.mjs'
 
 async function translateSelection(input: unknown, ledger: unknown = null, observations: unknown = {}): Promise<Translation> {
@@ -53,8 +54,13 @@ describe('selected import translation', () => {
     const fresh = await translateSelection(input, null, observations)
     expect(again.ledger).toEqual(first.ledger)
     expect(represented(again, 'tree:').selection).toEqual(represented(first, 'tree:').selection)
-    expect(first.ledger.pages['tree/one.html']).toMatch(/^pg_[a-z2-7]{26}$/)
-    expect(fresh.ledger.pages['tree/one.html']).not.toBe(first.ledger.pages['tree/one.html'])
+    const key = stable([input.sourceInstance, 'tree:synthetic', 'tree/one.html'])
+    expect(first.ledger.pages[key]).toMatch(/^pg_[a-z2-7]{26}$/)
+    expect(fresh.ledger.pages[key]).not.toBe(first.ledger.pages[key])
+    const other = structuredClone(input)
+    other.sourceInstance = 'other-synthetic-instance'
+    const isolated = await translateSelection(other, first.ledger, observations)
+    expect(represented(isolated, 'tree:').command.pages[0].pageId).not.toBe(represented(first, 'tree:').command.pages[0].pageId)
   })
 
   it('reports missing public document while independent units remain representable', async () => {
@@ -116,8 +122,8 @@ describe('selected import translation', () => {
     input.pages[0].visibility = { state: 'present', value: null, metadataV: null, expiresAt: null }
     const preflight = await preflightSelection(input)
     if (preflight.kind !== 'prepared') throw new Error('expected independent unit')
-    expect(preflight.readOrdinals.map(index => input.entries[index].path).every(path => path.startsWith('/a/sample/'))).toBe(true)
-    expect(preflight.protectedOrdinals.map(index => input.entries[index].path)).toContain('/tree/two.html')
+    expect(preflight.reads.map(read => read.path).every(path => path.startsWith('/a/sample/'))).toBe(true)
+    expect(preflight.protectedLocators.map(row => row.locator.relative)).not.toContain('tree/two.html')
     const result = await preflight.finish(observations)
     expect(unitFor(result, 'tree:').status).toBe('blocked')
     expect(unitFor(result, 'slug:sample').status).toBe('representable')
@@ -136,7 +142,7 @@ describe('selected import translation', () => {
     input.pages[0].share = { state: 'present', key: null, expiresAt: null }
     const missingKey = await preflightSelection(input)
     if (missingKey.kind !== 'prepared') throw new Error('expected independent unit')
-    expect(missingKey.readOrdinals.map(index => input.entries[index].path).every(path => path.startsWith('/a/sample/'))).toBe(true)
+    expect(missingKey.reads.map(read => read.path).every(path => path.startsWith('/a/sample/'))).toBe(true)
   })
 
   it('accepts canonical metadata arrays and Unicode within the native string limit', async () => {
@@ -201,7 +207,7 @@ describe('selected import translation', () => {
     input.previews.push({ sourcePageId: 'tree/one.html', path, kind: 'original' })
     const preflight = await preflightSelection(input)
     if (preflight.kind !== 'prepared') throw new Error('expected independent unit')
-    expect(preflight.readOrdinals.map(index => input.entries[index].path).every(value => value.startsWith('/a/sample/'))).toBe(true)
+    expect(preflight.reads.map(read => read.path).every(value => value.startsWith('/a/sample/'))).toBe(true)
     const result = await preflight.finish(observations)
     expect(unitFor(result, 'tree:').status).toBe('blocked')
     expect(codes(result)).toContain('conflicting_import_operations')
@@ -302,5 +308,172 @@ describe('selected import translation', () => {
     const sealed = sealInventory(pinned.unit, { key: 'synthetic-inventory', version: 'inventory-native-version' }, 'a'.repeat(64))
     if (!sealed.ok) throw new Error('expected sealed inventory')
     expect(sealed.unit.pinState).toBe('pinned')
+  })
+
+  it('vetoes an excluded placed body and preserves independent readable units', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    input.exclusions.push({ path: '/tree/asset0.css', evidenceRef: 'synthetic-exclusion', reason: 'non_content' })
+    const prepared = await preflightSelection(input)
+    if (prepared.kind !== 'prepared') throw new Error('expected prepared selection')
+    expect(prepared.reads.some(read => read.path === '/tree/asset0.css')).toBe(false)
+    expect(prepared.protectedLocators.some(row => row.locator.relative === 'tree/asset0.css')).toBe(true)
+    const result = await prepared.finish(observations)
+    expect(unitFor(result, 'tree:').status).toBe('blocked')
+    expect(unitFor(result, 'slug:').status).toBe('representable')
+    expect(codes(result)).toContain('excluded_content_contradiction')
+  })
+
+  it('projects byte and pin failures consistently without promoting rejected facts', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    input.consumerUrls.push({ url: 'https://links.example.test/abc', purpose: 'shortlink', targetSourcePageId: 'sample', mappingRef: 'synthetic-mapping' })
+    const prepared = await preflightSelection(input)
+    if (prepared.kind !== 'prepared') throw new Error('expected prepared selection')
+    const result = await prepared.finish(observations)
+    const projected = projectTranslation(result, [{ unitId: 'slug:sample', code: 'inventory_budget_exceeded' }])
+    expect(unitFor(projected, 'slug:').status).toBe('blocked')
+    expect(unitFor(projected, 'tree:').status).toBe('representable')
+    expect(projected.census.find(row => row.kind === 'consumerUrl')?.disposition).toBe('rejected')
+    expect(projected.compatibility.represented.some(issue => issue.unitId === 'slug:sample')).toBe(false)
+    expect(codes(projected)).toContain('inventory_budget_exceeded')
+    expect(projectTranslation(projected).units.find(unit => unit.unitId === 'slug:sample')?.status).toBe('blocked')
+  })
+
+  it('blocks a malformed mapping assertion only in its attributable artifact', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    input.consumerUrls.push({ url: 'https://forge.example.test/tree/one', purpose: 'document', targetSourcePageId: 'tree/one.html', mappingRef: 'missing' })
+    const result = await translateSelection(input, null, observations)
+    expect(unitFor(result, 'tree:').status).toBe('blocked')
+    expect(unitFor(result, 'slug:').status).toBe('representable')
+    expect(result.census.find(row => row.kind === 'consumerUrl')?.disposition).toBe('rejected')
+  })
+
+  it('rejects duplicate owner edges and ownerless fragments before body authorization', async () => {
+    const { input } = await makeSelectedFixture()
+    input.owners.push({ ...input.owners[0], evidenceRef: 'another-evidence' })
+    const prepared = await preflightSelection(input)
+    if (prepared.kind !== 'prepared') throw new Error('expected prepared selection')
+    expect(prepared.reads.every(read => read.path.startsWith('/a/sample/'))).toBe(true)
+    input.owners = input.owners.filter(owner => owner.path !== '/tree/fragment.html')
+    const ownerless = await preflightSelection(input)
+    if (ownerless.kind !== 'prepared') throw new Error('expected prepared selection')
+    expect(ownerless.reads.some(read => read.path === '/tree/fragment.html')).toBe(false)
+  })
+
+  it('reserves native controls but does not protect omitted foreign subtree content', async () => {
+    const { input } = await makeSelectedFixture()
+    const example = input.entries.find(entry => entry.path === '/tree/asset0.css')
+    if (!example) throw new Error('expected asset')
+    input.entries.push({ ...example, path: '/cdn-cgi/synthetic.css', locator: { root: 'capture', relative: 'cdn-cgi/synthetic.css' } })
+    input.entries.push({ ...example, path: '/a/foreign/synthetic.css', locator: { root: 'capture', relative: 'a/foreign/synthetic.css' } })
+    const result = await preflightSelection(input)
+    if (result.kind !== 'prepared') throw new Error('expected prepared selection')
+    expect(result.protectedLocators.some(row => row.locator.relative === 'cdn-cgi/synthetic.css')).toBe(true)
+    expect(result.protectedLocators.some(row => row.locator.relative === 'a/foreign/synthetic.css')).toBe(false)
+    expect(result.reads.some(row => row.path === '/a/foreign/synthetic.css')).toBe(false)
+    expect(result.reads.some(row => row.path === '/a/sample/index.html')).toBe(true)
+  })
+
+  it('rejects invalid reader profiles before authorizing any body', async () => {
+    const { input } = await makeSelectedFixture()
+    input.reader.shellPaths = []
+    expect(await preflightSelection(input)).toMatchObject({ kind: 'fatal', result: { fatal: 'invalid_grammar' } })
+    input.reader.shellPaths = ['/login', '/api/private']
+    expect(await preflightSelection(input)).toMatchObject({ kind: 'fatal', result: { fatal: 'invalid_grammar' } })
+  })
+
+  it('treats a misplaced public document differently from absent inventory', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const document = input.entries.find(entry => entry.path === '/tree/one.html')
+    if (!document) throw new Error('expected document')
+    document.placement = { sourceArtifactId: 'slug:sample', evidenceRef: 'synthetic-contradiction' }
+    const result = await translateSelection(input, null, observations)
+    expect(codes(result)).toContain('document_placement_conflict')
+    expect(codes(result)).not.toContain('or1_missing_document')
+    expect(result.census.find(row => row.kind === 'entry' && row.ordinal === input.entries.indexOf(document))?.affectedUnitIds).toEqual(expect.arrayContaining(['tree:synthetic', 'slug:sample']))
+  })
+
+  it('rejects an orphan document before body reads while keeping other units', async () => {
+    const { input } = await makeSelectedFixture()
+    const original = input.entries.find(entry => entry.path === '/tree/one.html')
+    if (!original) throw new Error('expected document')
+    input.entries.push({ ...original, path: '/tree/orphan.html', locator: { root: 'capture', relative: 'tree/orphan.html' } })
+    const result = await preflightSelection(input)
+    if (result.kind !== 'prepared') throw new Error('expected prepared selection')
+    expect(result.reads.some(read => read.path === '/tree/orphan.html')).toBe(false)
+    expect(result.reads.some(read => read.path === '/a/sample/index.html')).toBe(true)
+  })
+
+  it('requires the card owner and the actual winning original image', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const original = input.entries.find(entry => entry.path === '/tree/preview.png')
+    if (!original) throw new Error('expected preview')
+    const card = '/tree/two.og.png'
+    input.entries.push({ ...original, path: card, locator: { root: 'capture', relative: card.slice(1) } })
+    observations[card] = observations[original.path]
+    input.owners.push({ path: card, ownerSourcePageId: 'tree/one.html', evidenceRef: 'synthetic-edge', basis: 'declared' })
+    input.consumerUrls.push({ url: 'https://forge.example.test/s/tree/two.og.png/syntheticTreeKey/', purpose: 'card', targetSourcePageId: 'tree/two.html', mappingRef: null })
+    const wrong = await translateSelection(input, null, observations)
+    expect(unitFor(wrong, 'tree:').status).toBe('blocked')
+    input.owners.at(-1)!.ownerSourcePageId = 'tree/two.html'
+    const owned = await translateSelection(input, null, observations)
+    expect(unitFor(owned, 'tree:').status).toBe('representable')
+    const alternate = '/tree/alternate.png'
+    input.entries.push({ ...original, path: alternate, locator: { root: 'capture', relative: alternate.slice(1) } })
+    observations[alternate] = observations[original.path]
+    input.owners.push({ path: alternate, ownerSourcePageId: 'tree/two.html', evidenceRef: 'synthetic-edge', basis: 'declared' })
+    input.previews.push({ sourcePageId: 'tree/two.html', path: alternate, kind: 'original' })
+    const overridden = await translateSelection(input, null, observations)
+    expect(unitFor(overridden, 'tree:').status).toBe('blocked')
+  })
+
+  it('indexes dense evidenced edges and covers each selected record', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const original = input.entries.find(entry => entry.path === '/tree/fragment.html')
+    if (!original) throw new Error('expected fragment')
+    for (let index = 0; index < 120; index++) {
+      const path = `/tree/dense${index}.html`
+      input.entries.push({ ...original, path, locator: { root: 'capture', relative: path.slice(1) } })
+      observations[path] = observations[original.path]
+      for (const ownerSourcePageId of ['tree/one.html', 'tree/two.html']) input.owners.push({ path, ownerSourcePageId, evidenceRef: 'synthetic-dense-edge', basis: 'declared' })
+    }
+    const result = await translateSelection(input, null, observations)
+    const tree = represented(result, 'tree:')
+    expect(tree.command.edges.filter(edge => edge.path.includes('/dense'))).toHaveLength(240)
+    expect(result.census.filter(row => row.kind === 'owner')).toHaveLength(input.owners.length)
+    expect(result.census.every(row => row.disposition !== 'rejected')).toBe(true)
+  })
+
+  it('uses decoded alias fallback, longest prefix and shell precedence', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    input.aliases.push({ aliasKind: 'redirect_prefix', path: '/old/', to: '/a/sample/', status: 301, targetSourcePageId: 'sample', capturedBehavior: 'team_fallback' })
+    input.consumerUrls.push({ url: 'https://forge.example.test/old/nest%65d?not-forwarded=1', purpose: 'alias', targetSourcePageId: 'sample', mappingRef: null })
+    const valid = await translateSelection(input, null, observations)
+    expect(unitFor(valid, 'slug:').status).toBe('representable')
+    input.aliases.push({ aliasKind: 'redirect_exact', path: '/old/nested', to: '/tree/one', status: 301, targetSourcePageId: 'tree/one.html', capturedBehavior: 'team_fallback' })
+    const shadowed = await translateSelection(input, null, observations)
+    expect(shadowed.census.find(row => row.kind === 'consumerUrl')?.disposition).toBe('rejected')
+    input.consumerUrls[0].url = 'https://forge.example.test/login'
+    const shell = await translateSelection(input, null, observations)
+    expect(shell.census.find(row => row.kind === 'consumerUrl')?.disposition).toBe('rejected')
+  })
+
+  it('keeps exact and prefix alias operation identities distinct for the same key', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    input.aliases.push({ aliasKind: 'redirect_exact', path: '/old/', to: '/a/sample/', status: 301, targetSourcePageId: 'sample', capturedBehavior: 'team_fallback' })
+    input.aliases.push({ aliasKind: 'redirect_prefix', path: '/old/', to: '/a/sample/', status: 301, targetSourcePageId: 'sample', capturedBehavior: 'team_fallback' })
+    const result = await translateSelection(input, null, observations)
+    const operations = represented(result, 'slug:').inventory.operations.filter((op): op is Extract<ImportOperation, { kind: 'alias' }> => op.kind === 'alias' && op.path === '/old/')
+    expect(operations).toHaveLength(2)
+    expect(new Set(operations.map(op => op.operationId)).size).toBe(2)
+  })
+
+  it('contains attributable malformed aliases and previews to their own unit', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    input.aliases[0].status = -1
+    input.previews.push({ sourcePageId: 'sample', path: '/a/sample/missing.png', kind: 'original' })
+    const result = await translateSelection(input, null, observations)
+    expect(unitFor(result, 'slug:').status).toBe('blocked')
+    expect(unitFor(result, 'tree:').status).toBe('representable')
+    expect(result.census.filter(row => row.kind === 'alias' || row.kind === 'preview').filter(row => row.unitId === 'slug:sample').every(row => row.disposition === 'rejected')).toBe(true)
   })
 })

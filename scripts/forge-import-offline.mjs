@@ -8,14 +8,15 @@ import { build } from 'esbuild'
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare'
 import { readD1Migrations } from '@cloudflare/vitest-plugin'
 import { bindPrivateRoot, bindSourceRoot } from '../plugins/unkillable-forge/dist/filesystem.js'
+import { authorizeSources, inspectSources, pinUnits, sourceAccess, createAssertionSigner } from './forge-import-physical.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-let preflightSelection, assignSourcePins, sealInventory, stable
+let preflightSelection, projectTranslation, assignSourcePins, sealInventory, stable
 async function loadTranslator() {
   const result = await build({ entryPoints: [join(root, 'scripts/forge-import-selected.mjs')], bundle: true, write: false, format: 'esm', platform: 'neutral', target: 'es2022', logLevel: 'silent' })
   if (result.outputFiles.length !== 1) fail('bundle_error')
   const module = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].contents).toString('base64')}`)
-  ;({ preflightSelection, assignSourcePins, sealInventory, stable } = module)
+  ;({ preflightSelection, projectTranslation, assignSourcePins, sealInventory, stable } = module)
 }
 const issuer = 'https://team.cloudflareaccess.com'
 const certs = `${issuer}/cdn-cgi/access/certs`
@@ -24,7 +25,6 @@ const publication = { sessionTtlMs: 60000, maxUploadTimeoutMs: 5000, retainMs: 9
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const keyed = (key, value) => createHmac('sha256', Buffer.from(key, 'base64url')).update(stable(value)).digest('hex')
 const fail = code => { throw new Error(code) }
-const encoded = value => Buffer.from(JSON.stringify(value)).toString('base64url')
 
 function argumentsOf(args) {
   const command = args.shift()
@@ -55,15 +55,6 @@ async function readSelection(path) {
   const parent = await bindPrivateRoot(dirname(path), false)
   try { return await privateRead(parent, basename(path)) } finally { await parent.close() }
 }
-function protectedRelative(path) {
-  return typeof path !== 'string' || path.split('/').some(part => !part || part === '.' || part === '..' || part === '.env' || part.startsWith('.env.') || part === '.git' || part === '.ssh') || path.includes('\\') || path.includes('\0')
-}
-function invalidRelative(path) {
-  return typeof path !== 'string' || path.includes('\\') || path.includes('\0') || path.split('/').some(part => !part || part === '.' || part === '..')
-}
-function protectedPath(path) {
-  return typeof path !== 'string' || !path.startsWith('/') || /^\/(?:s|_revisions|api|registry|_derived)(?:\/|$)/.test(path) || path === '/manifest.json' || path === '/asset-owners.json'
-}
 function compatibilityCounts(compatibility) {
   const result = {}
   for (const [group, entries] of Object.entries(compatibility)) {
@@ -71,6 +62,14 @@ function compatibilityCounts(compatibility) {
     for (const entry of entries) result[group][entry.code] = (result[group][entry.code] ?? 0) + 1
   }
   return result
+}
+function warningCounts(warnings) {
+  const counts = {}
+  for (const warning of Array.isArray(warnings) ? warnings : []) {
+    const code = warning?.code === 'unknown_visibility_private' ? warning.code : 'unknown_warning'
+    counts[code] = (counts[code] ?? 0) + 1
+  }
+  return counts
 }
 function accountingCounts(accounting) {
   const counts = {}
@@ -84,17 +83,6 @@ function censusReceipt(state) {
     counts[row.kind][row.disposition] = (counts[row.kind][row.disposition] ?? 0) + 1
   }
   return { counts, digest: keyed(state.receiptKey, state.census) }
-}
-function blockUnit(state, unit, code) {
-  state.units.push({ ...unit, status: 'blocked', pinState: 'blocked', blockers: [...unit.blockers, { code, unitId: unit.unitId }] })
-  state.compatibility.represented = state.compatibility.represented.filter(item => !(item.code === 'publication_unit' && item.unitId === unit.unitId))
-  state.compatibility.unsupported.push({ code, unitId: unit.unitId })
-  for (const row of state.accounting) if (row.unitId === unit.unitId && row.disposition === 'placed') { row.disposition = 'blocked'; row.reason = code }
-  for (const row of state.census) if (row.unitId === unit.unitId && row.disposition === 'represented') row.disposition = 'rejected'
-}
-async function privateWrite(directory, name, value) {
-  const file = await directory.open(name, 'exclusive')
-  try { await file.writeFile(JSON.stringify(value)); await file.sync() } finally { await file.close() }
 }
 function depth(value) {
   if (value === null || typeof value !== 'object') return 0
@@ -110,56 +98,6 @@ function checkEnvelope(selection, cursor, transport) {
       command.files.length > 10000 || command.pages.length > 1000 || command.edges.length > 20000 ||
       !command.pages.some(page => page.disposition !== 'drop') || command.files.some(file => file.size > Math.min(transport.maxUploadBytes, 32 * 1024 * 1024))) fail('budget_exceeded')
   return envelope
-}
-function sameFile(a, b) {
-  return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs
-}
-async function inspectSource(source, relative, protectedIdentities) {
-  let file
-  try { file = await source.open(relative) } catch (error) {
-    if (error.code === 'ENOENT') return { observation: { state: 'absent' } }
-    if (['EACCES', 'EPERM', 'EIO', 'ELOOP', 'ENOTDIR', 'EINVAL'].includes(error.code)) return { observation: { state: 'unreadable' } }
-    if (error.message === 'filesystem_identity_mismatch') return { observation: { state: 'unknown' } }
-    throw error
-  }
-  try {
-    const before = await file.stat({ bigint: true })
-    if (protectedIdentities.has(`${before.dev}:${before.ino}`)) fail('protected_locator')
-    const hash = createHash('sha256'), buffer = Buffer.allocUnsafe(64 * 1024)
-    let offset = 0
-    for (;;) {
-      const { bytesRead } = await file.read(buffer, 0, buffer.length, offset)
-      if (!bytesRead) break
-      hash.update(buffer.subarray(0, bytesRead))
-      offset += bytesRead
-      if (!Number.isSafeInteger(offset)) fail('source_changed')
-    }
-    const after = await file.stat({ bigint: true })
-    if (!sameFile(before, after) || BigInt(offset) !== after.size) return { observation: { state: 'unknown' } }
-    return { observation: { state: 'present', size: offset, sha256: hash.digest('hex') }, identity: after }
-  } catch (error) {
-    if (['EACCES', 'EPERM', 'EIO'].includes(error.code)) return { observation: { state: 'unreadable' } }
-    if (error.message === 'filesystem_identity_mismatch' || error.message === 'source_changed') return { observation: { state: 'unknown' } }
-    throw error
-  } finally { await file.close() }
-}
-async function readPinnedSource(source, relative, observed, identity, cap) {
-  if (!identity || observed.size > cap) fail('source_changed')
-  const file = await source.open(relative)
-  try {
-    const before = await file.stat({ bigint: true })
-    if (!sameFile(identity, before) || before.size !== BigInt(observed.size)) fail('source_changed')
-    const bytes = Buffer.allocUnsafe(observed.size)
-    let offset = 0
-    while (offset < bytes.length) {
-      const part = await file.read(bytes, offset, bytes.length - offset, offset)
-      if (!part.bytesRead) fail('source_changed')
-      offset += part.bytesRead
-    }
-    const after = await file.stat({ bigint: true })
-    if (!sameFile(before, after) || sha(bytes) !== observed.sha256) fail('source_changed')
-    return bytes
-  } finally { await file.close() }
 }
 async function workerBundle() {
   const result = await build({ entryPoints: [join(root, 'adapters/http/manageWorker.ts')], bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022', logLevel: 'silent' })
@@ -219,109 +157,63 @@ async function snapshot(mf) {
   }
   return { rows, buckets }
 }
-async function assertion(state) {
-  const header = encoded({ alg: 'RS256', kid: state.publicKey.kid })
-  const payload = encoded({ iss: issuer, aud: 'manager', sub: 'fixture-admin', exp: Math.floor(Date.now() / 1000) + 3600 })
-  const input = `${header}.${payload}`
-  const key = await webcrypto.subtle.importKey('jwk', state.privateKey, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign'])
-  return `${input}.${Buffer.from(await webcrypto.subtle.sign('RSASSA-PKCS1-v1_5', key, Buffer.from(input))).toString('base64url')}`
-}
-async function prepare(args) {
+export async function prepare(args, access = sourceAccess) {
   // mkdir is exclusive: existing workspaces, even empty ones, are never reused.
   await mkdir(args.workspace, { mode: 0o700 })
   const workspace = await bindPrivateRoot(args.workspace, false)
-  const sources = new Map(), rootPaths = new Map(), observations = {}, identities = new Map(), entries = new Map()
+  const sources = new Map(), rootPaths = new Map()
   try {
+    await loadTranslator()
     const input = JSON.parse(await readSelection(args.selection))
     const preflight = await preflightSelection(input)
     if (preflight.kind === 'fatal') {
       const result = preflight.result
-      const state = { version: 1, preparation: 'fatal', fatal: result.fatal, receiptKey: randomBytes(32).toString('base64url'), accounting: result.accounting, census: result.census, compatibility: result.compatibility }
-      await privateWrite(workspace, 'state.json', state)
+      const state = { version: 1, preparation: 'fatal', fatal: result.fatal, receiptKey: randomBytes(32).toString('base64url'), accounting: result.accounting, census: result.census, compatibility: result.compatibility, warnings: result.warnings }
+      await workspace.replace('state.json', Buffer.from(JSON.stringify(state)))
       process.exitCode = 1
-      return { command: 'prepare', fatal: state.fatal, accounting: accountingCounts(state.accounting), census: censusReceipt(state), compatibility: compatibilityCounts(state.compatibility), units: 0, pinned: 0 }
+      return { command: 'prepare', fatal: state.fatal, accounting: accountingCounts(state.accounting), census: censusReceipt(state), compatibility: compatibilityCounts(state.compatibility), warnings: warningCounts(state.warnings), units: 0, pinned: 0 }
     }
     if (preflight.kind !== 'prepared') fail('invalid_selection')
     for (const [alias, path] of Object.entries(args.roots)) {
       rootPaths.set(alias, await realpath(path))
       sources.set(alias, await bindSourceRoot(path))
     }
-    if (!Array.isArray(input.captureRoots) || input.captureRoots.length !== sources.size || input.captureRoots.some(alias => !sources.has(alias))) fail('invalid_roots')
-    if (!Array.isArray(input.entries)) fail('invalid_selection')
-    const protectedLocators = new Set(), protectedIdentities = new Set()
-    for (const ordinal of preflight.protectedOrdinals) {
-      const entry = input.entries[ordinal]
-      if (!entry?.locator) continue
-      const { root: alias, relative } = entry.locator
-      if (!sources.has(alias) || invalidRelative(relative)) fail('invalid_locator')
-      protectedLocators.add(resolve(rootPaths.get(alias), relative))
-      try {
-        const file = await sources.get(alias).open(relative)
-        try { const info = await file.stat({ bigint: true }); protectedIdentities.add(`${info.dev}:${info.ino}`) } finally { await file.close() }
-      } catch (error) {
-        if (!['ENOENT', 'ENOTDIR', 'EINVAL'].includes(error.code)) throw error
-      }
-    }
-    for (const ordinal of preflight.readOrdinals) {
-      const entry = input.entries[ordinal]
-      if (!entry?.locator || protectedPath(entry.path) || protectedRelative(entry.locator.relative) || !sources.has(entry.locator.root)) fail('invalid_locator')
-      if (protectedLocators.has(resolve(rootPaths.get(entry.locator.root), entry.locator.relative))) fail('protected_locator')
-      const inspected = await inspectSource(sources.get(entry.locator.root), entry.locator.relative, protectedIdentities)
-      observations[entry.path] = inspected.observation
-      if (inspected.identity) identities.set(entry.path, inspected.identity)
-      entries.set(entry.path, entry)
-    }
+    if (preflight.captureRoots.length !== sources.size || preflight.captureRoots.some(alias => !sources.has(alias))) fail('invalid_roots')
+    const authorization = await authorizeSources({ reads: preflight.reads, protectedLocators: preflight.protectedLocators, sources, rootPaths }, access)
+    const { observations, identities } = await inspectSources(preflight.reads, authorization, sources, access)
     const translated = await preflight.finish(observations)
     if (!translated.ledger || !Array.isArray(translated.units) || !Array.isArray(translated.census)) fail('invalid_selection')
-    const limits = input.limits
+    const limits = preflight.limits
     // manage-config.ts validates these positive safe integers and caps depth at 64;
     // its validator is private, so reject unsupported input rather than clamp it.
     if (!limits || ![limits.maxCommandBytes, limits.maxUploadBytes, limits.maxInventoryBytes, limits.maxJsonDepth].every(value => Number.isSafeInteger(value) && value > 0) || limits.maxJsonDepth > 64) fail('unsupported_limits')
     const transport = { maxCommandBytes: limits.maxCommandBytes, commandReadTimeoutMs: 100, maxUploadBytes: limits.maxUploadBytes, maxJsonDepth: limits.maxJsonDepth }
     const keys = await webcrypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify'])
     let manageHost
-    do { manageHost = `manage-${randomBytes(12).toString('hex')}.example.test` } while (manageHost === input.reader?.canonicalHost || input.reader?.aliasHosts?.includes(manageHost))
-    const state = { version: 1, fatal: translated.fatal, reader: input.reader, manageHost, privateKey: await webcrypto.subtle.exportKey('jwk', keys.privateKey), publicKey: { ...await webcrypto.subtle.exportKey('jwk', keys.publicKey), kid: 'fixture', alg: 'RS256', use: 'sig' }, keyring: [{ kid: 'fixture', key: randomBytes(32).toString('base64url') }], receiptKey: randomBytes(32).toString('base64url'), transport, ledger: translated.ledger, compatibility: translated.compatibility, accounting: translated.accounting, census: translated.census, units: [], approvals: [] }
+    do { manageHost = `manage-${randomBytes(12).toString('hex')}.example.test` } while (manageHost === preflight.reader.canonicalHost || preflight.reader.aliasHosts?.includes(manageHost))
+    const state = { version: 1, fatal: translated.fatal, reader: preflight.reader, manageHost, privateKey: await webcrypto.subtle.exportKey('jwk', keys.privateKey), publicKey: { ...await webcrypto.subtle.exportKey('jwk', keys.publicKey), kid: 'fixture', alg: 'RS256', use: 'sig' }, keyring: [{ kid: 'fixture', key: randomBytes(32).toString('base64url') }], receiptKey: randomBytes(32).toString('base64url'), transport, ledger: translated.ledger, units: [], approvals: [] }
     const { mf, runtime: runtimeInfo } = await runtime(args.workspace, state, [])
     try {
       const db = await mf.getD1Database('DB', 'manage')
       for (const migration of await readD1Migrations(join(root, 'migrations'))) for (const sql of migration.queries) await db.prepare(sql).run()
       await db.batch([db.prepare("INSERT INTO instance_meta (singleton, instance_id, contract_version, created_at) VALUES (1, 'test-forge', 1, 1)"), db.prepare("INSERT INTO principals (principal_id, issuer, subject, created_at) VALUES ('pr_aaaaaaaaaaaaaaaaaaaaaaaaaa', ?, 'fixture-admin', 1)").bind(issuer), db.prepare("INSERT INTO role_grants (role_grant_id, principal_id, role, scope_kind, origin, granted_at) VALUES ('rg_aaaaaaaaaaaaaaaaaaaaaaaaaa', 'pr_aaaaaaaaaaaaaaaaaaaaaaaaaa', 'admin', 'installation', 'bootstrap', 1)")])
-      const bucket = await mf.getR2Bucket('FORGE_IMPORT_SOURCE', 'manage'), pins = {}, pinHashes = {}
-      for (const unit of translated.units) {
-        if (state.fatal && unit.status === 'representable') { blockUnit(state, unit, 'fatal_translation'); continue }
-        if (unit.status !== 'representable') { state.units.push(unit); continue }
-        try { checkEnvelope(unit.selection, null, transport) } catch (error) {
-          if (error.message !== 'budget_exceeded') throw error
-          blockUnit(state, unit, 'budget_exceeded')
-          continue
-        }
-        for (const file of unit.inventory.files) {
-          if (Object.hasOwn(pins, file.sourceRef) && pinHashes[file.sourceRef] !== file.sha256) fail('invalid_selection')
-          if (!Object.hasOwn(pins, file.sourceRef)) {
-            const entry = entries.get(file.path), observed = observations[file.path]
-            if (!entry || observed?.state !== 'present') fail('missing_source')
-            const bytes = await readPinnedSource(sources.get(entry.locator.root), entry.locator.relative, observed, identities.get(file.path), Math.min(transport.maxUploadBytes, 32 * 1024 * 1024))
-            const object = await bucket.put(file.sourceRef, bytes)
-            pins[file.sourceRef] = { version: object.version }
-            pinHashes[file.sourceRef] = file.sha256
-          }
-        }
-        const assigned = assignSourcePins(unit, pins)
-        if (!assigned.ok) {
-          if (assigned.code !== 'inventory_budget_exceeded') fail(assigned.code)
-          blockUnit(state, unit, assigned.code)
-          continue
-        }
-        const object = await bucket.put(`inventory/${unit.inventory.inventoryId}.json`, assigned.bytes)
-        const sealed = sealInventory(assigned.unit, { key: object.key, version: object.version }, sha(assigned.bytes))
-        if (!sealed.ok) fail(sealed.code)
-        state.units.push(sealed.unit); state.approvals.push(sealed.approval)
-      }
+      const bucket = await mf.getR2Bucket('FORGE_IMPORT_SOURCE', 'manage')
+      const pinned = translated.fatal
+        ? { units: translated.units, approvals: [], pinFailures: translated.units.filter(unit => unit.status === 'representable').map(unit => ({ unitId: unit.unitId, code: 'fatal_translation' })) }
+        : await pinUnits({ units: translated.units, reads: preflight.reads, observations, identities, sources, bucket, transport, assignSourcePins, sealInventory, validateUnit: unit => checkEnvelope(unit.selection, null, transport) }, access)
+      const projected = projectTranslation(translated, pinned.pinFailures)
+      const byUnit = new Map(pinned.units.map(unit => [unit.unitId, unit]))
+      state.units = projected.units.map(unit => unit.status === 'representable' ? byUnit.get(unit.unitId) : unit)
+      state.approvals = state.units.filter(unit => unit.pinState === 'pinned').map(unit => unit.approval)
+      state.ledger = projected.ledger
+      state.compatibility = projected.compatibility
+      state.accounting = projected.accounting
+      state.census = projected.census
+      state.warnings = projected.warnings
     } finally { await mf.dispose() }
-    await privateWrite(workspace, 'state.json', state)
+    await workspace.replace('state.json', Buffer.from(JSON.stringify(state)))
     if (state.fatal) process.exitCode = 1
-    return { command: 'prepare', fatal: state.fatal, accounting: accountingCounts(state.accounting), census: censusReceipt(state), runtime: runtimeInfo, units: state.units.length, pinned: state.approvals.length, compatibility: compatibilityCounts(state.compatibility), receipt: keyed(state.receiptKey, { units: state.units, compatibility: state.compatibility }) }
+    return { command: 'prepare', fatal: state.fatal, accounting: accountingCounts(state.accounting), census: censusReceipt(state), runtime: runtimeInfo, units: state.units.length, pinned: state.approvals.length, compatibility: compatibilityCounts(state.compatibility), warnings: warningCounts(state.warnings), receipt: keyed(state.receiptKey, { units: state.units, compatibility: state.compatibility }) }
   } finally { await Promise.all([...sources.values()].map(source => source.close())); await workspace.close() }
 }
 async function plan(args) {
@@ -342,7 +234,7 @@ async function plan(args) {
       batches.at(-1).push(unit)
       if (unit.pinState === 'pinned') pinned++
     }
-    const token = await assertion(state)
+    const signAssertion = await createAssertionSigner({ privateKey: state.privateKey, kid: state.publicKey.kid })
     let failure = null
     try {
       for (const batch of batches) {
@@ -352,7 +244,8 @@ async function plan(args) {
         if (beforeDigest === undefined) beforeDigest = keyed(state.receiptKey, await snapshot(mf))
         const shim = await mf.getWorker('shim')
         for (const unit of batch) {
-          if (unit.pinState !== 'pinned') { results.push({ state: 'translation_blocked' }); continue }
+          if (unit.pinState !== 'pinned') { results.push({ state: 'translation_blocked', warnings: {} }); continue }
+          const token = await signAssertion()
           let cursor = null, steps = 0, result
           const seen = new Set()
           do {
@@ -368,7 +261,7 @@ async function plan(args) {
             seen.add(cursor)
           } while (true)
           if (!['ready', 'blocked', 'request_blocked'].includes(result.state)) fail('invalid_result')
-          results.push({ state: result.state, steps, codes: result.state === 'request_blocked' ? [result.code] : (result.issues ?? []).map(issue => issue.code).filter(code => typeof code === 'string' && /^[a-z_]+$/.test(code)), digest: keyed(state.receiptKey, result) })
+          results.push({ state: result.state, steps, codes: result.state === 'request_blocked' ? [result.code] : (result.issues ?? []).map(issue => issue.code).filter(code => typeof code === 'string' && /^[a-z_]+$/.test(code)), warnings: warningCounts(result.warnings), digest: keyed(state.receiptKey, result) })
         }
         if (batch !== batches.at(-1)) { await mf.dispose(); mf = undefined }
       }
@@ -388,13 +281,15 @@ async function plan(args) {
     try { if (mf) await mf.dispose() } finally { await workspace.close() }
   }
 }
-process.umask(0o077)
-try {
-  const args = argumentsOf(process.argv.slice(2))
-  await loadTranslator()
-  console.log(JSON.stringify(await (args.command === 'prepare' ? prepare(args) : plan(args))))
-} catch (error) {
-  const safe = new Set(['invalid_arguments', 'private_file_required', 'private_workspace_required', 'invalid_roots', 'invalid_selection', 'invalid_locator', 'protected_locator', 'unsupported_limits', 'source_changed', 'budget_exceeded', 'bundle_error', 'invalid_pagination', 'missing_source', 'invalid_workspace', 'invalid_continuation', 'invalid_result', 'store_mutation', 'inventory_budget_exceeded', 'native_version_required', 'invalid_inventory_pin', 'unit_not_representable', 'invalid_pins'])
-  console.error(JSON.stringify({ error: safe.has(error?.message) ? error.message : 'offline_operation_failed', ...(process.argv[2] === 'plan' ? { stores: { status: 'unknown', equal: null } } : {}) }))
-  process.exitCode = 1
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.umask(0o077)
+  try {
+    const args = argumentsOf(process.argv.slice(2))
+    if (args.command === 'plan') await loadTranslator()
+    console.log(JSON.stringify(await (args.command === 'prepare' ? prepare(args) : plan(args))))
+  } catch (error) {
+    const safe = new Set(['invalid_arguments', 'private_file_required', 'private_workspace_required', 'invalid_roots', 'invalid_selection', 'invalid_locator', 'protected_locator', 'unsupported_limits', 'source_changed', 'budget_exceeded', 'bundle_error', 'invalid_pagination', 'missing_source', 'invalid_workspace', 'invalid_continuation', 'invalid_result', 'store_mutation', 'inventory_budget_exceeded', 'native_version_required', 'invalid_inventory_pin', 'unit_not_representable', 'invalid_pins'])
+    console.error(JSON.stringify({ error: safe.has(error?.message) ? error.message : 'offline_operation_failed', ...(process.argv[2] === 'plan' ? { stores: { status: 'unknown', equal: null } } : {}) }))
+    process.exitCode = 1
+  }
 }

@@ -28,3 +28,13 @@ export function isValidAliasPath(value: unknown): boolean {
 export function isValidAliasDestination(value: unknown): boolean {
   return safePath(value)
 }
+
+/** Match the same exact/prefix predicate as the indexed Catalogue lookup. */
+export function aliasMatchesPath(kind: 'redirect_exact' | 'redirect_prefix', key: string, path: string): boolean {
+  return kind === 'redirect_exact' ? key === path : path.startsWith(key)
+}
+
+/** A prefix redirect appends the decoded unmatched path, never the query. */
+export function aliasLocation(kind: 'redirect_exact' | 'redirect_prefix', key: string, to: string, path: string): string {
+  return to + (kind === 'redirect_prefix' ? path.slice(key.length) : '')
+}

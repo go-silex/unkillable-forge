@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import worker from "../../adapters/http/manageWorker"
-import { assignSourcePins, sealInventory, preflightSelection, type Observation, type RepresentableUnit } from "../../scripts/forge-import-selected.mjs"
+import type { ImportOperation } from "../../domains/catalogue/import"
+import { assignSourcePins, sealInventory, preflightSelection, projectTranslation, type Observation, type RepresentableUnit } from "../../scripts/forge-import-selected.mjs"
 import { makeSelectedFixture, type SyntheticInput } from "./fixtures/import-selected.mjs"
 import { env, request, setupHttp, signed } from "./fixtures/manage-http"
 import { manageHttpBindings } from "./fixtures/manage-http-bindings"
@@ -28,7 +29,9 @@ async function fixture(includeMissing = false, mutate?: (selected: { input: Synt
   mutate?.(selected)
   const preflight = await preflightSelection(selected.input)
   if (preflight.kind !== "prepared") throw new Error("fixture selector failed preflight")
-  const translated = await preflight.finish(selected.observations)
+  const observations: Record<string, Observation> = {}
+  for (const read of preflight.reads) observations[read.path] = selected.observations[read.path]
+  const translated = projectTranslation(await preflight.finish(observations))
   const approvals = []
   const units: RepresentableUnit[] = []
   const sourcePins: Record<string, { version: string }> = {}
@@ -53,8 +56,8 @@ async function fixture(includeMissing = false, mutate?: (selected: { input: Synt
     units.push(sealed.unit)
   }
   const bindings = { ...manageHttpBindings, FORGE_MANAGE_TRANSPORT: JSON.stringify({ ...JSON.parse(manageHttpBindings.FORGE_MANAGE_TRANSPORT), ...selected.input.limits, maxInventoryBytes: undefined }), FORGE_IMPORT_SOURCE: env.FORGE_IMPORT_SOURCE, FORGE_IMPORT_INVENTORIES: JSON.stringify(approvals), DB: env.DB, REVISION_BYTES: env.REVISION_BYTES }
-  const jwt = await signed()
   async function plan(unit: (typeof units)[number]) {
+    const jwt = await signed()
     let cursor: string | null = null
     let checks = 0
     for (let i = 0; i < 128; i++) {
@@ -67,7 +70,7 @@ async function fixture(includeMissing = false, mutate?: (selected: { input: Synt
       expect(depth(begin)).toBeLessThanOrEqual(selected.input.limits.maxJsonDepth)
       const response = await worker.fetch(request("/api/maintenance/import", "POST", jwt, JSON.stringify(body), { "Content-Type": "application/json" }), bindings)
       expect(response.status).toBe(200)
-      const envelope = await response.json() as { ok: boolean; result: { state: string; nextCursor?: string; issues?: unknown[] } }
+      const envelope = await response.json() as { ok: boolean; result: { state: string; nextCursor?: string; issues?: unknown[]; warnings?: { code: string }[] } }
       expect(envelope.ok).toBe(true)
       if (envelope.result.state !== "checking") return { result: envelope.result, checks }
       checks++
@@ -177,6 +180,125 @@ describe("selected fixture through native import admission", () => {
     expect(slug.inventory.operations).toContainEqual(expect.objectContaining({ kind: "preview_selection", path }))
     const before = await snapshot()
     expect((await plan(slug)).result.state).toBe("ready")
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it("preserves distinct exact and prefix alias identities through native admission", async () => {
+    const { units, plan } = await fixture(false, selected => {
+      for (const aliasKind of ["redirect_exact", "redirect_prefix"] as const) {
+        selected.input.aliases.push({ aliasKind, path: "/legacy/", to: "/a/sample/", status: 301, targetSourcePageId: "sample", capturedBehavior: "team_fallback" })
+      }
+    })
+    const slug = units.find(unit => unit.sourceArtifactId === "slug:sample")
+    if (!slug) throw new Error("slug unit missing")
+    const aliases = slug.inventory.operations.filter((op): op is Extract<ImportOperation, { kind: "alias" }> => op.kind === "alias" && op.path === "/legacy/")
+    expect(aliases).toHaveLength(2)
+    expect(new Set(aliases.map(alias => alias.operationId)).size).toBe(2)
+    const before = await snapshot()
+    expect((await plan(slug)).result.state).toBe("ready")
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it("does not count a recognized consumer as represented when its selected artifact is incomplete", async () => {
+    const { translated, units, plan } = await fixture(false, selected => {
+      selected.input.consumerUrls.push({ url: "https://forge.example.test/s/sample/?k=syntheticSlugKey", purpose: "share", targetSourcePageId: "sample", mappingRef: null })
+      selected.observations["/a/sample/nested/index.html"] = { state: "absent" }
+    })
+    expect(translated.census).toContainEqual(expect.objectContaining({ kind: "consumerUrl", ordinal: 0, disposition: "rejected" }))
+    expect(translated.compatibility.represented).not.toContainEqual(expect.objectContaining({ code: "consumer_url_represented", unitId: "slug:sample" }))
+    const tree = units.find(unit => unit.sourceArtifactId === "tree:synthetic")
+    if (!tree) throw new Error("independent tree unit missing")
+    const before = await snapshot()
+    expect((await plan(tree)).result.state).toBe("ready")
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it("requires the selected card image to be owned by its actual page", async () => {
+    const path = "/tree/two.og.png"
+    const { translated, units, plan } = await fixture(false, selected => {
+      const original = selected.input.entries.find(entry => entry.path === "/tree/preview.png")
+      if (!original) throw new Error("original PNG missing")
+      selected.input.entries.push({ ...original, path, locator: { root: "capture", relative: path.slice(1) } })
+      selected.observations[path] = selected.observations[original.path]
+      selected.files[path] = selected.files[original.path]
+      selected.input.owners.push({ path, ownerSourcePageId: "tree/one.html", evidenceRef: "synthetic-edge-evidence", basis: "declared" })
+      selected.input.consumerUrls.push({ url: "https://forge.example.test/s/tree/two.og.png/syntheticTreeKey/", purpose: "card", targetSourcePageId: "tree/two.html", mappingRef: null })
+    })
+    expect(translated.census).toContainEqual(expect.objectContaining({ kind: "consumerUrl", ordinal: 0, disposition: "rejected" }))
+    expect(translated.compatibility.represented).not.toContainEqual(expect.objectContaining({ code: "consumer_url_represented", unitId: "tree:synthetic" }))
+    const slug = units.find(unit => unit.sourceArtifactId === "slug:sample")
+    if (!slug) throw new Error("independent slug unit missing")
+    const before = await snapshot()
+    expect((await plan(slug)).result.state).toBe("ready")
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it("recognizes the selected page's winning original card without claiming HTTP proof", async () => {
+    const path = "/tree/two.og.png"
+    const { translated, units, plan } = await fixture(false, selected => {
+      const original = selected.input.entries.find(entry => entry.path === "/tree/preview.png")
+      if (!original) throw new Error("original PNG missing")
+      selected.input.entries.push({ ...original, path, locator: { root: "capture", relative: path.slice(1) } })
+      selected.observations[path] = selected.observations[original.path]
+      selected.files[path] = selected.files[original.path]
+      selected.input.owners.push({ path, ownerSourcePageId: "tree/two.html", evidenceRef: "synthetic-edge-evidence", basis: "declared" })
+      selected.input.previews.push({ sourcePageId: "tree/two.html", path, kind: "original" })
+      selected.input.consumerUrls.push({ url: "https://forge.example.test/s/tree/two.og.png/syntheticTreeKey/", purpose: "card", targetSourcePageId: "tree/two.html", mappingRef: null })
+    })
+    expect(translated.census).toContainEqual(expect.objectContaining({ kind: "consumerUrl", ordinal: 0, disposition: "represented" }))
+    const tree = units.find(unit => unit.sourceArtifactId === "tree:synthetic")
+    if (!tree) throw new Error("tree unit missing")
+    const before = await snapshot()
+    expect((await plan(tree)).result.state).toBe("ready")
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it("rejects an owned card candidate displaced by the selected original", async () => {
+    const { translated, units, plan } = await fixture(false, selected => {
+      const original = selected.input.entries.find(entry => entry.path === "/tree/preview.png")
+      if (!original) throw new Error("original PNG missing")
+      for (const path of ["/tree/two.og.png", "/tree/alternate.png"]) {
+        selected.input.entries.push({ ...original, path, locator: { root: "capture", relative: path.slice(1) } })
+        selected.observations[path] = selected.observations[original.path]
+        selected.files[path] = selected.files[original.path]
+        selected.input.owners.push({ path, ownerSourcePageId: "tree/two.html", evidenceRef: "synthetic-edge-evidence", basis: "declared" })
+      }
+      selected.input.previews.push({ sourcePageId: "tree/two.html", path: "/tree/alternate.png", kind: "original" })
+      selected.input.consumerUrls.push({ url: "https://forge.example.test/s/tree/two.og.png/syntheticTreeKey/", purpose: "card", targetSourcePageId: "tree/two.html", mappingRef: null })
+    })
+    expect(translated.census).toContainEqual(expect.objectContaining({ kind: "consumerUrl", ordinal: 0, disposition: "rejected" }))
+    const slug = units.find(unit => unit.sourceArtifactId === "slug:sample")
+    if (!slug) throw new Error("independent slug unit missing")
+    const before = await snapshot()
+    expect((await plan(slug)).result.state).toBe("ready")
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it("projects a late pin failure consistently without demoting an independent unit", async () => {
+    const { translated, units, plan } = await fixture(false, selected => {
+      selected.input.consumerUrls.push({ url: "https://forge.example.test/s/sample/?k=syntheticSlugKey", purpose: "share", targetSourcePageId: "sample", mappingRef: null })
+    })
+    const projected = projectTranslation(translated, [{ unitId: "slug:sample", code: "inventory_budget_exceeded" }])
+    expect(projected.units.find(unit => unit.unitId === "slug:sample")?.status).toBe("blocked")
+    expect(projected.census).toContainEqual(expect.objectContaining({ kind: "consumerUrl", ordinal: 0, disposition: "rejected" }))
+    expect(projected.compatibility.represented.some(issue => issue.unitId === "slug:sample")).toBe(false)
+    const tree = units.find(unit => unit.sourceArtifactId === "tree:synthetic")
+    if (!tree) throw new Error("independent tree unit missing")
+    const before = await snapshot()
+    expect((await plan(tree)).result.state).toBe("ready")
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it("retains the native warning for an observed unknown visibility value", async () => {
+    const { units, plan } = await fixture(false, selected => {
+      selected.input.pages.find(page => page.sourcePageId === "tree/one.html")!.visibility = { state: "present", value: "synthetic-unrecognized", metadataV: null, expiresAt: null }
+    })
+    const tree = units.find(unit => unit.sourceArtifactId === "tree:synthetic")
+    if (!tree) throw new Error("tree unit missing")
+    const before = await snapshot()
+    const result = await plan(tree)
+    expect(result.result.state).toBe("ready")
+    expect(result.result.warnings).toContainEqual(expect.objectContaining({ code: "unknown_visibility_private" }))
     expect(await snapshot()).toEqual(before)
   })
 })

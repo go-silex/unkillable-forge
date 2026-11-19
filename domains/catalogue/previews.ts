@@ -52,6 +52,18 @@ export function importPreviewStatements(db: D1Database, pageId: string, artifact
 }
 
 
+/** Original-image fallback order used by preview resolution. */
+export function orderedOriginalImageCandidatePaths(route: SubtreeOrTree): readonly string[] {
+  const base = route.kind === 'subtree'
+    ? `/a/${route.slug}/og`
+    : `/${route.pageRef.slice(0, -5)}.og`
+  const indexBase = route.kind === 'tree_page' && (route.pageRef === 'index.html' || route.pageRef.endsWith('/index.html'))
+    ? `/${route.pageRef.slice(0, -'index.html'.length)}og`
+    : null
+  return [indexBase, base].filter((value): value is string => value !== null)
+    .flatMap(value => ['jpg', 'jpeg', 'png'].map(extension => `${value}.${extension}`))
+}
+
 /** Resolve the document first; image selection is never an admission credential. */
 export async function resolvePagePreview(db: D1Database, config: ReadInstanceConfig, input: PreviewRequest): Promise<SharedPreviewPlan | null> {
   const shared = input.credentials.shareKey !== null
@@ -64,14 +76,7 @@ export async function resolvePagePreview(db: D1Database, config: ReadInstanceCon
   const { pageId, grantId, policyEpoch, basis } = plan.authority
   if (!pageId || policyEpoch === null || !['team', 'public', 'share_key', 'share_cookie'].includes(basis)) return null
   if ((basis === 'share_key' || basis === 'share_cookie') && !grantId) return null
-  const base = input.route.kind === 'subtree'
-    ? `/a/${input.route.slug}/og`
-    : `/${input.route.pageRef.slice(0, -5)}.og`
-  const indexBase = input.route.kind === 'tree_page' && (input.route.pageRef === 'index.html' || input.route.pageRef.endsWith('/index.html'))
-    ? `/${input.route.pageRef.slice(0, -'index.html'.length)}og`
-    : null
-  const imagePaths = [indexBase, base].filter((value): value is string => value !== null)
-    .flatMap(value => ['jpg', 'jpeg', 'png'].map(extension => `${value}.${extension}`))
+  const imagePaths = orderedOriginalImageCandidatePaths(input.route)
   const row = await db.prepare(`SELECT rp.metadata_json, rr.path AS original_path, rr.sha256 AS original_sha256,
       rr.size AS original_size, rr.content_type AS original_content_type, rr.object_key AS original_object_key,
       rr.object_version AS original_object_version, s.recipe_sha256, s.input_sha256, s.content_sha256, s.extension,

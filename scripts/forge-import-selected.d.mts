@@ -4,17 +4,16 @@ import type { BeginCommand } from '../domains/publication/types'
 export const SELECTED_IMPORT_SCHEMA: 1
 export function stable(value: unknown): string
 export interface Ledger {
-  version: 1
+  version: 2
   pages: Record<string, string>
   grants: Record<string, string>
-  sourceArtifacts: Record<string, string>
   idempotencyKeys: Record<string, string>
   inventoryIds: Record<string, string>
   selectionIds: Record<string, string>
   planIds: Record<string, string>
   operationIds: Record<string, string>
 }
-export interface Issue { code: string; path?: string; sourcePageId?: string; unitId?: string; budget?: Budget }
+export interface Issue { code: string; path?: string; sourcePageId?: string; unitId?: string; basis?: string; budget?: Budget }
 export interface Budget {
   files: number; pages: number; edges: number; largestFile: number
   commandBytes: number; envelopeBytes: number; inventoryBytes: number; failed: string[]
@@ -44,10 +43,11 @@ export type Unit = RepresentableUnit | BlockedUnit
 export interface Translation {
   ok: boolean; fatal: string | null; schema: 1; ledger: Ledger
   accounting: { path: string; disposition: string; unitId: string | null; reason: string }[]
-  census: { kind: string; ordinal: number; unitId: string | null; disposition: 'represented' | 'excluded' | 'rejected' }[]
+  census: { kind: string; ordinal: number; unitId: string | null; affectedUnitIds: string[]; disposition: 'represented' | 'excluded' | 'rejected' }[]
   units: Unit[]
   compatibility: { represented: Issue[]; unsupported: Issue[]; notObserved: Issue[] }
   warnings: Issue[]
+  facts?: unknown[]
 }
 export type Observation =
   | { state: 'present'; size: number; sha256: string }
@@ -55,8 +55,9 @@ export type Observation =
 export function emptyLedger(): Ledger
 export function preflightSelection(input: unknown, ledger?: unknown): Promise<
   | { kind: 'fatal'; result: Translation }
-  | { kind: 'prepared'; readOrdinals: number[]; protectedOrdinals: number[]; finish(observations?: unknown): Promise<Translation> }
+  | { kind: 'prepared'; reads: { ordinal: number; path: string; locator: { root: string; relative: string }; expected: { size: number; sha256: string } }[]; protectedLocators: { ordinal: number; locator: { root: string; relative: string } }[]; reader: unknown; limits: unknown; captureRoots: string[]; finish(observations?: unknown): Promise<Translation> }
 >
+export function projectTranslation(translation: Translation, pinFailures?: { unitId: string; code: string }[]): Translation
 export function assignSourcePins(unit: Unit, pins: unknown):
   | { ok: false; code: string; path?: string }
   | { ok: true; unit: RepresentableUnit; bytes: Uint8Array }

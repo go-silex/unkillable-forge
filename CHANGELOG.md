@@ -12,12 +12,13 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 ### Added
 
 - Add a selected-input offline preparation and dry-run adapter using isolated
-  local storage and the authenticated manage Worker. Selector preflight and
-  record census preserve artifact membership and block incomplete units;
-  independent units remain eligible. Native readiness, literal link preservation
-  and evidenced grant association are distinct from consumer HTTP proof.
-  This does not authorize historical execution, publication, provider access
-  or cutover.
+  local storage and the authenticated manage Worker. A single selector snapshot
+  and complete physical metadata authorization precede content reads; per-unit
+  failures preserve independent sealed outcomes in one private checkpoint.
+  Record census and artifact membership remain distinct from native readiness.
+  Literal links and evidenced grant association do not prove consumer HTTP
+  access. This does not authorize historical execution, publication, provider
+  access or cutover.
 
 - F10 adds an administrator-only selected-import endpoint using a protected,
   operator-approved inventory and pinned source versions, sizes and hashes.
