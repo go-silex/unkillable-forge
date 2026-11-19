@@ -11,6 +11,11 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 
 ### Added
 
+- Add a selected-input offline preparation and dry-run adapter using isolated
+  local storage and the authenticated manage Worker. Native readiness and
+  compatibility blockers remain separate; this does not authorize historical
+  execution, publication, provider access or cutover.
+
 - F10 adds an administrator-only selected-import endpoint using a protected,
   operator-approved inventory and pinned source versions, sizes and hashes.
   Bounded dry-run readiness is an observation, not an atomic live-source
@@ -19,9 +24,10 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
   actor-bound continuation; retained graph and original preview evidence are
   preserved or explicitly refused. The shared activation guard also rechecks
   current external resource-provider mounts. Finite legacy visibility or share
-  expiry is explicitly blocked because the target cannot preserve it. G1b
-  historical import remains unauthorized; this adds no recovery system, GC
-  scheduler, production migration or historical-fidelity proof. See
+  expiry is explicitly blocked because the target cannot preserve it. G1b was
+  lifted only for the verified capped ownership graph; historical execution
+  remains separately unauthorized. This adds no recovery system, GC scheduler,
+  production migration or historical-fidelity proof. See
   `docs/forge-manage-http.md`.
 
 - F09 source adds authorized preview/card delivery, immutable derived OG bytes,

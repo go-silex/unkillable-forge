@@ -33,6 +33,47 @@ Typical flow: `begin` → upload client files and `materialize` each retained ba
 POST requires `Content-Type: application/json`, optionally `charset=utf-8`. PUT requires `application/octet-stream` without parameters; the resource's content type comes from its manifest, not this header. Content-Encoding must be absent or `identity`. A missing PUT body means zero bytes; a nonzero declared Content-Length with no body is invalid. JSON requires a body.
 
 ## Selected import
+### Local selected-input planner
+
+The offline adapter has two commands and no apply mode:
+
+```sh
+node scripts/forge-import-offline.mjs prepare --selection /private/selection.json --workspace /private/new-workspace --capture-root capture=/private/capture
+node scripts/forge-import-offline.mjs plan --workspace /private/new-workspace
+```
+
+`prepare` requires a new workspace path and one `--capture-root alias=/absolute/directory`
+per declared root; the option may be repeated. `plan` accepts only the workspace:
+it cannot replace the selection or capture roots. Unknown flags are rejected.
+The selection is a private JSON document, not a discovery request. Its version 1
+schema includes instance/evidence identifiers, declared transport and inventory
+limits, route/share grammars, capture-root aliases, explicit entries, pages,
+owners, aliases, shortlinks, previews, consumer URLs, exclusions and provider
+mounts. See the synthetic [selection fixture](../tests/engine/fixtures/import-selected.mjs)
+and [translator](../scripts/forge-import-selected.mjs) for exact required fields.
+Every entry has a logical path, classification, content type, provenance,
+`locator: { root, relative }`, and an `expected` fingerprint. Content requires
+`{ size, sha256 }`; shell, excluded and unresolved entries may use `null`.
+Reserved non-content paths still require explicit exclusion evidence and are
+not opened. The root is an alias supplied on the command line; the path is
+relative to that root. Actual content bytes are independently observed and
+compared with both expected fields. Missing, unreadable, mismatched, protected
+or escaping paths are not substituted.
+Treat the selection, workspace and its capture evidence as sensitive: share keys,
+destinations and protected inventories can be present there.
+
+Preparation creates isolated local D1 and R2 state, a synthetic administrator and
+signing material, then pins native object versions and a separately approved
+inventory. Planning reopens those pins, authenticates to the actual manage Worker
+and consumes its bounded dry-run continuations. It does not apply, publish,
+discover providers, use a host provider transport or claim operating-system
+network isolation. The nonsecret receipt reports compatibility separately from
+each native `ready` or `blocked` outcome, and compares logical database contents
+and both bucket inventories before and after. A ready unit does not resolve an
+`or1_missing_document` blocker in another selection, activate a provider, or
+establish whole-corpus historical fidelity or F10 acceptance. Historical
+execution requires separate current authority and approved evidence.
+
 
 `POST /api/maintenance/import` is a separate, administrator-only interface for
 an operator-approved selection, not an arbitrary source or SQL API. It accepts
@@ -63,8 +104,8 @@ shortlink and original-preview observations. The inventory and its exact
 Publication command must describe the same selection. Protect it with its
 private source objects, then pin its own R2 object key, version and SHA-256 in
 the operator configuration above. Approval and evidence references are not
-proof by themselves: historical ownership, key and destination provenance
-must actually be established, and G1b remains unresolved.
+proof by themselves: historical key and destination provenance must actually
+be established. G1b was lifted only for the verified capped ownership graph.
 
 For an existing target, include the complete retained base graph: kept pages,
 their resources and ownership edges. Omitting a base resource or edge does not
@@ -135,8 +176,8 @@ new write batch may start after expiry. A D1 write already submitted cannot be
 cancelled and may settle after the deadline; its outcome is awaited.
 Finite visibility or shared-key expiries are explicitly blocked as
 `expiring_policy_unsupported`: the current target policy cannot preserve
-their expiry without extending access. Historical import remains unauthorized
-while G1b ownership evidence and approval are unresolved. This interface adds
+their expiry without extending access. Historical execution remains unauthorized
+without separately approved selection, protected inputs and target basis. This interface adds
 no backup/recovery system, collection scheduler, production migration or
 historical-fidelity claim.
 
