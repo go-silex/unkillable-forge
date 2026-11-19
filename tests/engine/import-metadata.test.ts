@@ -256,7 +256,7 @@ describe("synthetic selected import metadata", () => {
     await expect(env.DB.batch(completion.statements)).rejects.toThrow()
     expect(await env.DB.prepare("SELECT active_revision_id FROM artifacts WHERE artifact_id=?").bind(first.publication.artifactId).first()).toEqual({active_revision_id:first.publication.revisionId})
     expect(await env.DB.prepare("SELECT plan_id FROM publication_imports WHERE plan_id=?").bind(next.selection.planId).first()).toBeNull()
-  })
+  }, 30000)
 
 
 

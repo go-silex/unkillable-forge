@@ -49,7 +49,8 @@ function argumentsOf(args) {
 }
 async function privateRead(directory, name) {
   const file = await directory.open(name, 'read')
-  try { return await file.readFile('utf8') } finally { await file.close() }
+  // Preserve a leading BOM for JSON.parse to reject, as with Buffer's UTF-8 decoding.
+  try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(await file.readFile()) } finally { await file.close() }
 }
 async function readSelection(path) {
   const parent = await bindPrivateRoot(dirname(path), false)
@@ -198,10 +199,7 @@ export async function prepare(args, access = sourceAccess) {
       for (const migration of await readD1Migrations(join(root, 'migrations'))) for (const sql of migration.queries) await db.prepare(sql).run()
       await db.batch([db.prepare("INSERT INTO instance_meta (singleton, instance_id, contract_version, created_at) VALUES (1, 'test-forge', 1, 1)"), db.prepare("INSERT INTO principals (principal_id, issuer, subject, created_at) VALUES ('pr_aaaaaaaaaaaaaaaaaaaaaaaaaa', ?, 'fixture-admin', 1)").bind(issuer), db.prepare("INSERT INTO role_grants (role_grant_id, principal_id, role, scope_kind, origin, granted_at) VALUES ('rg_aaaaaaaaaaaaaaaaaaaaaaaaaa', 'pr_aaaaaaaaaaaaaaaaaaaaaaaaaa', 'admin', 'installation', 'bootstrap', 1)")])
       const bucket = await mf.getR2Bucket('FORGE_IMPORT_SOURCE', 'manage')
-      if (translated.fatal && translated.units.some(unit => unit.status === 'representable')) fail('invalid_selection')
-      const pinned = translated.fatal
-        ? { units: translated.units, approvals: [], pinFailures: [] }
-        : await pinUnits({ units: translated.units, reads: preflight.reads, observations, identities, sources, bucket, transport, assignSourcePins, sealInventory, validateUnit: unit => checkEnvelope(unit.selection, null, transport) }, access)
+      const pinned = await pinUnits({ units: translated.units, reads: preflight.reads, observations, identities, sources, bucket, transport, assignSourcePins, sealInventory, validateUnit: unit => checkEnvelope(unit.selection, null, transport) }, access)
       const projected = projectTranslation(translated, pinned.pinFailures)
       const byUnit = new Map(pinned.units.map(unit => [unit.unitId, unit]))
       state.units = projected.units.map(unit => unit.status === 'representable' ? byUnit.get(unit.unitId) : unit)

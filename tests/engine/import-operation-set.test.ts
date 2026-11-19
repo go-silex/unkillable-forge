@@ -6,6 +6,7 @@ import { shortlinkDestinationDigest } from "../../domains/catalogue/shortlinks"
 import { importResult, syntheticImport } from "./fixtures/import"
 import { content } from "./fixtures/publication"
 import { env, request, setupHttp, signed } from "./fixtures/manage-http"
+import { pageFixture } from "./fixtures/catalogue"
 
 setupHttp()
 
@@ -57,7 +58,90 @@ async function nativeOutcome(bindings: Record<string, unknown>, selection: Impor
   throw new Error("native dry run did not complete")
 }
 
+async function snapshot() {
+  const tables = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name").all<{ name: string }>()
+  const rows = await Promise.all(tables.results.map(async ({ name }) => [name, (await env.DB.prepare(`SELECT * FROM "${name.replace(/"/g, '""')}"`).all()).results]))
+  async function objects(bucket: R2Bucket) {
+    const items: { key: string; version: string; size: number }[] = []
+    let cursor: string | undefined
+    do {
+      const page = await bucket.list({ cursor })
+      items.push(...page.objects.map(({ key, version, size }) => ({ key, version, size })))
+      cursor = page.truncated ? page.cursor : undefined
+    } while (cursor)
+    return items
+  }
+  return { rows, source: await objects(env.FORGE_IMPORT_SOURCE), target: await objects(env.REVISION_BYTES) }
+}
+
+async function checkedPlan(f: { seed: { approval: Record<string, unknown>; bindings: Record<string, unknown> }; inventory: ApprovedImportInventory; selection: ImportSelection }, operations: ImportOperation[]) {
+  const encoded = JSON.stringify({ ...f.inventory, operations })
+  const object = await env.FORGE_IMPORT_SOURCE.put(`synthetic/set-${crypto.randomUUID()}.json`, encoded)
+  if (!object) throw new Error("inventory upload failed")
+  const approval = { ...f.seed.approval, objectKey: object.key, objectVersion: object.version, sha256: (await content(encoded)).sha256 }
+  const bindings = { ...f.seed.bindings, FORGE_IMPORT_INVENTORIES: JSON.stringify([approval]) }
+  const before = await snapshot()
+  const result = await nativeOutcome(bindings, f.selection)
+  expect(await snapshot()).toEqual(before)
+  return result
+}
+
+function sharedOperations(f: Awaited<ReturnType<typeof fixture>>, policyGrant: string, mappingGrant: string): ImportOperation[] {
+  const policies = f.inventory.operations.map(op => op.kind === "page_policy" && op.policy.pageId === f.seed.pageId
+    ? { ...op, policy: { ...op.policy, grantId: policyGrant, visibility: { captured: true as const, value: "shared" as const, metadataV: "shared", expiresAt: null }, share: { captured: true as const, key: "synthetic-original-key", expiresAt: null } } }
+    : op)
+  return [{ kind: "shortlink", operationId: "synthetic-link", mapping: { ...f.mapping, grantId: mappingGrant } }, ...policies]
+}
+
+async function existingTarget(f: Awaited<ReturnType<typeof fixture>>) {
+  const artifact = newId("ar"), revision = newId("rv")
+  await pageFixture({ artifact, revision, page: f.seed.pageId, route: { kind: "subtree", slug: "synthetic-import" } })
+  const command = { ...f.selection.command, artifactId: artifact, expectedRevisionId: revision, expectedContentVersion: 0, pages: f.selection.command.pages.map(page => page.pageId === f.seed.pageId ? { ...page, disposition: "keep" as const, expectedPolicyEpoch: 0 } : page) }
+  return { ...f, selection: { ...f.selection, command }, inventory: { ...f.inventory, command } }
+}
+
+async function historicalGrant(page: string) {
+  const grant = newId("gr")
+  await env.DB.prepare("INSERT INTO share_grants (grant_id,page_id,key_kid,key_hmac,mode,origin,created_at,revoked_at,revoked_reason) VALUES (?,?,'test',?,'follow_active','imported',1,2,'revoked')").bind(grant, page, "a".repeat(64)).run()
+  return grant
+}
+
+function existingPolicyEpoch(operations: ImportOperation[], page: string): ImportOperation[] {
+  return operations.map(op => op.kind === "page_policy" && op.policy.pageId === page ? { ...op, policy: { ...op.policy, expectedPolicyEpoch: 0 } } : op)
+}
+
 describe("native import operation set", () => {
+  it("requires a shortlink grant to resolve to its own page across the complete proposed set", async () => {
+    const f = await fixture()
+    const proposed = newId("gr")
+    const missing = newId("gr")
+    const blocked = await checkedPlan(f, sharedOperations(f, proposed, missing))
+    expect(blocked.state).toBe("blocked")
+    expect(blocked.issues).toContainEqual({ code: "grant_conflict", pageId: f.seed.pageId })
+    const operations = sharedOperations(f, proposed, proposed)
+    const aliases: ImportOperation[] = Array.from({ length: 128 }, (_, i) => ({ kind: "alias", operationId: `grant-gap-${i}`, aliasKind: "redirect_exact", path: `/grant-gap-${i}`, to: "/new", status: 301, targetPageId: null }))
+    expect((await checkedPlan(f, [operations[0], ...aliases, ...operations.slice(1)])).state).toBe("ready")
+    expect((await checkedPlan(f, [{ kind: "shortlink", operationId: "null-link", mapping: f.mapping }, ...f.inventory.operations])).state).toBe("ready")
+  })
+
+  it("rejects a shortlink grant belonging to a different existing page", async () => {
+    const existingPage = newId("pg")
+    await pageFixture({ artifact: newId("ar"), revision: newId("rv"), page: existingPage, route: { kind: "subtree", slug: "existing-grant" } })
+    const existingGrant = await historicalGrant(existingPage)
+    const f = await existingTarget(await fixture())
+    const operations = existingPolicyEpoch([{ kind: "shortlink", operationId: "synthetic-link", mapping: { ...f.mapping, grantId: existingGrant } }, ...f.inventory.operations], f.seed.pageId)
+    const result = await checkedPlan(f, operations)
+    expect(result.state).toBe("blocked")
+    expect(result.issues).toContainEqual({ code: "grant_conflict", pageId: f.seed.pageId })
+  })
+
+  it("accepts an existing revoked same-page grant without a producing policy", async () => {
+    const f = await existingTarget(await fixture())
+    const existingGrant = await historicalGrant(f.seed.pageId)
+    const operations = existingPolicyEpoch([{ kind: "shortlink", operationId: "synthetic-link", mapping: { ...f.mapping, grantId: existingGrant } }, ...f.inventory.operations], f.seed.pageId)
+    expect((await checkedPlan(f, operations)).state).toBe("ready")
+  })
+
   it("accepts independent claims without publishing", async () => {
     const f = await fixture()
     const before = await env.DB.prepare("SELECT count(*) AS n FROM publication_sessions").first()

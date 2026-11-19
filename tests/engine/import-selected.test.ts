@@ -201,6 +201,47 @@ describe("selected fixture through native import admission", () => {
     expect(await snapshot()).toEqual(before)
   })
 
+  it("requires the exact share key at a team alias destination", async () => {
+    for (const [key, disposition] of [["wrongSyntheticKey", "rejected"], ["syntheticSlugKey", "represented"]] as const) {
+      const { translated, units, plan } = await fixture(false, selected => {
+        selected.input.aliases[0].to = `/s/sample/${key}/`
+        selected.input.consumerUrls.push({ url: "https://forge.example.test/legacy-sample", purpose: "alias", targetSourcePageId: "sample", mappingRef: null })
+      })
+      expect(translated.census).toContainEqual(expect.objectContaining({ kind: "consumerUrl", ordinal: 0, disposition }))
+      const unit = units.find(value => value.sourceArtifactId === (disposition === "represented" ? "slug:sample" : "tree:synthetic"))
+      if (!unit) throw new Error("independent representable unit missing")
+      const before = await snapshot()
+      expect((await plan(unit)).result.state).toBe("ready")
+      expect(await snapshot()).toEqual(before)
+    }
+  })
+
+  it("does not let an excluded census name shadow an alias, but honors a real fragment", async () => {
+    for (const primary of [false, true]) {
+      const { translated, units, plan } = await fixture(false, selected => {
+        const path = "/legacy-sample.html"
+        if (primary) {
+          const original = selected.input.entries.find(entry => entry.path === "/tree/fragment.html")
+          if (!original) throw new Error("fragment missing")
+          selected.input.entries.push({ ...original, path, locator: { root: "capture", relative: path.slice(1) } })
+          selected.observations[path] = selected.observations[original.path]
+          selected.files[path] = selected.files[original.path]
+          selected.input.owners.push({ path, ownerSourcePageId: "tree/one.html", evidenceRef: "synthetic-edge-evidence", basis: "declared" })
+        } else {
+          selected.input.entries.push({ path, graphClass: "excluded", contentType: null, locator: { root: "capture", relative: path.slice(1) }, provenance: "synthetic-exclusion", expected: null, placement: null })
+          selected.input.exclusions.push({ path, evidenceRef: "synthetic-exclusion", reason: "engine" })
+        }
+        selected.input.consumerUrls.push({ url: "https://forge.example.test/legacy-sample", purpose: "alias", targetSourcePageId: "sample", mappingRef: null })
+      })
+      expect(translated.census).toContainEqual(expect.objectContaining({ kind: "consumerUrl", ordinal: 0, disposition: primary ? "rejected" : "represented" }))
+      const unit = units.find(value => value.sourceArtifactId === (primary ? "tree:synthetic" : "slug:sample"))
+      if (!unit) throw new Error("independent representable unit missing")
+      const before = await snapshot()
+      expect((await plan(unit)).result.state).toBe("ready")
+      expect(await snapshot()).toEqual(before)
+    }
+  })
+
   it("does not count a recognized consumer as represented when its selected artifact is incomplete", async () => {
     const { translated, units, plan } = await fixture(false, selected => {
       selected.input.consumerUrls.push({ url: "https://forge.example.test/s/sample/?k=syntheticSlugKey", purpose: "share", targetSourcePageId: "sample", mappingRef: null })

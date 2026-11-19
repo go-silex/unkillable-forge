@@ -64,10 +64,15 @@ not opened. The root is an alias supplied on the command line; the path is
 relative to that root. Actual content bytes are independently observed and
 compared with both expected fields. Missing, unreadable, mismatched, protected
 or escaping paths are not substituted.
-Logical paths and relative locators must be well-formed Unicode scalar strings;
-no normalization or replacement characters are introduced. Capture paths are
-not R2 keys: the compiler allocates bounded ASCII source and inventory keys,
-while retaining the original locator as private evidence.
+Selection and checkpoint JSON are decoded as strict UTF-8 before parsing;
+malformed bytes are rejected rather than replaced, and a leading BOM is rejected
+by JSON parsing rather than silently removed. Logical paths and relative
+locators must be well-formed Unicode scalar strings; no normalization is
+introduced. Capture paths are not R2 keys: the compiler allocates bounded ASCII
+source and inventory keys. The private entry-ordinal fact retains the exact
+supplied `{root, relative}` locator and logical path; its unit and path join to
+the sealed member's source reference and native version. Planning uses the pin,
+not a capture reread, and receipts do not disclose locators.
 Treat the selection, workspace and its capture evidence as sensitive: share keys,
 destinations and protected inventories can be present there.
 
@@ -86,14 +91,18 @@ Before body reads the selector receives a whole-record preflight and indexed
 census, including malformed relationships. It compiles one complete proposal;
 finishing observations checks that snapshot rather than recompiling a smaller
 selection. An unassignable contradiction is a fatal selector failure, distinct
-from a valid exclusions-only selection. Each attributed missing or unreadable
+from a valid exclusions-only selection; projection preserves a fatal receipt
+without inventing projectable facts. Each attributed missing or unreadable
 member blocks its complete source artifact, not just the missing file;
-independent units may still proceed. The ID ledger scopes identity by the full
-source tuple, including source instance and original artifact.
-The private per-unit dependency list retains each required provider's path,
-kind and supplied artifact ID, with `unverified` or `missing` state. A declared
-provider is not an active mount; an empty list means no identified dependency,
-not an inference from a blocked unit.
+independent units may still proceed. The ID ledger scopes identity by canonical
+serialized source tuples, including source instance and original artifact;
+noncanonical or malformed supplied ledger keys are rejected rather than reminted.
+Private member facts retain ordinal, stage and reason, including distinct
+diagnostics for the same member. The per-unit dependency list retains each
+required provider's path and kind. A valid supplied artifact ID is `unverified`,
+not an active mount; an invalid provider ID is rejected while identifiable
+dependent units retain the rejected provider ordinal and a `missing` dependency.
+An empty list means no identified dependency, not an inference from a blocked unit.
 
 Unknown or unreadable policy capture blocks its unit, whereas an observed
 unrecognized visibility value is retained for the native warning. Static
@@ -102,9 +111,17 @@ consumer HTTP authorization are separate outcomes. Literal shortlink destination
 preservation does not prove the target, key or grant association; a dry-run
 does not prove an actual consumer HTTP response.
 A valid team-only alias to `/` can be stored without proving that its destination
-is a selected document. Document-purpose consumers require the actual winning
-selected document or subdocument, not merely an owned stylesheet; resource
-consumers are assessed for their own purpose.
+is a selected document. Required consumer claims must resolve to the actual
+winning selected resource and purpose; a share or card destination additionally
+requires the exact captured key and observed shared visibility. A team alias
+does not authenticate its destination. Excluded census names are not primary
+mounts and cannot by themselves shadow an alias; selected routes and eligible
+resource placements determine precedence. A non-null shortlink grant must be
+produced by a validated proposed shared policy on that page anywhere in the
+full admitted inventory, regardless of cursor window or operation order, or
+exist on that page in D1. An existing revoked grant can satisfy this referent
+check: existence
+is not active read authorization, and dry-run does not prove consumer access.
 
 Preparation creates isolated local D1 and R2 state, a synthetic administrator and
 signing material, then pins native object versions and a separately approved

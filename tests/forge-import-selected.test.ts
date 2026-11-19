@@ -586,4 +586,127 @@ describe('selected import translation', () => {
       expect(unitFor(result, 'slug:').status).toBe('representable')
     }
   })
+  it('rejects noncanonical ledger tuple spellings before source authorization', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const first = await translateSelection(input, null, observations)
+    for (const table of ['pages', 'planIds'] as const) {
+      const ledger = structuredClone(first.ledger)
+      const key = Object.keys(ledger[table])[0]
+      const value = ledger[table][key]
+      delete ledger[table][key]
+      ledger[table][key.replace(',', ', ')] = value
+      const result = await preflightSelection(input, ledger)
+      expect(result.kind).toBe('fatal')
+      if (result.kind === 'fatal') expect(result.result.fatal).toBe('invalid_ledger')
+    }
+    const escaped = structuredClone(first.ledger)
+    const key = Object.keys(escaped.pages)[0], value = escaped.pages[key]
+    delete escaped.pages[key]
+    escaped.pages[key.replace('synthetic', '\\u0073ynthetic')] = value
+    expect((await preflightSelection(input, escaped)).kind).toBe('fatal')
+    const invalidOperation = structuredClone(first.ledger)
+    invalidOperation.operationIds['["unused"]'] = 'valid-operation-id'
+    expect((await preflightSelection(input, invalidOperation)).kind).toBe('fatal')
+  })
+
+  it('projects fatal receipts without fabricating facts', async () => {
+    for (const preflight of [await preflightSelection(null), await preflightSelection((await makeSelectedFixture()).input, { version: 1 })]) {
+      if (preflight.kind !== 'fatal') throw new Error('expected fatal')
+      expect(projectTranslation(preflight.result)).toBe(preflight.result)
+      expect(preflight.result.facts).toBeUndefined()
+    }
+  })
+
+  it('preserves thousands of distinct absent members and reprojection', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const template = input.entries.find(entry => entry.path === '/tree/asset0.css')!
+    input.limits.maxCommandBytes = 20000000
+    input.limits.maxInventoryBytes = 20000000
+    for (let i = 0; i < 8000; i++) {
+      const path = `/tree/missing-${i}.css`
+      input.entries.push({ ...template, path, locator: { root: 'capture', relative: path.slice(1) } })
+      input.owners.push({ path, ownerSourcePageId: 'tree/one.html', evidenceRef: 'synthetic-edge', basis: 'declared' })
+      observations[path] = { state: 'absent' }
+    }
+    const prepared = await preflightSelection(input)
+    if (prepared.kind !== 'prepared') throw new Error('expected prepared')
+    const result = await prepared.finish(observations)
+    const issues = unitFor(result, 'tree:').blockers.filter(issue => issue.code === 'capture_absent')
+    expect(issues).toHaveLength(8000)
+    expect(result.compatibility.unsupported.some(issue => issue.code === 'or1_missing_document')).toBe(false)
+    expect(unitFor(result, 'slug:').status).toBe('representable')
+    const ordinal = issues[0].entryOrdinal!
+    const duplicate = { kind: 'source' as const, entryOrdinal: ordinal, stage: 'inspect' as const, reason: 'absent' as const }
+    expect(projectTranslation(result, [duplicate])).toEqual(result)
+    expect(unitFor(projectTranslation(result, [{ ...duplicate, stage: 'pin_reread' }]), 'tree:').blockers.filter(issue => issue.code === 'capture_absent')).toHaveLength(8001)
+  })
+  it('requires the captured key for a claimed alias destination', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    input.aliases[0].to = '/s/sample/wrongSyntheticKey/'
+    input.consumerUrls.push({ url: 'https://forge.example.test/legacy-sample', purpose: 'alias', targetSourcePageId: 'sample', mappingRef: null })
+    const wrong = await translateSelection(input, null, observations)
+    expect(unitFor(wrong, 'slug:').status).toBe('blocked')
+    input.consumerUrls = []
+    const stored = await translateSelection(input, null, observations)
+    expect(represented(stored, 'slug:').inventory.operations).toContainEqual(expect.objectContaining({ kind: 'alias', to: '/s/sample/wrongSyntheticKey/' }))
+    input.aliases[0].to = '/s/sample/syntheticSlugKey/'
+    input.consumerUrls.push({ url: 'https://forge.example.test/legacy-sample', purpose: 'alias', targetSourcePageId: 'sample', mappingRef: null })
+    expect(unitFor(await translateSelection(input, null, observations), 'slug:').status).toBe('representable')
+  })
+
+  it('ignores excluded census names while retaining actual alias precedence', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    input.entries.push({ path: '/legacy-sample.html', graphClass: 'excluded', contentType: null, locator: { root: 'capture', relative: 'legacy-sample.html' }, provenance: 'synthetic-exclusion', expected: null, placement: null })
+    input.exclusions.push({ path: '/legacy-sample.html', evidenceRef: 'synthetic-exclusion', reason: 'non_content' })
+    input.consumerUrls.push({ url: 'https://forge.example.test/legacy-sample', purpose: 'alias', targetSourcePageId: 'sample', mappingRef: null })
+    const excluded = await translateSelection(input, null, observations)
+    expect(unitFor(excluded, 'slug:').status).toBe('representable')
+    const template = input.entries.find(entry => entry.path === '/tree/fragment.html')!
+    input.entries[input.entries.length - 1] = { ...template, path: '/legacy-sample.html', locator: { root: 'capture', relative: 'legacy-sample.html' } }
+    input.exclusions = []
+    input.owners.push({ path: '/legacy-sample.html', ownerSourcePageId: 'tree/one.html', evidenceRef: 'synthetic-edge', basis: 'declared' })
+    observations['/legacy-sample.html'] = observations[template.path]
+    const mounted = await translateSelection(input, null, observations)
+    expect(unitFor(mounted, 'slug:').status).toBe('blocked')
+  })
+
+  it('contains an attributable malformed provider and retains known fatal attribution', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const templatePage = input.pages.find(page => page.sourcePageId === 'tree/one.html')!
+    const templateEntry = input.entries.find(entry => entry.path === '/tree/one.html')!
+    input.pages.push({ ...templatePage, sourcePageId: 'other.html', documentPath: '/other.html', membership: { sourceArtifactId: 'tree:other', evidenceRef: 'synthetic-membership' } })
+    input.entries.push({ ...templateEntry, path: '/other.html', locator: { root: 'capture', relative: 'other.html' }, placement: { sourceArtifactId: 'tree:other', evidenceRef: 'synthetic-placement' } })
+    observations['/other.html'] = observations[templateEntry.path]
+    const path = '/external/shared.css'
+    for (const ownerSourcePageId of ['tree/one.html', 'sample']) input.owners.push({ path, ownerSourcePageId, evidenceRef: 'synthetic-external', basis: 'declared' })
+    input.providerMounts.push({ path, kind: 'asset', artifactId: 'mistyped-provider' })
+    const result = await translateSelection(input, null, observations)
+    for (const prefix of ['tree:synthetic', 'slug:']) {
+      expect(unitFor(result, prefix).dependencies).toContainEqual({ path, providerArtifactId: null, kind: 'asset', state: 'missing' })
+    }
+    expect(unitFor(result, 'tree:other').status).toBe('representable')
+    expect(result.census.find(row => row.kind === 'providerMount')).toEqual(expect.objectContaining({ ordinal: 0, affectedUnitIds: expect.arrayContaining(['tree:synthetic', 'slug:sample']), reason: 'invalid_provider_mount' }))
+    input.providerMounts.push({ path: '/unknown.css', kind: 'asset', artifactId: 'mistyped-provider' })
+    const fatal = await preflightSelection(input)
+    if (fatal.kind !== 'fatal') throw new Error('expected fatal')
+    expect(fatal.result.census.find(row => row.kind === 'providerMount' && row.ordinal === 0)?.affectedUnitIds).toEqual(expect.arrayContaining(['tree:synthetic', 'slug:sample']))
+  })
+  it('retains the exact private locator on its ordinal fact', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const item = input.entries.find(entry => entry.path === '/tree/one.html')!
+    item.locator.relative = 'captured/different-name.html'
+    const prepared = await preflightSelection(input)
+    if (prepared.kind !== 'prepared') throw new Error('expected prepared')
+    const result = await prepared.finish(observations)
+    expect(result.facts).toContainEqual(expect.objectContaining({ kind: 'entry', ordinal: input.entries.indexOf(item), path: item.path, unitId: 'tree:synthetic', locator: { root: 'capture', relative: 'captured/different-name.html' } }))
+  })
+  it('does not represent a shortlink whose destination key is stale', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    input.shortlinks[0].destination = 'https://forge.example.test/s/sample/?k=wrongSyntheticKey'
+    input.consumerUrls.push({ url: input.shortlinks[0].shortUrl, purpose: 'shortlink', targetSourcePageId: 'sample', mappingRef: 'synthetic-mapping' })
+    const result = await translateSelection(input, null, observations)
+    expect(unitFor(result, 'slug:').status).toBe('blocked')
+    expect(result.census.find(row => row.kind === 'consumerUrl')?.disposition).toBe('rejected')
+    expect(unitFor(result, 'tree:').status).toBe('representable')
+  })
 })

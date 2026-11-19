@@ -79,8 +79,9 @@ const checkpointSchema = z.object({
   units: z.array(z.object({
     unitId: z.string(), pinState: z.string(),
     blockers: z.array(z.object({ code: z.string(), unitId: z.string().optional(), entryOrdinal: z.number().optional(), path: z.string().optional(), sourcePageId: z.string().nullable().optional(), stage: z.string().optional(), reason: z.string().optional(), basis: z.string().optional() })),
-    inventory: z.object({ files: z.array(z.object({ sourceRef: z.string(), sourceVersion: z.string().nullable() })) }).nullable(),
+    inventory: z.object({ files: z.array(z.object({ path: z.string(), sourceRef: z.string(), sourceVersion: z.string().nullable() })) }).nullable(),
   })),
+  facts: z.array(z.object({ kind: z.string(), ordinal: z.number().optional(), unitId: z.string().nullable().optional(), path: z.string().optional(), locator: z.object({ root: z.string(), relative: z.string() }).optional() })).optional(),
   approvals: z.array(z.object({ inventoryId: z.string(), objectKey: z.string(), objectVersion: z.string() })),
 })
 async function checkpoint(workspace: string) {
@@ -99,6 +100,81 @@ function allExcluded(input: SyntheticInput) {
 }
 
 describe('offline selected import CLI', () => {
+  it('rejects malformed UTF-8 before source access despite an existing replacement-character file', async () => {
+    const invalid = await sandbox(), valid = await sandbox()
+    try {
+      const fixture = await makeSelectedFixture()
+      const relative = 'synthetic-\ufffd-document.html'
+      fixture.input.entries.find(entry => entry.path === '/tree/one.html')!.locator.relative = relative
+      fixture.files[`/${relative}`] = fixture.files['/tree/one.html']
+      await invalid.save(fixture); await valid.save(fixture)
+      expect((await readFile(join(invalid.capture, relative))).equals(Buffer.from(fixture.files['/tree/one.html']))).toBe(true)
+      const original = await readFile(invalid.selection)
+      const encoded = Buffer.from('\ufffd', 'utf8'), position = original.indexOf(encoded)
+      expect(position).toBeGreaterThan(-1)
+      const malformed = Buffer.concat([original.subarray(0, position), Buffer.from([0xff]), original.subarray(position + encoded.length)])
+      await writeFile(invalid.selection, malformed, { mode: 0o600 })
+      const failure = await invalid.prepare()
+      expect((failure.stdout + failure.stderr).includes(relative)).toBe(false)
+      expect(receipt(failure, 1).error).toBe('offline_operation_failed')
+      const instrumented = receipt(await run(process.execPath, [physicalRunner, 'observe', invalid.selection, join(invalid.root, 'observed-workspace'), invalid.capture], invalid.home), 1)
+      expect(instrumented.error).toBe('offline_operation_failed')
+      const unavailable = await invalid.invoke('prepare', '--selection', invalid.selection, '--workspace', join(invalid.root, 'unavailable-workspace'), '--capture-root', `capture=${join(invalid.root, 'missing-capture')}`)
+      expect(receipt(unavailable, 1).error).toBe('offline_operation_failed')
+      expect(instrumented.metadataPaths).toEqual([]); expect(instrumented.bodyReads).toEqual([])
+      const validPrepare = await valid.prepare()
+      expect((validPrepare.stdout + validPrepare.stderr).includes(relative)).toBe(false)
+      const prepared = receipt(validPrepare)
+      expect(prepared.fatal).toBeNull(); expect(prepared.pinned).toBe(2)
+      const planned = receipt(await valid.plan())
+      expect(planned.results!.filter(result => result.state === 'ready')).toHaveLength(2)
+      expect(planned.stores).toMatchObject({ status: 'observed', equal: true })
+    } finally { await Promise.all([invalid.cleanup(), valid.cleanup()]) }
+  }, 600_000)
+
+  it('rejects malformed checkpoint UTF-8 before an isolated runtime can be prepared', async () => {
+    const box = await sandbox()
+    try {
+      await mkdir(box.workspace, { mode: 0o700 })
+      await writeFile(join(box.workspace, 'state.json'), Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0xff, 0x22, 0x7d]), { mode: 0o600 })
+      const output = receipt(await box.plan(), 1)
+      expect(output.error).toBe('offline_operation_failed')
+      expect(output.stores).toMatchObject({ status: 'unknown', equal: null })
+      await expect(stat(join(box.workspace, 'persist'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { await box.cleanup() }
+  }, 240_000)
+
+  it('retains the original locator privately beside the actual native pin and plans without capture or selector', async () => {
+    const box = await sandbox()
+    try {
+      const fixture = await makeSelectedFixture()
+      const path = '/tree/one.html', relative = 'private-synthetic-locator/preserved-source.html'
+      const ordinal = fixture.input.entries.findIndex(entry => entry.path === path)
+      expect(ordinal).toBeGreaterThanOrEqual(0)
+      fixture.input.entries[ordinal].locator = { root: 'capture', relative }
+      fixture.files[`/${relative}`] = fixture.files[path]
+      await box.save(fixture)
+      const preparation = await box.prepare()
+      expect((preparation.stdout + preparation.stderr).includes(relative)).toBe(false)
+      const prepared = receipt(preparation)
+      expect(prepared.fatal).toBeNull(); expect(prepared.pinned).toBe(2)
+      const state = await checkpoint(box.workspace)
+      const fact = state.facts!.find(item => item.kind === 'entry' && item.ordinal === ordinal)
+      expect(fact?.path === path && fact.unitId === 'tree:synthetic' && fact.locator?.root === 'capture' && fact.locator.relative === relative).toBe(true)
+      const unit = state.units.find(item => item.unitId === fact?.unitId)
+      const file = unit?.inventory?.files.find(item => item.path === fact?.path)
+      expect(unit?.pinState).toBe('pinned')
+      expect(typeof file?.sourceVersion === 'string' && file.sourceVersion.length > 0).toBe(true)
+      expect(typeof file?.sourceRef === 'string' && /^capture\/v1\/[a-f0-9]{64}\/[0-9]+$/.test(file.sourceRef) && !file.sourceRef.includes(relative)).toBe(true)
+      await rm(box.selection); await rm(box.capture, { recursive: true })
+      const planning = await box.plan()
+      expect((planning.stdout + planning.stderr).includes(relative)).toBe(false)
+      const planned = receipt(planning)
+      expect(planned.results!.filter(result => result.state === 'ready')).toHaveLength(2)
+      expect(planned.stores).toMatchObject({ status: 'observed', equal: true })
+    } finally { await box.cleanup() }
+  }, 600_000)
+
   it('denies an omitted credential-relative inode reused by an independent unit before any body read', async () => {
     const box = await sandbox()
     try {

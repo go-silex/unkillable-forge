@@ -41,15 +41,21 @@ export interface BlockedUnit extends UnitCommon {
   command: null; selection: null; inventory: null
 }
 export type Unit = RepresentableUnit | BlockedUnit
-export interface Translation {
-  ok: boolean; fatal: string | null; schema: 1; ledger: Ledger
+interface TranslationCommon {
+  schema: 1; ledger: Ledger
   accounting: { path: string; disposition: string; unitId: string | null; reason: string }[]
   census: { kind: string; ordinal: number; unitId: string | null; affectedUnitIds: string[]; disposition: 'represented' | 'excluded' | 'rejected' }[]
   units: Unit[]
   compatibility: { represented: Issue[]; unsupported: Issue[]; notObserved: Issue[] }
   warnings: Issue[]
-  facts?: unknown[]
 }
+export interface FatalTranslation extends TranslationCommon {
+  ok: false; fatal: string; facts?: never
+}
+export interface ProjectableTranslation extends TranslationCommon {
+  ok: boolean; fatal: null; facts: unknown[]
+}
+export type Translation = FatalTranslation | ProjectableTranslation
 export type Observation =
   | { state: 'present'; size: number; sha256: string }
   | { state: 'absent' | 'unreadable' | 'unknown' | 'changed' | 'size_mismatch' }
@@ -58,10 +64,12 @@ export interface UnitFailureFact { kind: 'unit'; unitId: string; code: 'budget_e
 export function isProtectedCaptureRelative(value: unknown): boolean
 export function emptyLedger(): Ledger
 export function preflightSelection(input: unknown, ledger?: unknown): Promise<
-  | { kind: 'fatal'; result: Translation }
-  | { kind: 'prepared'; reads: { ordinal: number; path: string; sourceKey: string; unitId: string; sourcePageId: string | null; publicDocument: boolean; locator: { root: string; relative: string }; expected: { size: number; sha256: string } }[]; protectedLocators: { ordinal: number; locator: { root: string; relative: string } }[]; inventoryKeys: string[]; reader: unknown; limits: unknown; captureRoots: string[]; finish(observations?: unknown): Promise<Translation> }
+  | { kind: 'fatal'; result: FatalTranslation }
+  | { kind: 'prepared'; reads: { ordinal: number; path: string; sourceKey: string; unitId: string; sourcePageId: string | null; publicDocument: boolean; locator: { root: string; relative: string }; expected: { size: number; sha256: string } }[]; protectedLocators: { ordinal: number; locator: { root: string; relative: string } }[]; inventoryKeys: string[]; reader: unknown; limits: unknown; captureRoots: string[]; finish(observations?: unknown): Promise<ProjectableTranslation> }
 >
-export function projectTranslation(translation: Translation, pinFailures?: (SourceFailureFact | UnitFailureFact)[]): Translation
+export function projectTranslation(translation: FatalTranslation): FatalTranslation
+export function projectTranslation(translation: ProjectableTranslation, pinFailures?: (SourceFailureFact | UnitFailureFact)[]): ProjectableTranslation
+export function projectTranslation(translation: Translation): Translation
 export function assignSourcePins(unit: Unit, pins: unknown):
   | { ok: false; code: string; path?: string }
   | { ok: true; unit: RepresentableUnit; bytes: Uint8Array }

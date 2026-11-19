@@ -16,11 +16,17 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
   and complete physical metadata authorization precede content reads; per-unit
   failures preserve independent sealed outcomes in one private checkpoint.
   Record census and artifact membership remain distinct from native readiness.
-  Member failures retain private stage-specific evidence, provider dependencies
-  remain unverified or missing, and native admission validates durable identity
-  and token constraints. Literal links and evidenced grant association do not
-  prove consumer HTTP access. This does not authorize historical execution,
-  publication, provider access or cutover.
+  Member failures retain indexed private stage-specific evidence and exact
+  original locators; partial provider failures remain attributed to dependent
+  units without treating a declaration as an active mount. Selection and
+  checkpoint JSON reject invalid UTF-8 and leading BOMs; ledger identities use
+  validated canonical source tuples. Fatal projection preserves the fatal receipt
+  without inventing facts. Native planning checks shortlink grant referents
+  against the full admitted inventory or existing same-page rows, independent of
+  cursor windows; existence is not active authorization.
+  Literal links and evidenced associations do not prove consumer HTTP access.
+  This does not authorize historical execution, publication, provider access or
+  cutover, and is not a historical capacity benchmark.
 
 - F10 adds an administrator-only selected-import endpoint using a protected,
   operator-approved inventory and pinned source versions, sizes and hashes.
