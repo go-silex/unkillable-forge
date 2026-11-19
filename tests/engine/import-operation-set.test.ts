@@ -43,6 +43,20 @@ async function plan(f: { seed: { approval: Record<string, unknown>; bindings: Re
   throw new Error("dry run did not complete")
 }
 
+async function nativeOutcome(bindings: Record<string, unknown>, selection: ImportSelection) {
+  const jwt = await signed()
+  let cursor: string | null = null
+  for (let i = 0; i < 256; i++) {
+    const response = await worker.fetch(request("/api/maintenance/import", "POST", jwt, JSON.stringify({ op: "dry_run", selection, cursor }), { "Content-Type": "application/json" }), bindings)
+    const envelope = await response.json() as { ok: boolean; result?: { state: string; nextCursor?: string; issues?: { code: string }[] }; error?: { code: string } }
+    if (!envelope.ok || response.status !== 200) return { status: response.status, code: envelope.error?.code, state: null, issues: [] }
+    if (envelope.result?.state !== "checking") return { status: response.status, code: null, state: envelope.result?.state, issues: envelope.result?.issues ?? [] }
+    if (typeof envelope.result.nextCursor !== "string") throw new Error("missing native continuation")
+    cursor = envelope.result.nextCursor
+  }
+  throw new Error("native dry run did not complete")
+}
+
 describe("native import operation set", () => {
   it("accepts independent claims without publishing", async () => {
     const f = await fixture()
@@ -80,6 +94,65 @@ describe("native import operation set", () => {
       expect(result.state).toBe("blocked")
       expect(result.issues).toContainEqual({ code: "selection_graph_mismatch" })
     }
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM publication_sessions").first()).toEqual(before)
+  })
+
+  it("rejects malformed grant IDs at native admission without the translator", async () => {
+    const seed = await syntheticImport()
+    const policy = (grantId: string): ImportOperation => ({
+      kind: "page_policy",
+      policy: { operationId: "shared-policy", sourcePageId: "source-page", pageId: seed.pageId, expectedPolicyEpoch: null, grantId, visibility: { captured: true, value: "shared", metadataV: "shared", expiresAt: null }, share: { captured: true, key: "synthetic-original-key", expiresAt: null } },
+    })
+    async function bindingsFor(grantId: string) {
+      const encoded = JSON.stringify({ ...seed.inventory, operations: [policy(grantId)] })
+      const object = await env.FORGE_IMPORT_SOURCE.put(`synthetic/native-grant-${crypto.randomUUID()}.json`, encoded)
+      if (!object) throw new Error("inventory upload failed")
+      const approval = { ...seed.approval, objectKey: object.key, objectVersion: object.version, sha256: (await content(encoded)).sha256 }
+      return { ...seed.bindings, FORGE_IMPORT_INVENTORIES: JSON.stringify([approval]) }
+    }
+    const valid = await bindingsFor(newId("gr"))
+    const before = await env.DB.prepare("SELECT count(*) AS n FROM publication_sessions").first()
+    expect((await nativeOutcome(valid, seed.selection)).state).toBe("ready")
+    expect((await nativeOutcome(valid, seed.selection)).state).toBe("ready")
+    const invalid = await nativeOutcome(await bindingsFor("gr_not-a-valid-id"), seed.selection)
+    expect(invalid.status).toBe(200)
+    expect(invalid.state).toBe("blocked")
+    expect(invalid.issues).toContainEqual({ code: "selection_graph_mismatch" })
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM publication_sessions").first()).toEqual(before)
+  })
+
+  it("rejects non-visible-ASCII plan bindings at native admission without the translator", async () => {
+    const seed = await syntheticImport()
+    const before = await env.DB.prepare("SELECT count(*) AS n FROM publication_sessions").first()
+    expect((await nativeOutcome(seed.bindings, seed.selection)).state).toBe("ready")
+    expect((await nativeOutcome(seed.bindings, seed.selection)).state).toBe("ready")
+    for (const planId of ["plan with space", "plan\tcontrol", "plan-é"]) {
+      const result = await nativeOutcome(seed.bindings, { ...seed.selection, planId })
+      expect(result.status).toBe(200)
+      expect(result.state).toBe("blocked")
+      expect(result.issues).toContainEqual({ code: "selection_graph_mismatch" })
+    }
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM publication_sessions").first()).toEqual(before)
+  })
+
+  it("rejects a non-scalar logical asset path through native planning", async () => {
+    const seed = await syntheticImport()
+    const path = "/a/synthetic-import/\ud800.css"
+    const asset = { ...seed.selection.command.files[0], path, kind: "asset" as const, contentType: "text/css" }
+    const command = { ...seed.selection.command, files: [...seed.selection.command.files, asset] }
+    const selection = { ...seed.selection, command }
+    const inventory = { ...seed.inventory, command, files: [...seed.inventory.files, { ...seed.inventory.files[0], path, kind: "asset" as const, contentType: "text/css" }] }
+    const encoded = JSON.stringify(inventory)
+    const object = await env.FORGE_IMPORT_SOURCE.put(`synthetic/native-scalar-${crypto.randomUUID()}.json`, encoded)
+    if (!object) throw new Error("inventory upload failed")
+    const approval = { ...seed.approval, objectKey: object.key, objectVersion: object.version, sha256: (await content(encoded)).sha256 }
+    const bindings = { ...seed.bindings, FORGE_IMPORT_INVENTORIES: JSON.stringify([approval]) }
+    const before = await env.DB.prepare("SELECT count(*) AS n FROM publication_sessions").first()
+    expect((await nativeOutcome(seed.bindings, seed.selection)).state).toBe("ready")
+    const result = await nativeOutcome(bindings, selection)
+    expect(result.status).toBe(200)
+    expect(result.state).toBe("blocked")
+    expect(result.issues).toContainEqual({ code: "invalid_state" })
     expect(await env.DB.prepare("SELECT count(*) AS n FROM publication_sessions").first()).toEqual(before)
   })
 })

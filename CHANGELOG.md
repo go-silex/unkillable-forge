@@ -16,9 +16,11 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
   and complete physical metadata authorization precede content reads; per-unit
   failures preserve independent sealed outcomes in one private checkpoint.
   Record census and artifact membership remain distinct from native readiness.
-  Literal links and evidenced grant association do not prove consumer HTTP
-  access. This does not authorize historical execution, publication, provider
-  access or cutover.
+  Member failures retain private stage-specific evidence, provider dependencies
+  remain unverified or missing, and native admission validates durable identity
+  and token constraints. Literal links and evidenced grant association do not
+  prove consumer HTTP access. This does not authorize historical execution,
+  publication, provider access or cutover.
 
 - F10 adds an administrator-only selected-import endpoint using a protected,
   operator-approved inventory and pinned source versions, sizes and hashes.

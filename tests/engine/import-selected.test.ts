@@ -31,6 +31,7 @@ async function fixture(includeMissing = false, mutate?: (selected: { input: Synt
   if (preflight.kind !== "prepared") throw new Error("fixture selector failed preflight")
   const observations: Record<string, Observation> = {}
   for (const read of preflight.reads) observations[read.path] = selected.observations[read.path]
+  const authorizedKeys = new Map(preflight.reads.map(read => [read.path, read.sourceKey]))
   const translated = projectTranslation(await preflight.finish(observations))
   const approvals = []
   const units: RepresentableUnit[] = []
@@ -39,6 +40,7 @@ async function fixture(includeMissing = false, mutate?: (selected: { input: Synt
     if (unit.status !== "representable") continue
     const pins = sourcePins
     for (const file of unit.inventory.files) {
+      expect(file.sourceRef).toBe(authorizedKeys.get(file.path))
       if (!pins[file.sourceRef]) {
         const object = await env.FORGE_IMPORT_SOURCE.put(file.sourceRef, new Uint8Array(selected.files[file.path]))
         if (!object) throw new Error("source upload failed")
@@ -47,7 +49,7 @@ async function fixture(includeMissing = false, mutate?: (selected: { input: Synt
     }
     const pinned = assignSourcePins(unit, pins)
     if (!pinned.ok) throw new Error(`pinning failed: ${pinned.code}`)
-    const object = await env.FORGE_IMPORT_SOURCE.put(`inventories/${unit.selection.inventoryId}`, new Uint8Array(pinned.bytes))
+    const object = await env.FORGE_IMPORT_SOURCE.put(unit.inventoryKey, new Uint8Array(pinned.bytes))
     if (!object) throw new Error("inventory upload failed")
     const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new Uint8Array(pinned.bytes))), byte => byte.toString(16).padStart(2, "0")).join("")
     const sealed = sealInventory(pinned.unit, { key: object.key, version: object.version }, hash)
@@ -278,7 +280,7 @@ describe("selected fixture through native import admission", () => {
     const { translated, units, plan } = await fixture(false, selected => {
       selected.input.consumerUrls.push({ url: "https://forge.example.test/s/sample/?k=syntheticSlugKey", purpose: "share", targetSourcePageId: "sample", mappingRef: null })
     })
-    const projected = projectTranslation(translated, [{ unitId: "slug:sample", code: "inventory_budget_exceeded" }])
+    const projected = projectTranslation(translated, [{ kind: "unit", unitId: "slug:sample", code: "inventory_budget_exceeded" }])
     expect(projected.units.find(unit => unit.unitId === "slug:sample")?.status).toBe("blocked")
     expect(projected.census).toContainEqual(expect.objectContaining({ kind: "consumerUrl", ordinal: 0, disposition: "rejected" }))
     expect(projected.compatibility.represented.some(issue => issue.unitId === "slug:sample")).toBe(false)
@@ -299,6 +301,65 @@ describe("selected fixture through native import admission", () => {
     const result = await plan(tree)
     expect(result.result.state).toBe("ready")
     expect(result.result.warnings).toContainEqual(expect.objectContaining({ code: "unknown_visibility_private" }))
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it("keeps a root alias legal without treating its shell destination as the page", async () => {
+    const configure = (selected: { input: SyntheticInput }) => {
+      selected.input.reader.shellPaths.push("/")
+      selected.input.aliases.push({ aliasKind: "redirect_exact", path: "/home", to: "/", status: 301, targetSourcePageId: "sample", capturedBehavior: "team_fallback" })
+    }
+    const legal = await fixture(false, configure)
+    const slug = legal.units.find(unit => unit.sourceArtifactId === "slug:sample")
+    if (!slug) throw new Error("slug unit missing")
+    expect(slug.inventory.operations).toContainEqual(expect.objectContaining({ kind: "alias", path: "/home", to: "/" }))
+    expect((await legal.plan(slug)).result.state).toBe("ready")
+    const required = await fixture(false, selected => {
+      configure(selected)
+      selected.input.consumerUrls.push({ url: "https://forge.example.test/home", purpose: "alias", targetSourcePageId: "sample", mappingRef: null })
+    })
+    expect(required.translated.census).toContainEqual(expect.objectContaining({ kind: "consumerUrl", ordinal: 0, disposition: "rejected" }))
+    expect(required.units.some(unit => unit.sourceArtifactId === "slug:sample")).toBe(false)
+    const tree = required.units.find(unit => unit.sourceArtifactId === "tree:synthetic")
+    if (!tree) throw new Error("independent tree unit missing")
+    const before = await snapshot()
+    expect((await required.plan(tree)).result.state).toBe("ready")
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it("does not certify a selected subtree stylesheet as a document", async () => {
+    const path = "/a/sample/style.css"
+    const { translated, units, plan } = await fixture(false, selected => {
+      const original = selected.input.entries.find(entry => entry.path === "/tree/asset0.css")
+      if (!original) throw new Error("synthetic stylesheet missing")
+      selected.input.entries.push({ ...original, path, locator: { root: "capture", relative: path.slice(1) }, placement: { sourceArtifactId: "slug:sample", evidenceRef: "synthetic-placement" } })
+      selected.observations[path] = selected.observations[original.path]
+      selected.files[path] = selected.files[original.path]
+      selected.input.consumerUrls.push({ url: `https://forge.example.test${path}`, purpose: "document", targetSourcePageId: "sample", mappingRef: null })
+    })
+    expect(translated.census).toContainEqual(expect.objectContaining({ kind: "consumerUrl", ordinal: 0, disposition: "rejected" }))
+    expect(units.some(unit => unit.sourceArtifactId === "slug:sample")).toBe(false)
+    const tree = units.find(unit => unit.sourceArtifactId === "tree:synthetic")
+    if (!tree) throw new Error("independent tree unit missing")
+    const before = await snapshot()
+    expect((await plan(tree)).result.state).toBe("ready")
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it("projects a missing public document at reread as OR-1, unlike a missing stylesheet", async () => {
+    const { selected, translated, units, plan } = await fixture()
+    const documentOrdinal = selected.input.entries.findIndex(entry => entry.path === "/tree/one.html")
+    const assetOrdinal = selected.input.entries.findIndex(entry => entry.path === "/tree/asset0.css")
+    expect(documentOrdinal).toBeGreaterThanOrEqual(0)
+    expect(assetOrdinal).toBeGreaterThanOrEqual(0)
+    const missingDocument = projectTranslation(translated, [{ kind: "source", entryOrdinal: documentOrdinal, stage: "pin_reread", reason: "absent" }])
+    expect(missingDocument.compatibility.unsupported).toContainEqual(expect.objectContaining({ code: "or1_missing_document", unitId: "tree:synthetic", path: "/tree/one.html", stage: "pin_reread", basis: "observed_absent" }))
+    const missingAsset = projectTranslation(translated, [{ kind: "source", entryOrdinal: assetOrdinal, stage: "pin_reread", reason: "absent" }])
+    expect(missingAsset.compatibility.unsupported).not.toContainEqual(expect.objectContaining({ code: "or1_missing_document", unitId: "tree:synthetic" }))
+    const slug = units.find(unit => unit.sourceArtifactId === "slug:sample")
+    if (!slug) throw new Error("independent slug unit missing")
+    const before = await snapshot()
+    expect((await plan(slug)).result.state).toBe("ready")
     expect(await snapshot()).toEqual(before)
   })
 })

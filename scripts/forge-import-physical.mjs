@@ -7,7 +7,6 @@ const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const identity = info => `${info.dev}:${info.ino}`
 const sameFile = (a, b) => a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs
 const invalidRelative = path => typeof path !== 'string' || path.includes('\\') || path.includes('\0') || path.split('/').some(part => !part || part === '.' || part === '..')
-const credentialRelative = path => invalidRelative(path) || path.split('/').some(part => part === '.env' || part.startsWith('.env.') || part === '.git' || part === '.ssh')
 const unreadable = error => ['EACCES', 'EPERM', 'EIO', 'ELOOP', 'ENOTDIR', 'EINVAL'].includes(error?.code)
 
 export const sourceAccess = {
@@ -15,7 +14,7 @@ export const sourceAccess = {
     const file = await source.open(relative)
     try { return await file.stat({ bigint: true }) } finally { await file.close() }
   },
-  async inspect(source, relative, authorized) {
+  async inspect(source, relative, authorized, expectedSize) {
     let file
     try { file = await source.open(relative) } catch (error) {
       if (error.code === 'ENOENT') return { observation: { state: 'absent' } }
@@ -25,17 +24,19 @@ export const sourceAccess = {
     }
     try {
       const before = await file.stat({ bigint: true })
-      if (!authorized || !sameFile(authorized, before)) return { observation: { state: 'unknown' } }
-      const hash = createHash('sha256'), buffer = Buffer.allocUnsafe(64 * 1024)
+      if (!authorized || !sameFile(authorized, before)) return { observation: { state: 'changed' } }
+      if (before.size !== BigInt(expectedSize)) return { observation: { state: 'size_mismatch' } }
+      const hash = createHash('sha256'), buffer = Buffer.allocUnsafe(Math.min(64 * 1024, Math.max(1, expectedSize)))
       let offset = 0
-      for (;;) {
-        const { bytesRead } = await file.read(buffer, 0, buffer.length, offset)
+      while (offset < expectedSize) {
+        const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, expectedSize - offset), offset)
         if (!bytesRead) break
         hash.update(buffer.subarray(0, bytesRead)); offset += bytesRead
-        if (!Number.isSafeInteger(offset)) fail('source_changed')
       }
+      const sentinel = offset === expectedSize ? await file.read(buffer, 0, 1, offset) : null
       const after = await file.stat({ bigint: true })
-      if (!sameFile(before, after) || BigInt(offset) !== after.size) return { observation: { state: 'unknown' } }
+      if (!sameFile(before, after)) return { observation: { state: 'changed' } }
+      if (offset !== expectedSize || sentinel?.bytesRead) return { observation: { state: 'size_mismatch' } }
       return { observation: { state: 'present', size: offset, sha256: hash.digest('hex') }, identity: after }
     } catch (error) {
       if (unreadable(error)) return { observation: { state: 'unreadable' } }
@@ -53,19 +54,30 @@ export const sourceAccess = {
       let offset = 0
       while (offset < bytes.length) {
         const part = await file.read(bytes, offset, bytes.length - offset, offset)
-        if (!part.bytesRead) fail('source_changed')
+        if (!part.bytesRead) fail('source_size_mismatch')
         offset += part.bytesRead
       }
       const after = await file.stat({ bigint: true })
-      if (!sameFile(before, after) || sha(bytes) !== observed.sha256) fail('source_changed')
+      if (!sameFile(before, after)) fail('source_changed')
+      if (sha(bytes) !== observed.sha256) fail('source_digest_mismatch')
       return bytes
     } finally { await file.close() }
   },
 }
 
-export async function authorizeSources({ reads, protectedLocators, sources, rootPaths }, access = sourceAccess) {
+export async function authorizeSources({ reads, protectedLocators, inventoryKeys, sources, rootPaths, isProtectedCaptureRelative }, access = sourceAccess) {
   const deniedPaths = new Set(), deniedIdentities = new Set(), metadata = new Map()
   let collision = false
+  const sourceKeys = new Set()
+  for (const item of reads) {
+    if (typeof item.sourceKey !== 'string' || !/^capture\/v1\/[a-f0-9]{64}\/(?:0|[1-9][0-9]*)$/.test(item.sourceKey) || !item.sourceKey.endsWith(`/${item.ordinal}`) || sourceKeys.has(item.sourceKey)) fail('invalid_selection')
+    sourceKeys.add(item.sourceKey)
+  }
+  const uniqueInventories = new Set()
+  for (const key of inventoryKeys) {
+    if (typeof key !== 'string' || !/^inventory\/v1\/[a-f0-9]{64}\.json$/.test(key) || uniqueInventories.has(key)) fail('invalid_selection')
+    uniqueInventories.add(key)
+  }
   const locatorPath = locator => {
     if (!locator || !sources.has(locator.root) || invalidRelative(locator.relative)) fail('invalid_locator')
     return resolve(rootPaths.get(locator.root), locator.relative)
@@ -74,16 +86,16 @@ export async function authorizeSources({ reads, protectedLocators, sources, root
     const path = locatorPath(item.locator)
     deniedPaths.add(path)
     try { deniedIdentities.add(identity(await access.metadata(sources.get(item.locator.root), item.locator.relative))) }
-    catch (error) { if (!['ENOENT', 'ENOTDIR', 'EINVAL'].includes(error.code)) throw error }
+    catch (error) { if (error.code !== 'ENOENT') throw error }
   }
   for (const item of reads) {
     const path = locatorPath(item.locator)
-    if (credentialRelative(item.locator.relative)) fail('invalid_locator')
+    if (isProtectedCaptureRelative(item.locator.relative)) fail('invalid_locator')
     if (deniedPaths.has(path)) collision = true
     try {
       const info = await access.metadata(sources.get(item.locator.root), item.locator.relative)
       if (deniedIdentities.has(identity(info))) collision = true
-      metadata.set(item.ordinal, { identity: info })
+      metadata.set(item.ordinal, info.size === BigInt(item.expected.size) ? { identity: info } : { observation: { state: 'size_mismatch' } })
     } catch (error) {
       if (error.code === 'ENOENT') metadata.set(item.ordinal, { observation: { state: 'absent' } })
       else if (unreadable(error)) metadata.set(item.ordinal, { observation: { state: 'unreadable' } })
@@ -99,7 +111,7 @@ export async function inspectSources(reads, authorization, sources, access = sou
   const observations = {}, identities = new Map()
   for (const item of reads) {
     const admitted = authorization.get(item.ordinal)
-    const result = admitted.observation ? admitted : await access.inspect(sources.get(item.locator.root), item.locator.relative, admitted.identity)
+    const result = admitted.observation ? admitted : await access.inspect(sources.get(item.locator.root), item.locator.relative, admitted.identity, item.expected.size)
     observations[item.path] = result.observation
     if (result.identity) identities.set(item.path, result.identity)
   }
@@ -107,38 +119,41 @@ export async function inspectSources(reads, authorization, sources, access = sou
 }
 
 export async function pinUnits({ units, reads, observations, identities, sources, bucket, transport, assignSourcePins, sealInventory, validateUnit }, access = sourceAccess) {
-  const byPath = new Map(reads.map(item => [item.path, item])), pins = {}, pinHashes = {}, output = [], approvals = [], pinFailures = []
+  const bySourceKey = new Map(reads.map(item => [item.sourceKey, item])), pins = {}, output = [], approvals = [], pinFailures = []
   for (const unit of units) {
     if (unit.status !== 'representable') { output.push(unit); continue }
     try { validateUnit(unit) } catch (error) {
       if (error.message !== 'budget_exceeded') throw error
-      pinFailures.push({ unitId: unit.unitId, code: 'budget_exceeded' }); output.push(unit); continue
+      pinFailures.push({ kind: 'unit', unitId: unit.unitId, code: 'budget_exceeded' }); output.push(unit); continue
     }
     let failure = null
     for (const file of unit.inventory.files) {
-      if (Object.hasOwn(pins, file.sourceRef) && pinHashes[file.sourceRef] !== file.sha256) fail('invalid_selection')
-      if (Object.hasOwn(pins, file.sourceRef)) continue
-      const item = byPath.get(file.path), observed = observations[file.path]
+      if (Object.hasOwn(pins, file.sourceRef)) fail('invalid_selection')
+      const item = bySourceKey.get(file.sourceRef), observed = observations[file.path]
       if (!item || observed?.state !== 'present') fail('missing_source')
       let bytes
       try { bytes = await access.readPinned(sources.get(item.locator.root), item.locator.relative, observed, identities.get(file.path), Math.min(transport.maxUploadBytes, 32 * 1024 * 1024)) }
       catch (error) {
-        if (error.code === 'ENOENT') failure = 'capture_absent'
-        else if (unreadable(error)) failure = 'capture_unreadable'
-        else if (error.message === 'source_changed' || error.message === 'filesystem_identity_mismatch') failure = 'source_changed'
+        if (error.code === 'ENOENT') failure = 'absent'
+        else if (unreadable(error)) failure = 'unreadable'
+        else if (error.message === 'filesystem_identity_mismatch') failure = 'unknown'
+        else if (error.message === 'source_changed') failure = 'changed'
+        else if (error.message === 'source_size_mismatch') failure = 'size_mismatch'
+        else if (error.message === 'source_digest_mismatch') failure = 'digest_mismatch'
         else throw error
+        pinFailures.push({ kind: 'source', entryOrdinal: item.ordinal, stage: 'pin_reread', reason: failure })
         break
       }
       const object = await bucket.put(file.sourceRef, bytes)
-      pins[file.sourceRef] = { version: object.version }; pinHashes[file.sourceRef] = file.sha256
+      pins[file.sourceRef] = { version: object.version }
     }
-    if (failure) { pinFailures.push({ unitId: unit.unitId, code: failure }); output.push(unit); continue }
+    if (failure) { output.push(unit); continue }
     const assigned = assignSourcePins(unit, pins)
     if (!assigned.ok) {
       if (assigned.code !== 'inventory_budget_exceeded') fail(assigned.code)
-      pinFailures.push({ unitId: unit.unitId, code: assigned.code }); output.push(unit); continue
+      pinFailures.push({ kind: 'unit', unitId: unit.unitId, code: assigned.code }); output.push(unit); continue
     }
-    const object = await bucket.put(`inventory/${unit.inventory.inventoryId}.json`, assigned.bytes)
+    const object = await bucket.put(unit.inventoryKey, assigned.bytes)
     const sealed = sealInventory(assigned.unit, { key: object.key, version: object.version }, sha(assigned.bytes))
     if (!sealed.ok) fail(sealed.code)
     output.push(sealed.unit); approvals.push(sealed.approval)

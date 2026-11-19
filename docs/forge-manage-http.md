@@ -64,6 +64,10 @@ not opened. The root is an alias supplied on the command line; the path is
 relative to that root. Actual content bytes are independently observed and
 compared with both expected fields. Missing, unreadable, mismatched, protected
 or escaping paths are not substituted.
+Logical paths and relative locators must be well-formed Unicode scalar strings;
+no normalization or replacement characters are introduced. Capture paths are
+not R2 keys: the compiler allocates bounded ASCII source and inventory keys,
+while retaining the original locator as private evidence.
 Treat the selection, workspace and its capture evidence as sensitive: share keys,
 destinations and protected inventories can be present there.
 
@@ -86,6 +90,10 @@ from a valid exclusions-only selection. Each attributed missing or unreadable
 member blocks its complete source artifact, not just the missing file;
 independent units may still proceed. The ID ledger scopes identity by the full
 source tuple, including source instance and original artifact.
+The private per-unit dependency list retains each required provider's path,
+kind and supplied artifact ID, with `unverified` or `missing` state. A declared
+provider is not an active mount; an empty list means no identified dependency,
+not an inference from a blocked unit.
 
 Unknown or unreadable policy capture blocks its unit, whereas an observed
 unrecognized visibility value is retained for the native warning. Static
@@ -93,6 +101,10 @@ recognition, representation by an eligible unit, native `ready`, and actual
 consumer HTTP authorization are separate outcomes. Literal shortlink destination
 preservation does not prove the target, key or grant association; a dry-run
 does not prove an actual consumer HTTP response.
+A valid team-only alias to `/` can be stored without proving that its destination
+is a selected document. Document-purpose consumers require the actual winning
+selected document or subdocument, not merely an owned stylesheet; resource
+consumers are assessed for their own purpose.
 
 Preparation creates isolated local D1 and R2 state, a synthetic administrator and
 signing material, then pins native object versions and a separately approved
@@ -102,7 +114,12 @@ discover providers, use a host provider transport or claim operating-system
 network isolation. Expected source reread failures and late inventory byte-budget
 failures block the affected unit without invalidating independently sealed units;
 one atomic private checkpoint records the resulting outcomes. This is not a
-crash-recovery guarantee. Planning groups no more than 1,000 approvals per
+crash-recovery guarantee. Private member failure facts retain the entry, affected
+unit, stage (`inspect` or `pin_reread`) and reason. An observed absent
+public/shared page document also reports OR-1 at that stage; an absent stylesheet
+or an unreadable file is not evidence of that missing-document condition. Public
+receipts expose fixed codes and counts, not member paths, page IDs or other
+private evidence. Planning groups no more than 1,000 approvals per
 Worker binding and uses a fresh fixture assertion for each unit's planning
 window without extending native cursor expiry. The nonsecret receipt
 distinguishes fatal, exclusions-only and partial preparations, and reports

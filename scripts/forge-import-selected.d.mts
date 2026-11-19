@@ -13,7 +13,7 @@ export interface Ledger {
   planIds: Record<string, string>
   operationIds: Record<string, string>
 }
-export interface Issue { code: string; path?: string; sourcePageId?: string; unitId?: string; basis?: string; budget?: Budget }
+export interface Issue { code: string; path?: string; sourcePageId?: string | null; unitId?: string; basis?: string; budget?: Budget; entryOrdinal?: number; stage?: 'inspect' | 'pin_reread'; reason?: SourceFailureFact['reason'] }
 export interface Budget {
   files: number; pages: number; edges: number; largestFile: number
   commandBytes: number; envelopeBytes: number; inventoryBytes: number; failed: string[]
@@ -23,13 +23,14 @@ export interface InventoryDraft extends Omit<ApprovedImportInventory, 'files'> {
 }
 interface UnitCommon {
   unitId: string; blockers: Issue[]; budget: Budget
-  dependencies: { path: string; providerArtifactId: string | null; state: 'active' | 'missing' }[]
-  sourceArtifactId: string; maxInventoryBytes: number
+  dependencies: { path: string; providerArtifactId: string | null; kind: 'fragment' | 'asset' | null; state: 'unverified' | 'missing' }[]
+  sourceArtifactId: string; maxInventoryBytes: number; inventoryKey: string | null
   sourceEvidence: { membership: { sourcePageId: string; evidenceRef: string }[]; placement: { path: string; evidenceRef: string }[] }
 }
 export interface RepresentableUnit extends UnitCommon {
   status: 'representable'
   pinState: 'awaiting_source' | 'awaiting_inventory' | 'pinned'
+  inventoryKey: string
   command: BeginCommand
   selection: ImportSelection
   inventory: InventoryDraft
@@ -51,13 +52,16 @@ export interface Translation {
 }
 export type Observation =
   | { state: 'present'; size: number; sha256: string }
-  | { state: 'absent' | 'unreadable' | 'unknown' }
+  | { state: 'absent' | 'unreadable' | 'unknown' | 'changed' | 'size_mismatch' }
+export interface SourceFailureFact { kind: 'source'; entryOrdinal: number; stage: 'inspect' | 'pin_reread'; reason: 'absent' | 'unreadable' | 'unknown' | 'changed' | 'size_mismatch' | 'digest_mismatch' }
+export interface UnitFailureFact { kind: 'unit'; unitId: string; code: 'budget_exceeded' | 'inventory_budget_exceeded' }
+export function isProtectedCaptureRelative(value: unknown): boolean
 export function emptyLedger(): Ledger
 export function preflightSelection(input: unknown, ledger?: unknown): Promise<
   | { kind: 'fatal'; result: Translation }
-  | { kind: 'prepared'; reads: { ordinal: number; path: string; locator: { root: string; relative: string }; expected: { size: number; sha256: string } }[]; protectedLocators: { ordinal: number; locator: { root: string; relative: string } }[]; reader: unknown; limits: unknown; captureRoots: string[]; finish(observations?: unknown): Promise<Translation> }
+  | { kind: 'prepared'; reads: { ordinal: number; path: string; sourceKey: string; unitId: string; sourcePageId: string | null; publicDocument: boolean; locator: { root: string; relative: string }; expected: { size: number; sha256: string } }[]; protectedLocators: { ordinal: number; locator: { root: string; relative: string } }[]; inventoryKeys: string[]; reader: unknown; limits: unknown; captureRoots: string[]; finish(observations?: unknown): Promise<Translation> }
 >
-export function projectTranslation(translation: Translation, pinFailures?: { unitId: string; code: string }[]): Translation
+export function projectTranslation(translation: Translation, pinFailures?: (SourceFailureFact | UnitFailureFact)[]): Translation
 export function assignSourcePins(unit: Unit, pins: unknown):
   | { ok: false; code: string; path?: string }
   | { ok: true; unit: RepresentableUnit; bytes: Uint8Array }

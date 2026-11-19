@@ -11,12 +11,12 @@ import { bindPrivateRoot, bindSourceRoot } from '../plugins/unkillable-forge/dis
 import { authorizeSources, inspectSources, pinUnits, sourceAccess, createAssertionSigner } from './forge-import-physical.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-let preflightSelection, projectTranslation, assignSourcePins, sealInventory, stable
+let preflightSelection, projectTranslation, assignSourcePins, sealInventory, stable, isProtectedCaptureRelative
 async function loadTranslator() {
   const result = await build({ entryPoints: [join(root, 'scripts/forge-import-selected.mjs')], bundle: true, write: false, format: 'esm', platform: 'neutral', target: 'es2022', logLevel: 'silent' })
   if (result.outputFiles.length !== 1) fail('bundle_error')
   const module = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].contents).toString('base64')}`)
-  ;({ preflightSelection, projectTranslation, assignSourcePins, sealInventory, stable } = module)
+  ;({ preflightSelection, projectTranslation, assignSourcePins, sealInventory, stable, isProtectedCaptureRelative } = module)
 }
 const issuer = 'https://team.cloudflareaccess.com'
 const certs = `${issuer}/cdn-cgi/access/certs`
@@ -179,7 +179,7 @@ export async function prepare(args, access = sourceAccess) {
       sources.set(alias, await bindSourceRoot(path))
     }
     if (preflight.captureRoots.length !== sources.size || preflight.captureRoots.some(alias => !sources.has(alias))) fail('invalid_roots')
-    const authorization = await authorizeSources({ reads: preflight.reads, protectedLocators: preflight.protectedLocators, sources, rootPaths }, access)
+    const authorization = await authorizeSources({ reads: preflight.reads, protectedLocators: preflight.protectedLocators, inventoryKeys: preflight.inventoryKeys, sources, rootPaths, isProtectedCaptureRelative }, access)
     const { observations, identities } = await inspectSources(preflight.reads, authorization, sources, access)
     const translated = await preflight.finish(observations)
     if (!translated.ledger || !Array.isArray(translated.units) || !Array.isArray(translated.census)) fail('invalid_selection')
@@ -198,8 +198,9 @@ export async function prepare(args, access = sourceAccess) {
       for (const migration of await readD1Migrations(join(root, 'migrations'))) for (const sql of migration.queries) await db.prepare(sql).run()
       await db.batch([db.prepare("INSERT INTO instance_meta (singleton, instance_id, contract_version, created_at) VALUES (1, 'test-forge', 1, 1)"), db.prepare("INSERT INTO principals (principal_id, issuer, subject, created_at) VALUES ('pr_aaaaaaaaaaaaaaaaaaaaaaaaaa', ?, 'fixture-admin', 1)").bind(issuer), db.prepare("INSERT INTO role_grants (role_grant_id, principal_id, role, scope_kind, origin, granted_at) VALUES ('rg_aaaaaaaaaaaaaaaaaaaaaaaaaa', 'pr_aaaaaaaaaaaaaaaaaaaaaaaaaa', 'admin', 'installation', 'bootstrap', 1)")])
       const bucket = await mf.getR2Bucket('FORGE_IMPORT_SOURCE', 'manage')
+      if (translated.fatal && translated.units.some(unit => unit.status === 'representable')) fail('invalid_selection')
       const pinned = translated.fatal
-        ? { units: translated.units, approvals: [], pinFailures: translated.units.filter(unit => unit.status === 'representable').map(unit => ({ unitId: unit.unitId, code: 'fatal_translation' })) }
+        ? { units: translated.units, approvals: [], pinFailures: [] }
         : await pinUnits({ units: translated.units, reads: preflight.reads, observations, identities, sources, bucket, transport, assignSourcePins, sealInventory, validateUnit: unit => checkEnvelope(unit.selection, null, transport) }, access)
       const projected = projectTranslation(translated, pinned.pinFailures)
       const byUnit = new Map(pinned.units.map(unit => [unit.unitId, unit]))
@@ -210,6 +211,7 @@ export async function prepare(args, access = sourceAccess) {
       state.accounting = projected.accounting
       state.census = projected.census
       state.warnings = projected.warnings
+      state.facts = projected.facts
     } finally { await mf.dispose() }
     await workspace.replace('state.json', Buffer.from(JSON.stringify(state)))
     if (state.fatal) process.exitCode = 1

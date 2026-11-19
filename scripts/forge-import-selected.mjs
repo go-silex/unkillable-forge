@@ -7,9 +7,11 @@ import { importPreviewOwned, orderedOriginalImageCandidatePaths } from "../domai
 import { conflictingImportOperationIndexes } from "../domains/catalogue/import-operation-set.ts"
 import { validateReaderProfile } from "../domains/catalogue/instance-config.ts"
 import { documentRouteOf } from "../domains/catalogue/revision-paths.ts"
-import { validateBeginCommand } from "../domains/publication/staging.ts"
+import { validateBeginCommand, isPublicationToken } from "../domains/publication/staging.ts"
 import { isValidAliasPath, isValidAliasDestination, aliasMatchesPath, aliasLocation } from "../domains/catalogue/alias-validation.ts"
 import { validShortlinkIdentity } from "../domains/catalogue/shortlink-identity.ts"
+import { newId, isCatalogueId } from "../domains/catalogue/ids.ts"
+import { isUnicodeScalarString } from "../domains/store/revision-store.ts"
 
 
 const ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
@@ -77,9 +79,7 @@ function opaque() {
   if (bits) encoded += ALPHABET[(value << (5 - bits)) & 31]
   return encoded
 }
-function engineId(prefix) {
-  return `${prefix}_${opaque()}`
-}
+const engineId = newId
 export function emptyLedger() {
   return { version: 2, pages: {}, grants: {}, idempotencyKeys: {}, inventoryIds: {}, selectionIds: {}, planIds: {}, operationIds: {} }
 }
@@ -87,10 +87,35 @@ function ledgerOf(value) {
   const ledger = emptyLedger()
   if (value == null) return ledger
   if (!exact(value, Object.keys(ledger)) || value.version !== 2) return null
-  for (const key of Object.keys(ledger)) {
-    if (key === "version") continue
-    if (!record(value[key]) || Object.values(value[key]).some(item => typeof item !== "string" || !item)) return null
+  const validators = {
+    pages: item => isCatalogueId(item, "pg"), grants: item => isCatalogueId(item, "gr"),
+    idempotencyKeys: isPublicationToken, planIds: isPublicationToken,
+    inventoryIds: item => typeof item === "string" && item.length > 0 && item.length <= 128,
+    selectionIds: item => typeof item === "string" && item.length > 0 && item.length <= 128,
+    operationIds: item => typeof item === "string" && item.length > 0 && item.length <= 1024,
+  }
+  for (const [key, validate] of Object.entries(validators)) {
+    if (!record(value[key]) || Object.values(value[key]).some(item => !validate(item))) return null
     ledger[key] = { ...value[key] }
+  }
+  for (const key of ["pages", "grants", "idempotencyKeys", "planIds"]) {
+    const values = Object.values(ledger[key])
+    if (new Set(values).size !== values.length) return null
+  }
+  const pairs = new Set()
+  for (const key of Object.keys(ledger.inventoryIds)) if (Object.hasOwn(ledger.selectionIds, key)) {
+    const pair = stable([ledger.inventoryIds[key], ledger.selectionIds[key]])
+    if (pairs.has(pair)) return null
+    pairs.add(pair)
+  }
+  const operationsByProposal = new Map()
+  for (const [key, id] of Object.entries(ledger.operationIds)) {
+    let tuple
+    try { tuple = JSON.parse(key) } catch { return null }
+    if (!Array.isArray(tuple) || tuple.length < 5) return null
+    const proposal = stable(tuple.slice(0, 4)), seen = operationsByProposal.get(proposal) ?? new Set()
+    if (seen.has(id)) return null
+    seen.add(id); operationsByProposal.set(proposal, seen)
   }
   return ledger
 }
@@ -123,17 +148,16 @@ function shellPath(path, declared, resulting = new Set()) {
   const slug = subtreeSlugOf(path)
   return slug !== null ? !resulting.has(slug) : isReservedShellPath(path) || declared.has(path)
 }
+export function isProtectedCaptureRelative(value) {
+  return typeof value === "string" && value.split("/").some(part => part === ".env" || part.startsWith(".env.") || part === ".git" || part === ".ssh")
+}
 function safeRelative(value) {
-  if (typeof value !== "string" || !value || value.startsWith("/") || value.includes("\\") || value.includes("\0")) return false
-  const parts = value.split("/")
-  if (parts.some(part => !part || part === "." || part === "..")) return false
-  const base = parts.at(-1)
-  return base !== ".env" && !base.startsWith(".env.")
+  return isUnicodeScalarString(value) && !!value && !value.startsWith("/") && !value.includes("\\") && !value.includes("\0") && !value.split("/").some(part => !part || part === "." || part === "..")
 }
 function observationOf(observations, path) {
   if (!record(observations) || !Object.hasOwn(observations, path)) return { state: "unknown" }
   const value = observations[path]
-  if (!record(value) || !one(value.state, ["present", "absent", "unreadable", "unknown"])) return null
+  if (!record(value) || !one(value.state, ["present", "absent", "unreadable", "unknown", "changed", "size_mismatch"])) return null
   if (value.state !== "present") return exact(value, ["state"]) ? { state: value.state } : null
   return exact(value, ["state", "size", "sha256"]) && integer(value.size) && value.size >= 0 && hex(value.sha256) ? value : null
 }
@@ -168,7 +192,7 @@ function parsedConsumer(url, reader) {
     return parseRequest(new Request(parsed.href), reader).parsed
   } catch { return null }
 }
-function targetMatches(parsed, page, entries, ownersByPath, previewByPage) {
+function winningResource(parsed, page, entries, ownersByPath, previewByPage) {
   const expected = documentRoute(page.documentPath)
   const matches = route => expected && route.kind === expected.kind && (route.kind === "subtree" ? route.slug === expected.slug : route.pageRef === expected.pageRef)
   const selected = path => {
@@ -178,17 +202,20 @@ function targetMatches(parsed, page, entries, ownersByPath, previewByPage) {
     if (expected?.kind === "subtree") return path.startsWith(`/a/${expected.slug}/`)
     return (ownersByPath.get(path) ?? []).some(owner => owner.ownerSourcePageId === page.sourcePageId)
   }
-  if (parsed?.kind === "share") return matches(parsed.route) && parsed.candidates.some(selected)
-  if (parsed?.kind === "card") {
-    if (parsed.targets.length !== 1 || !matches(parsed.targets[0].route)) return false
-    const eligible = path => selected(path) && ["image/jpeg", "image/png"].includes(entries.get(path)?.contentType)
+  let path = null
+  if (parsed?.kind === "share" && matches(parsed.route)) path = parsed.candidates.find(selected)
+  else if (parsed?.kind === "card" && parsed.targets.length === 1 && matches(parsed.targets[0].route)) {
+    const eligible = candidate => selected(candidate) && ["image/jpeg", "image/png"].includes(entries.get(candidate)?.contentType)
     const explicit = previewByPage.get(page.sourcePageId)
     const winning = explicit && eligible(explicit) ? explicit : orderedOriginalImageCandidatePaths(expected).find(eligible)
-    return winning === parsed.targets[0].path
-  }
-  if (parsed?.kind === "subtree") return expected?.kind === "subtree" && parsed.slug === expected.slug && parsed.candidates.some(selected)
-  if (parsed?.kind === "tree") return expected?.kind === "tree_page" && parsed.pageRef === expected.pageRef && parsed.candidates.some(selected)
-  return false
+    if (winning === parsed.targets[0].path) path = winning
+  } else if (parsed?.kind === "subtree" && expected?.kind === "subtree" && parsed.slug === expected.slug) path = parsed.candidates.find(selected)
+  else if (parsed?.kind === "tree" && expected?.kind === "tree_page" && parsed.pageRef === expected.pageRef) path = parsed.candidates.find(selected)
+  return path ? { path, kind: entries.get(path).graphClass, governingPage: page.sourcePageId } : null
+}
+function targetMatches(parsed, page, entries, ownersByPath, previewByPage, purpose = null) {
+  const winner = winningResource(parsed, page, entries, ownersByPath, previewByPage)
+  return !!winner && (purpose !== "document" || ["page_document", "subdocument"].includes(winner.kind))
 }
 function budget(selection, inventoryBytes, limits) {
   const command = selection.command
@@ -231,9 +258,9 @@ export async function preflightSelection(input, ledgerInput = null) {
   }
   const roots = new Set(input.captureRoots)
   const shells = new Set(input.reader.shellPaths.filter(path => typeof path === "string"))
-  const entries = new Map()
+  const entries = new Map(), entryOrdinals = new Map()
   let contradictory = false
-  for (const entry of input.entries) {
+  for (const [ordinal, entry] of input.entries.entries()) {
     const path = record(entry) && typeof entry.path === "string" ? entry.path : undefined
     const nonContent = one(entry?.graphClass, ["shell", "excluded", "unresolved"])
     const validFingerprint = exact(entry?.expected, ["size", "sha256"]) && integer(entry.expected.size) && entry.expected.size >= 0 && hex(entry.expected.sha256)
@@ -247,6 +274,8 @@ export async function preflightSelection(input, ledgerInput = null) {
       contradictory = true
       compatibility.unsupported.push(note("duplicate_path", { path: entry.path }))
     }
+    if (isProtectedCaptureRelative(entry.locator.relative) && (!roots.has(entry.locator.root) || !safeRelative(entry.locator.relative))) contradictory = true
+    entryOrdinals.set(entry.path, ordinal)
     if (!roots.has(entry.locator.root) || !safeRelative(entry.locator.relative)) compatibility.unsupported.push(note("unsafe_locator", { path: entry.path }))
     entries.set(entry.path, entry)
   }
@@ -295,6 +324,11 @@ export async function preflightSelection(input, ledgerInput = null) {
   const pageKey = page => stable([input.sourceInstance, page.membership.sourceArtifactId, page.sourcePageId])
   const proposalKey = (unitId, ...parts) => stable([input.sourceInstance, unitId, input.selectionRef, input.selectionDigest, ...parts])
   const mountPaths = new Set(input.providerMounts.filter(record).map(mount => mount.path))
+  const mountsByPath = new Map()
+  for (const mount of input.providerMounts) if (record(mount)) {
+    const list = mountsByPath.get(mount.path) ?? []
+    list.push(mount); mountsByPath.set(mount.path, list)
+  }
   const ownerUnitsByPath = new Map()
   for (const owner of input.owners) {
     const unitId = pageBySource.get(owner?.ownerSourcePageId)?.membership.sourceArtifactId
@@ -368,7 +402,8 @@ export async function preflightSelection(input, ledgerInput = null) {
     const unitId = page.membership.sourceArtifactId
     const entry = entries.get(page.documentPath)
     let code = null
-    if (!entry) code = page.visibility.state === "present" && ["public", "shared"].includes(page.visibility.value) ? "or1_missing_document" : "page_without_document"
+    if (!isUnicodeScalarString(page.documentPath)) code = "invalid_logical_path"
+    else if (!entry) code = page.visibility.state === "present" && ["public", "shared"].includes(page.visibility.value) ? "or1_missing_document" : "page_without_document"
     else if (entry.graphClass !== "page_document" || entry.placement?.sourceArtifactId !== unitId) {
       code = "document_placement_conflict"
       if (entry.placement?.sourceArtifactId) blockedUnits.add(entry.placement.sourceArtifactId)
@@ -408,7 +443,8 @@ export async function preflightSelection(input, ledgerInput = null) {
   for (const entry of entries.values()) {
     if (!entry.placement) continue
     let code = null
-    if (!roots.has(entry.locator.root) || !safeRelative(entry.locator.relative) || !text(`capture/${entry.locator.root}/${entry.locator.relative}`)) code = "unsafe_locator"
+    if (!isUnicodeScalarString(entry.path)) code = "invalid_logical_path"
+    else if (!roots.has(entry.locator.root) || !safeRelative(entry.locator.relative) || isProtectedCaptureRelative(entry.locator.relative)) code = "unsafe_locator"
     else if (exclusions.has(entry.path)) code = "excluded_content_contradiction"
     else if (entry.graphClass === "fragment" && !(ownersByPath.get(entry.path)?.length)) code = "fragment_without_owner"
     else if (entry.contentType === null || !MIME.test(entry.contentType) || (entry.graphClass === "asset" && entry.path.endsWith(".html")) || (entry.graphClass === "page_document" && (!documentRoute(entry.path) || entry.contentType !== "text/html")) || (entry.graphClass === "subdocument" && (entry.contentType !== "text/html" || !entry.path.endsWith(".html"))) || (entry.graphClass === "fragment" && entry.contentType !== "text/html")) code = "contradictory_class"
@@ -418,6 +454,22 @@ export async function preflightSelection(input, ledgerInput = null) {
       blockedUnits.add(entry.placement.sourceArtifactId)
       compatibility.unsupported.push(note(code, { path: entry.path, unitId: entry.placement.sourceArtifactId }))
     }
+  }
+  const dependenciesByUnit = new Map()
+  const dependencyKeysByUnit = new Map()
+  for (const owner of owners) {
+    const unitId = pageBySource.get(owner.ownerSourcePageId)?.membership.sourceArtifactId
+    if (!unitId || entries.get(owner.path)?.placement?.sourceArtifactId === unitId) continue
+    const mounts = mountsByPath.get(owner.path) ?? []
+    const localKind = entries.get(owner.path)?.graphClass
+    const dependencies = mounts.length
+      ? mounts.map(mount => ({ path: owner.path, providerArtifactId: mount.artifactId, kind: mount.kind, state: "unverified" }))
+      : [{ path: owner.path, providerArtifactId: null, kind: one(localKind, ["fragment", "asset"]) ? localKind : null, state: "missing" }]
+    const list = dependenciesByUnit.get(unitId) ?? [], keys = dependencyKeysByUnit.get(unitId) ?? new Set()
+    for (const dependency of dependencies) if (!keys.has(stable(dependency))) {
+      keys.add(stable(dependency)); list.push(dependency)
+    }
+    dependenciesByUnit.set(unitId, list); dependencyKeysByUnit.set(unitId, keys)
   }
   for (const owner of owners) {
     const page = pageBySource.get(owner.ownerSourcePageId)
@@ -495,12 +547,12 @@ export async function preflightSelection(input, ledgerInput = null) {
         if (valid) {
           const location = aliasLocation(alias.aliasKind, alias.path, alias.to, path)
           const destination = parsedConsumer(new URL(location, url.origin).href, input.reader)
-          valid = (location === "/" && page.documentPath === "/index.html") || !!destination && targetMatches(destination, page, entries, ownersByPath, previewByPage)
+          valid = !!destination && targetMatches(destination, page, entries, ownersByPath, previewByPage, "document")
         }
       } catch { valid = false }
     } else if (valid) {
       const kindMatches = row.purpose === "share" ? parsed?.kind === "share" : row.purpose === "card" ? parsed?.kind === "card" : parsed?.kind === "tree" || parsed?.kind === "subtree"
-      valid = !!parsed && kindMatches && targetMatches(parsed, page, entries, ownersByPath, previewByPage)
+      valid = !!parsed && kindMatches && targetMatches(parsed, page, entries, ownersByPath, previewByPage, row.purpose === "document" ? "document" : null)
       if (valid && (parsed.kind === "share" || parsed.kind === "card")) valid = page.visibility.state === "present" && page.visibility.value === "shared" && page.share.state === "present" && parsed.key === page.share.key
     }
     const code = parsed?.kind === "card" && parsed.targets.length > 1 ? "two_candidate_card" : "consumer_url_unsupported"
@@ -595,6 +647,10 @@ export async function preflightSelection(input, ledgerInput = null) {
     const unitId = proposedUnits[index], rows = staticOperations.get(unitId) ?? []
     rows.push(proposed[index]); staticOperations.set(unitId, rows)
   }
+  const namespaces = new Map()
+  for (const unitId of selectedByUnit.keys()) if (!blockedUnits.has(unitId)) {
+    namespaces.set(unitId, await digest(stable(["forge-offline-source-v1", input.sourceInstance, unitId, input.selectionRef, input.selectionDigest])))
+  }
   for (const [unitId, members] of selectedByUnit) {
     if (blockedUnits.has(unitId)) continue
     const sourceEntries = (staticEntries.get(unitId) ?? []).slice().sort((a, b) => a.path < b.path ? -1 : 1)
@@ -609,7 +665,7 @@ export async function preflightSelection(input, ledgerInput = null) {
     const inventory = { version: 1, inventoryId, selectionId, sourceInstance: input.sourceInstance, sourceArtifactId: unitId, approvalRef: input.approvalRef, kind: input.kind, command,
       pageMappings: members.map(page => ({ sourcePageId: page.sourcePageId, pageId: policyOperations.get(page.sourcePageId).policy.pageId, documentPath: page.documentPath, route: routeOf(page.documentPath), ownershipEvidenceRef: page.ownershipEvidenceRef })).sort((a, b) => a.pageId < b.pageId ? -1 : 1),
       edgeEvidence: edges, evidence: { selectionDigest: input.selectionDigest, corpusDigest: input.corpusDigest, mappingRef: input.mappingRef, capturedAt: input.capturedAt, complete: true, g1bRef: input.g1bRef },
-      files: sourceEntries.map(entry => ({ path: entry.path, kind: entry.graphClass === "page_document" ? "document" : entry.graphClass, contentType: entry.contentType, size: entry.expected.size, sha256: entry.expected.sha256, sourceRef: `capture/${entry.locator.root}/${entry.locator.relative}`, sourceVersion: null, provenance: entry.provenance })), operations: staticOperations.get(unitId) ?? [] }
+      files: sourceEntries.map(entry => ({ path: entry.path, kind: entry.graphClass === "page_document" ? "document" : entry.graphClass, contentType: entry.contentType, size: entry.expected.size, sha256: entry.expected.sha256, sourceRef: `capture/v1/${namespaces.get(unitId)}/${entryOrdinals.get(entry.path)}`, sourceVersion: null, provenance: entry.provenance })), operations: staticOperations.get(unitId) ?? [] }
     try { validateBeginCommand(command) } catch {
       blockedUnits.add(unitId)
       compatibility.unsupported.push(note("invalid_begin_command", { unitId }))
@@ -638,10 +694,10 @@ export async function preflightSelection(input, ledgerInput = null) {
       unitId, status: blocked ? "blocked" : "representable", pinState: blocked ? "blocked" : "awaiting_source",
       blockers: issuesByUnit.get(unitId) ?? [],
       budget: draft?.cost ?? { files: unitEntries.length, pages: members.length, edges: (staticEdges.get(unitId) ?? []).length, largestFile: 0, commandBytes: 0, envelopeBytes: 0, inventoryBytes: 0, failed: [] },
-      dependencies: [],
+      dependencies: dependenciesByUnit.get(unitId) ?? [],
       sourceEvidence: { membership: members.map(page => ({ sourcePageId: page.sourcePageId, evidenceRef: page.membership.evidenceRef })), placement: unitEntries.map(entry => ({ path: entry.path, evidenceRef: entry.placement.evidenceRef })) },
       command: blocked ? null : draft.command, selection: blocked ? null : draft.selection, inventory: blocked ? null : draft.inventory,
-      sourceArtifactId: unitId, maxInventoryBytes: input.limits.maxInventoryBytes,
+      sourceArtifactId: unitId, maxInventoryBytes: input.limits.maxInventoryBytes, inventoryKey: blocked ? null : `inventory/v1/${namespaces.get(unitId)}.json`,
     }
   }).sort((a, b) => a.unitId < b.unitId ? -1 : 1)
   const facts = []
@@ -650,12 +706,14 @@ export async function preflightSelection(input, ledgerInput = null) {
   for (let ordinal = 0; ordinal < input.entries.length; ordinal++) {
     const entry = input.entries[ordinal], unitId = entry.placement?.sourceArtifactId ?? null
     const resulting = subtreesByUnit.get(unitId) ?? new Set()
-    const protectedPath = exclusions.has(entry.path) || entry.graphClass === "shell" || entry.graphClass === "excluded" || (subtreeSlugOf(entry.path) === null && shellPath(entry.path, shells, resulting))
+    const protectedPath = isProtectedCaptureRelative(entry.locator.relative) || exclusions.has(entry.path) || entry.graphClass === "shell" || entry.graphClass === "excluded" || (subtreeSlugOf(entry.path) === null && shellPath(entry.path, shells, resulting))
     const excluded = !entry.placement && protectedPath && exclusions.has(entry.path)
     const disposition = excluded ? "excluded" : !entry.placement || blockedUnits.has(unitId) || protectedPath ? "rejected" : "represented"
-    rowFact("entry", ordinal, [unitId, pageByPath.get(entry.path)?.membership.sourceArtifactId], disposition, { path: entry.path, reason: excluded ? exclusions.get(entry.path).reason : disposition === "represented" ? "representable" : !entry.placement ? entry.graphClass === "unresolved" ? "unresolved_path" : "exclusion_evidence_required" : "preflight_blocked" })
+    const sourcePage = pageByPath.get(entry.path)
+    const publicOrSharedDocument = !!sourcePage && entry.graphClass === "page_document" && sourcePage.membership.sourceArtifactId === unitId && sourcePage.visibility.state === "present" && ["public", "shared"].includes(sourcePage.visibility.value)
+    rowFact("entry", ordinal, [unitId, sourcePage?.membership.sourceArtifactId], disposition, { path: entry.path, unitId, sourcePageId: sourcePage?.sourcePageId ?? null, publicOrSharedDocument, reason: excluded ? exclusions.get(entry.path).reason : disposition === "represented" ? "representable" : !entry.placement ? entry.graphClass === "unresolved" ? "unresolved_path" : "exclusion_evidence_required" : "preflight_blocked" })
     if (protectedPath) protectedLocators.push({ ordinal, locator: entry.locator })
-    else if (disposition === "represented") reads.push({ ordinal, path: entry.path, locator: entry.locator, expected: entry.expected, unitId, sourcePageId: pageByPath.get(entry.path)?.sourcePageId ?? null, publicDocument: !!pageByPath.get(entry.path) && ["public", "shared"].includes(pageByPath.get(entry.path).visibility.value) })
+    else if (disposition === "represented") reads.push({ ordinal, path: entry.path, locator: entry.locator, expected: entry.expected, sourceKey: `capture/v1/${namespaces.get(unitId)}/${ordinal}`, unitId, sourcePageId: sourcePage?.sourcePageId ?? null, publicDocument: publicOrSharedDocument })
     if (!entry.placement && !excluded) compatibility.unsupported.push(note(entry.graphClass === "unresolved" ? "unresolved_path" : "exclusion_evidence_required", { path: entry.path }))
     if (excluded) compatibility.represented.push(note("excluded", { path: entry.path }))
   }
@@ -683,22 +741,21 @@ export async function preflightSelection(input, ledgerInput = null) {
   }
   const base = { ok: false, fatal: null, schema: SELECTED_IMPORT_SCHEMA, kind: input.kind, sourceInstance: input.sourceInstance, targetBasis: input.targetBasis, ledger, facts, units, approvalRef: input.approvalRef, g1bRef: input.g1bRef }
   let finished = false
-  return { kind: "prepared", reads: structuredClone(reads), protectedLocators: structuredClone(protectedLocators), reader: structuredClone(input.reader), limits: structuredClone(input.limits), captureRoots: [...input.captureRoots], async finish(observations = {}) {
+  const inventoryKeys = units.filter(unit => unit.status === "representable").map(unit => unit.inventoryKey)
+  const keys = [...inventoryKeys, ...reads.map(read => read.sourceKey)]
+  if (new Set(keys).size !== keys.length) throw new Error("duplicate_source_key")
+  return { kind: "prepared", reads: structuredClone(reads), protectedLocators: structuredClone(protectedLocators), inventoryKeys, reader: structuredClone(input.reader), limits: structuredClone(input.limits), captureRoots: [...input.captureRoots], async finish(observations = {}) {
     if (finished) throw new Error("preflight_already_finished")
     finished = true
     const failures = []
     for (const read of reads) {
       const observed = observationOf(observations, read.path)
-      let code = null
-      if (!observed) code = "contradictory_capture"
-      else if (observed.state !== "present") code = observed.state === "absent" && read.publicDocument ? "or1_missing_document" : `capture_${observed.state}`
-      else if (observed.size !== read.expected.size || observed.sha256 !== read.expected.sha256) code = "capture_fingerprint_mismatch"
-      if (code) {
-        failures.push({ unitId: read.unitId, code })
-        const issue = note(code, { path: read.path, sourcePageId: read.sourcePageId, unitId: read.unitId, basis: observed?.state === "absent" ? "observed_absent" : null })
-        facts.push({ kind: "diagnostic", category: "unsupported", unitIds: [read.unitId], issue })
-        if (code === "capture_unknown" || code === "capture_unreadable") facts.push({ kind: "diagnostic", category: "notObserved", unitIds: [read.unitId], issue })
-      }
+      let reason = null
+      if (!observed) reason = "unknown"
+      else if (observed.state !== "present") reason = observed.state
+      else if (observed.size !== read.expected.size) reason = "size_mismatch"
+      else if (observed.sha256 !== read.expected.sha256) reason = "digest_mismatch"
+      if (reason) failures.push({ kind: "source", entryOrdinal: read.ordinal, stage: "inspect", reason })
     }
     return projectTranslation(base, failures)
   } }
@@ -708,29 +765,43 @@ export async function preflightSelection(input, ledgerInput = null) {
 // demote a unit, never make a rejected fact or unit representable.
 export function projectTranslation(translation, pinFailures = []) {
   const failures = new Map()
-  for (const failure of pinFailures) {
-    if (!text(failure?.unitId) || !text(failure?.code)) throw new Error("invalid_pin_failure")
-    const list = failures.get(failure.unitId) ?? []
-    list.push(note(failure.code, { unitId: failure.unitId })); failures.set(failure.unitId, list)
-  }
   const knownUnits = new Set(translation.units.map(unit => unit.unitId))
   const facts = [...translation.facts]
-  const knownIssues = new Set(facts.filter(fact => fact.kind === "diagnostic" && fact.category === "unsupported").map(fact => stable([fact.issue.unitId ?? null, fact.issue.code])))
-  for (const [unitId, issues] of failures) {
-    if (!knownUnits.has(unitId)) throw new Error("invalid_pin_failure")
-    for (const issue of issues) {
-      const key = stable([unitId, issue.code])
-      if (!knownIssues.has(key)) {
-        facts.push({ kind: "diagnostic", category: "unsupported", unitIds: [unitId], issue })
-        knownIssues.add(key)
-      }
+  const entriesByOrdinal = new Map(facts.filter(fact => fact.kind === "entry").map(fact => [fact.ordinal, fact]))
+  const knownIssues = new Set(facts.filter(fact => fact.kind === "diagnostic").map(fact => stable([fact.category, fact.issue])))
+  const add = (unitId, issue, category = "unsupported") => {
+    const key = stable([category, issue])
+    if (!knownIssues.has(key)) {
+      facts.push({ kind: "diagnostic", category, unitIds: [unitId], issue })
+      knownIssues.add(key)
     }
+    if (category === "unsupported") {
+      const list = failures.get(unitId) ?? []
+      if (!list.some(item => stable(item) === stable(issue))) list.push(issue)
+      failures.set(unitId, list)
+    }
+  }
+  for (const failure of pinFailures) {
+    if (failure?.kind === "unit" && exact(failure, ["kind", "unitId", "code"]) && knownUnits.has(failure.unitId) && one(failure.code, ["budget_exceeded", "inventory_budget_exceeded"])) {
+      add(failure.unitId, note(failure.code, { unitId: failure.unitId }))
+      continue
+    }
+    if (!exact(failure, ["kind", "entryOrdinal", "stage", "reason"]) || failure.kind !== "source" || !integer(failure.entryOrdinal) || !one(failure.stage, ["inspect", "pin_reread"]) || !one(failure.reason, ["absent", "unreadable", "unknown", "changed", "size_mismatch", "digest_mismatch"])) throw new Error("invalid_pin_failure")
+    const entry = entriesByOrdinal.get(failure.entryOrdinal)
+    if (!entry || !knownUnits.has(entry.unitId)) throw new Error("invalid_pin_failure")
+    const detail = { unitId: entry.unitId, entryOrdinal: entry.ordinal, path: entry.path, sourcePageId: entry.sourcePageId, stage: failure.stage, reason: failure.reason }
+    const codes = { absent: "capture_absent", unreadable: "capture_unreadable", unknown: "capture_unknown", changed: "source_changed", size_mismatch: "capture_size_mismatch", digest_mismatch: "capture_fingerprint_mismatch" }
+    const issue = { code: codes[failure.reason], ...detail }
+    add(entry.unitId, issue)
+    if (failure.reason === "unknown" || failure.reason === "unreadable") add(entry.unitId, issue, "notObserved")
+    if (failure.reason === "absent" && entry.publicOrSharedDocument) add(entry.unitId, { code: "or1_missing_document", ...detail, basis: "observed_absent" })
   }
   const units = translation.units.map(unit => {
     const issues = failures.get(unit.unitId) ?? []
     if (unit.status === "blocked" || issues.length) {
       const { approval: _approval, ...rest } = unit
-      return { ...rest, status: "blocked", pinState: "blocked", command: null, selection: null, inventory: null, blockers: [...unit.blockers, ...issues] }
+      const blockerKeys = new Set(unit.blockers.map(stable))
+      return { ...rest, status: "blocked", pinState: "blocked", command: null, selection: null, inventory: null, blockers: [...unit.blockers, ...issues.filter(issue => !blockerKeys.has(stable(issue)))] }
     }
     return unit
   })

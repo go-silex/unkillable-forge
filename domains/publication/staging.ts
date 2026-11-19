@@ -1,11 +1,11 @@
 import { executeGuarded, PolicyError, type GuardRequest, type OwnershipEdge } from '../catalogue/guard'
 import { requireManageActor, type ManageActor } from '../catalogue/principals'
-import { newId } from '../catalogue/ids'
+import { newId, isCatalogueId as id } from '../catalogue/ids'
 import { documentRouteOf, validateRevisionPaths } from '../catalogue/revision-paths'
 import { subtreeSlugOf } from '../catalogue/routing/grammar'
 import { assertPrepareAuthority, assertReplayAuthority } from '../catalogue/read'
 import { livePagesStatement, livePagesFrom } from '../catalogue/artifact-pages'
-import { StoreError } from '../store/revision-store'
+import { StoreError, isUnicodeScalarString } from '../store/revision-store'
 import type { BeginCommand, PublicationDeps, PublicationFile, PublicationPage, PublicationStatus, PublicationUploadStatus } from './types'
 
 type Session = { session_id: string; instance_id: string; actor_principal_id: string; actor_authority_epoch: number; request_digest: string; artifact_id: string; artifact_is_new: number; revision_id: string; base_revision_id: string | null; base_content_version: number; expires_at: number; closed_at: number | null; import_plan_id: string | null; import_plan_digest: string | null }
@@ -15,7 +15,6 @@ type PageScope = Pick<PageRow, 'page_id' | 'disposition' | 'expected_policy_epoc
 type StatusFile = Pick<FileRow, 'path' | 'source' | 'stored_at'>
 type StatusPage = Pick<PageRow, 'page_id' | 'disposition'>
 type EdgeRow = { owner_page_id: string; path: string; provider_artifact_id: string }
-const id = (s: unknown, prefix: string): s is string => typeof s === 'string' && new RegExp(`^${prefix}_[a-z2-7]{26}$`).test(s)
 const fail = (): never => { throw new PolicyError('invalid_state') }
 const mime = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+\/[!#$%&'*+\-.^_`|~0-9A-Za-z]+(?:[ \t]*;[ \t]*[!#$%&'*+\-.^_`|~0-9A-Za-z]+=(?:[!#$%&'*+\-.^_`|~0-9A-Za-z]+|"(?:[\t !#-\[\]-~]|\\[\t -~])*"))*[ \t]*$/
 const encoder = new TextEncoder()
@@ -52,10 +51,14 @@ function checkImportDeadline(deadline?: number): void {
   if (deadline !== undefined && (!Number.isFinite(deadline) || performance.now() >= deadline)) throw new PolicyError('unavailable', 'import_timeout')
 }
 function validPath(p: unknown): p is string {
-  return typeof p === 'string' && p.length >= 2 && p.length <= 1024 && p.startsWith('/') && !p.endsWith('/') && !p.includes('\\') && !p.includes('//') && !p.split('/').some(x => x === '.' || x === '..') && !/[\u0000-\u001f\u007f?#]/.test(p) && !/%(?:2f|2e|5c|25|0[0-9a-f]|1[0-9a-f]|7f)/i.test(p) && !/^\/(?:s|_revisions|api|registry)(?:\/|$)/.test(p) && !p.startsWith('/_derived/') && p !== '/manifest.json' && p !== '/asset-owners.json'
+  return isUnicodeScalarString(p) && p.length >= 2 && p.length <= 1024 && p.startsWith('/') && !p.endsWith('/') && !p.includes('\\') && !p.includes('//') && !p.split('/').some(x => x === '.' || x === '..') && !/[\u0000-\u001f\u007f?#]/.test(p) && !/%(?:2f|2e|5c|25|0[0-9a-f]|1[0-9a-f]|7f)/i.test(p) && !/^\/(?:s|_revisions|api|registry)(?:\/|$)/.test(p) && !p.startsWith('/_derived/') && p !== '/manifest.json' && p !== '/asset-owners.json'
+}
+/** Tokens persisted in publication session bindings and idempotency keys. */
+export function isPublicationToken(value: unknown): value is string {
+  return typeof value === 'string' && /^[!-~]{1,128}$/.test(value)
 }
 export function validateBeginCommand(command: BeginCommand): void {
-  if (!command || typeof command.idempotencyKey !== 'string' || !/^[!-~]{1,128}$/.test(command.idempotencyKey) || !(command.artifactId === null || id(command.artifactId, 'ar')) || !(command.expectedRevisionId === null || id(command.expectedRevisionId, 'rv')) || !Number.isSafeInteger(command.expectedContentVersion) || command.expectedContentVersion < 0 || !Array.isArray(command.files) || !Array.isArray(command.pages) || !Array.isArray(command.edges) || command.files.length > 10000 || command.pages.length > 1000 || command.edges.length > 20000 || command.pages.length === 0 || (command.artifactId === null && (command.expectedRevisionId !== null || command.expectedContentVersion !== 0))) fail()
+  if (!command || !isPublicationToken(command.idempotencyKey) || !(command.artifactId === null || id(command.artifactId, 'ar')) || !(command.expectedRevisionId === null || id(command.expectedRevisionId, 'rv')) || !Number.isSafeInteger(command.expectedContentVersion) || command.expectedContentVersion < 0 || !Array.isArray(command.files) || !Array.isArray(command.pages) || !Array.isArray(command.edges) || command.files.length > 10000 || command.pages.length > 1000 || command.edges.length > 20000 || command.pages.length === 0 || (command.artifactId === null && (command.expectedRevisionId !== null || command.expectedContentVersion !== 0))) fail()
   if (command.pages.every(p => p?.disposition === 'drop')) throw new PolicyError('invalid_state', 'publication_without_page')
   const files = new Map<string, PublicationFile>(), pages = new Map<string, PublicationPage>(), docs = new Set<string>(), edges = new Set<string>()
   for (const f of command.files) {
@@ -253,7 +256,7 @@ export async function begin(deps: PublicationDeps, actor: ManageActor, command: 
 }
 
 export async function beginImport(deps: PublicationDeps, actor: ManageActor, command: BeginCommand, binding: { planId: string; planDigest: string }, deadline?: number): Promise<PublicationStatus> {
-  if (!binding || typeof binding.planId !== 'string' || !/^[!-~]{1,128}$/.test(binding.planId) || !/^[0-9a-f]{64}$/.test(binding.planDigest)) throw new PolicyError('invalid_state')
+  if (!binding || !isPublicationToken(binding.planId) || !/^[0-9a-f]{64}$/.test(binding.planDigest)) throw new PolicyError('invalid_state')
   return beginBound(deps, actor, command, binding, deadline)
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { spawn } from 'node:child_process'
 import { webcrypto } from 'node:crypto'
-import { link, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { link, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -62,7 +62,7 @@ const receiptSchema = z.object({
   warnings: z.record(z.string(), z.number()).optional(),
   results: z.array(z.object({ state: z.string(), status: z.number().optional(), codes: z.array(z.string()).optional(), warnings: z.record(z.string(), z.number()).optional() })).optional(),
   stores: z.object({ status: z.string(), equal: z.boolean().nullable() }).optional(),
-  bodyReads: z.array(z.string()).optional(), removed: z.boolean().optional(),
+  metadataPaths: z.array(z.string()).optional(), bodyReads: z.array(z.string()).optional(), bodyBytes: z.record(z.string(), z.number()).optional(), removed: z.boolean().optional(), grown: z.boolean().optional(),
 })
 function receipt(result: Run, code = 0) {
   expect(result.timedOut).toBe(false)
@@ -73,6 +73,19 @@ function receipt(result: Run, code = 0) {
   let value: unknown
   try { value = JSON.parse(code === 0 || result.stdout.trim() ? result.stdout : result.stderr) } catch { throw new Error('CLI did not return a JSON receipt') }
   return receiptSchema.parse(value)
+}
+
+const checkpointSchema = z.object({
+  units: z.array(z.object({
+    unitId: z.string(), pinState: z.string(),
+    blockers: z.array(z.object({ code: z.string(), unitId: z.string().optional(), entryOrdinal: z.number().optional(), path: z.string().optional(), sourcePageId: z.string().nullable().optional(), stage: z.string().optional(), reason: z.string().optional(), basis: z.string().optional() })),
+    inventory: z.object({ files: z.array(z.object({ sourceRef: z.string(), sourceVersion: z.string().nullable() })) }).nullable(),
+  })),
+  approvals: z.array(z.object({ inventoryId: z.string(), objectKey: z.string(), objectVersion: z.string() })),
+})
+async function checkpoint(workspace: string) {
+  const value: unknown = JSON.parse(await readFile(join(workspace, 'state.json'), 'utf8'))
+  return checkpointSchema.parse(value)
 }
 
 function excluded(input: SyntheticInput) {
@@ -86,6 +99,109 @@ function allExcluded(input: SyntheticInput) {
 }
 
 describe('offline selected import CLI', () => {
+  it('denies an omitted credential-relative inode reused by an independent unit before any body read', async () => {
+    const box = await sandbox()
+    try {
+      const fixture = await makeSelectedFixture()
+      const asset = fixture.input.entries.find(entry => entry.path === '/tree/asset0.css')!
+      asset.locator = { root: 'capture', relative: '.env.fixture' }
+      fixture.input.entries.push({ ...structuredClone(asset), path: '/a/sample/shared.css', locator: { root: 'capture', relative: 'ordinary-hardlink.css' }, placement: { sourceArtifactId: 'slug:sample', evidenceRef: 'synthetic-placement' } })
+      fixture.files['/.env.fixture'] = fixture.files['/tree/asset0.css']
+      await box.save(fixture)
+      await link(join(box.capture, '.env.fixture'), join(box.capture, 'ordinary-hardlink.css'))
+      const output = receipt(await run(process.execPath, [physicalRunner, 'observe', box.selection, box.workspace, box.capture], box.home), 1)
+      expect(output.error).toBe('protected_locator')
+      expect(output.bodyReads).toEqual([])
+    } finally { await box.cleanup() }
+  }, 240_000)
+
+  it('attributes an unpaired-surrogate ordinary locator before attempting that filesystem name', async () => {
+    const box = await sandbox()
+    try {
+      const fixture = await makeSelectedFixture()
+      const invalid = `invalid-\ud800.css`
+      fixture.input.entries.find(entry => entry.path === '/tree/asset0.css')!.locator.relative = invalid
+      await box.save(fixture)
+      const output = receipt(await run(process.execPath, [physicalRunner, 'observe', box.selection, box.workspace, box.capture], box.home))
+      expect(output.fatal).toBeNull(); expect(output.pinned).toBe(1)
+      expect(output.metadataPaths!).not.toContain(invalid)
+      expect(output.bodyReads!).not.toContain(invalid)
+      expect(output.bodyReads!).toContain('a/sample/index.html')
+      const planned = receipt(await box.plan())
+      expect(planned.results!.map(result => result.state).sort()).toEqual(['ready', 'translation_blocked'])
+    } finally { await box.cleanup() }
+  }, 600_000)
+
+  it('refuses an already oversized source without reading it and continues independent planning', async () => {
+    const box = await sandbox()
+    try {
+      const fixture = await makeSelectedFixture()
+      const asset = fixture.input.entries.find(entry => entry.path === '/tree/asset0.css')!
+      const expectedSize = asset.expected!.size
+      await box.save(fixture)
+      await writeFile(join(box.capture, 'tree/asset0.css'), Buffer.alloc(expectedSize + 65536, 120))
+      const output = receipt(await run(process.execPath, [physicalRunner, 'observe', box.selection, box.workspace, box.capture], box.home))
+      expect(output.fatal).toBeNull(); expect(output.pinned).toBe(1)
+      expect(output.metadataPaths!).toContain('tree/asset0.css')
+      expect(output.bodyBytes!['tree/asset0.css'] ?? 0).toBe(0)
+      expect(output.bodyReads!).not.toContain('tree/asset0.css')
+      const planned = receipt(await box.plan())
+      expect(planned.results!.map(result => result.state).sort()).toEqual(['ready', 'translation_blocked'])
+    } finally { await box.cleanup() }
+  }, 600_000)
+
+  it('bounds bytes consumed when a source grows after metadata and keeps the other unit usable', async () => {
+    const box = await sandbox()
+    try {
+      const fixture = await makeSelectedFixture()
+      const asset = fixture.input.entries.find(entry => entry.path === '/tree/asset0.css')!
+      const expectedSize = asset.expected!.size
+      asset.locator.relative = 'grow.css'
+      fixture.files['/grow.css'] = fixture.files['/tree/asset0.css']
+      await box.save(fixture)
+      const output = receipt(await run(process.execPath, [physicalRunner, 'grow', box.selection, box.workspace, box.capture], box.home))
+      expect(output.grown).toBe(true)
+      expect(output.bodyBytes!['grow.css']).toBeLessThanOrEqual(expectedSize + 1)
+      expect(output.fatal).toBeNull(); expect(output.pinned).toBe(1)
+      const planned = receipt(await box.plan())
+      expect(planned.results!.map(result => result.state).sort()).toEqual(['ready', 'translation_blocked'])
+    } finally { await box.cleanup() }
+  }, 600_000)
+
+  it('pins two independently evidenced long multibyte capture locators with bounded native keys', async () => {
+    const box = await sandbox()
+    try {
+      const fixture = await makeSelectedFixture()
+      const entry = fixture.input.entries.find(item => item.path === '/tree/one.html')!
+      const page = fixture.input.pages.find(item => item.sourcePageId === 'tree/one.html')!
+      const body = fixture.files['/tree/one.html']
+      const directory = Array.from({ length: 6 }, (_, i) => `${'界'.repeat(60)}${i}`).join('/')
+      fixture.input.entries = []; fixture.input.pages = []; fixture.input.owners = []; fixture.input.aliases = []; fixture.input.shortlinks = []; fixture.input.previews = []; fixture.input.consumerUrls = []
+      for (const name of ['first', 'second']) {
+        const relative = `${directory}/${name}.html`, path = `/${name}.html`, sourceArtifactId = `long:${name}`
+        expect(Buffer.byteLength(`capture/capture/${relative}`, 'utf8')).toBeGreaterThan(1024)
+        fixture.input.entries.push({ ...structuredClone(entry), path, locator: { root: 'capture', relative }, placement: { sourceArtifactId, evidenceRef: `${name}-placement` } })
+        fixture.input.pages.push({ ...structuredClone(page), sourcePageId: `${name}.html`, documentPath: path, membership: { sourceArtifactId, evidenceRef: `${name}-membership` } })
+        fixture.files[`/${relative}`] = body
+      }
+      await box.save(fixture)
+      const prepared = receipt(await box.prepare())
+      expect(prepared.fatal).toBeNull(); expect(prepared.units).toBe(2); expect(prepared.pinned).toBe(2)
+      const state = await checkpoint(box.workspace)
+      const files = state.units.flatMap(unit => unit.inventory?.files ?? [])
+      expect(files).toHaveLength(2); expect(state.approvals).toHaveLength(2)
+      expect(files.every(file => /^capture\/v1\/[a-f0-9]{64}\/[0-9]+$/.test(file.sourceRef) && Buffer.byteLength(file.sourceRef) <= 1024 && typeof file.sourceVersion === 'string' && file.sourceVersion.length > 0)).toBe(true)
+      expect(new Set(files.map(file => file.sourceRef)).size).toBe(2)
+      expect(new Set(files.map(file => file.sourceVersion)).size).toBe(2)
+      expect(state.approvals.every(approval => /^inventory\/v1\/[a-f0-9]{64}\.json$/.test(approval.objectKey) && Buffer.byteLength(approval.objectKey) <= 1024 && approval.objectVersion.length > 0)).toBe(true)
+      expect(new Set(state.approvals.map(approval => approval.objectKey)).size).toBe(2)
+      expect(new Set(state.approvals.map(approval => approval.objectVersion)).size).toBe(2)
+      const planned = receipt(await box.plan())
+      expect(planned.results!.map(result => result.state)).toEqual(['ready', 'ready'])
+      expect(planned.stores).toMatchObject({ status: 'observed', equal: true })
+    } finally { await box.cleanup() }
+  }, 600_000)
+
   it('mints a fresh signed local identity when a later unit starts after an hour', async () => {
     const keys = await webcrypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify'])
     const privateKey = await webcrypto.subtle.exportKey('jwk', keys.privateKey)
@@ -164,7 +280,48 @@ describe('offline selected import CLI', () => {
       expect(output.removed).toBe(true)
       expect(output.fatal).toBeNull(); expect(output.units).toBe(3); expect(output.pinned).toBe(2)
       expect(output.compatibility!.unsupported.capture_absent).toBe(1)
+      expect(output.compatibility!.unsupported.or1_missing_document).toBe(1)
+      const state = await checkpoint(box.workspace)
+      const middle = state.units.find(unit => unit.unitId === 'b-second')!
+      expect(state.approvals).toHaveLength(2)
+      expect(middle.pinState).toBe('blocked')
+      expect(middle.blockers).toContainEqual(expect.objectContaining({ code: 'capture_absent', unitId: 'b-second', entryOrdinal: 1, path: '/second.html', sourcePageId: 'second.html', stage: 'pin_reread', reason: 'absent' }))
+      expect(middle.blockers).toContainEqual(expect.objectContaining({ code: 'or1_missing_document', unitId: 'b-second', entryOrdinal: 1, path: '/second.html', sourcePageId: 'second.html', stage: 'pin_reread', reason: 'absent', basis: 'observed_absent' }))
       expect(output.bodyReads!).toContain('first.html'); expect(output.bodyReads!).toContain('second.html'); expect(output.bodyReads!).toContain('third.html')
+      const planned = receipt(await box.plan())
+      expect(planned.results!.map(result => result.state)).toEqual(['ready', 'translation_blocked', 'ready'])
+      expect(planned.stores).toMatchObject({ status: 'observed', equal: true })
+    } finally { await box.cleanup() }
+  }, 600_000)
+
+  it('does not classify a stylesheet missing at pin reread as OR-1', async () => {
+    const box = await sandbox()
+    try {
+      const fixture = await makeSelectedFixture()
+      const document = fixture.input.entries.find(entry => entry.path === '/tree/one.html')!
+      const asset = fixture.input.entries.find(entry => entry.path === '/tree/asset0.css')!
+      const page = fixture.input.pages.find(item => item.sourcePageId === 'tree/one.html')!
+      const documentBytes = fixture.files['/tree/one.html'], cssBytes = fixture.files['/tree/asset0.css']
+      fixture.input.entries = []; fixture.input.pages = []; fixture.input.owners = []; fixture.input.aliases = []; fixture.input.shortlinks = []; fixture.input.previews = []; fixture.input.consumerUrls = []
+      for (const [name, unit] of [['first', 'a-first'], ['second', 'b-second'], ['third', 'c-third']]) {
+        const path = `/${name}.html`
+        fixture.input.entries.push({ ...structuredClone(document), path, locator: { root: 'capture', relative: `${name}.html` }, placement: { sourceArtifactId: unit, evidenceRef: `${unit}-placement` } })
+        fixture.input.pages.push({ ...structuredClone(page), sourcePageId: `${name}.html`, documentPath: path, membership: { sourceArtifactId: unit, evidenceRef: `${unit}-membership` } })
+        fixture.files[path] = documentBytes
+      }
+      fixture.input.entries.push({ ...structuredClone(asset), path: '/second.css', locator: { root: 'capture', relative: 'second.css' }, placement: { sourceArtifactId: 'b-second', evidenceRef: 'css-placement' } })
+      fixture.input.owners.push({ path: '/second.css', ownerSourcePageId: 'second.html', evidenceRef: 'css-owner', basis: 'declared' })
+      fixture.files['/second.css'] = cssBytes
+      await box.save(fixture)
+      const output = receipt(await run(process.execPath, [physicalRunner, 'remove-style', box.selection, box.workspace, box.capture], box.home))
+      expect(output.removed).toBe(true); expect(output.pinned).toBe(2)
+      expect(output.compatibility!.unsupported.capture_absent).toBe(1)
+      expect(output.compatibility!.unsupported.or1_missing_document ?? 0).toBe(0)
+      const state = await checkpoint(box.workspace)
+      const middle = state.units.find(unit => unit.unitId === 'b-second')!
+      expect(state.approvals).toHaveLength(2); expect(middle.pinState).toBe('blocked')
+      expect(middle.blockers).toContainEqual(expect.objectContaining({ code: 'capture_absent', unitId: 'b-second', entryOrdinal: 3, path: '/second.css', sourcePageId: null, stage: 'pin_reread', reason: 'absent' }))
+      expect(middle.blockers.some(issue => issue.code === 'or1_missing_document')).toBe(false)
       const planned = receipt(await box.plan())
       expect(planned.results!.map(result => result.state)).toEqual(['ready', 'translation_blocked', 'ready'])
       expect(planned.stores).toMatchObject({ status: 'observed', equal: true })

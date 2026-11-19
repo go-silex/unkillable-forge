@@ -1,11 +1,12 @@
 import type { BeginCommand, PublicationReceipt } from '../publication/types'
+import { isPublicationToken } from '../publication/staging'
 import { importAliasStatement, importPagePolicyStatements, type ManageDeps } from './commands'
 import { requireManageActor, requireImportReadContext, importReadCursorIdentity, type ManageActor, type ImportReadContext } from './principals'
 import { executeGuarded, PolicyError } from './guard'
 import { isShareKey, shareKeyDigests } from './share-secrets'
 import { importShortlinkStatement, type ShortlinkMapping } from './shortlinks'
 import { importPreviewOwned, importPreviewStatements } from './previews'
-import { newId } from './ids'
+import { newId, isCatalogueId } from './ids'
 import { documentRouteOf } from './revision-paths'
 import { conflictingImportOperationIndexes } from './import-operation-set'
 
@@ -68,6 +69,7 @@ function canonical(value: unknown): string {
 export async function admitImportSelection(selection: ImportSelection, input: unknown, approval: ImportApproval, deps: ManageDeps, readContext: ImportReadContext): Promise<AdmittedImportSelection> {
   await requireImportReadContext(readContext, deps)
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new PolicyError('invalid_state')
+  if (!isPublicationToken(selection.planId)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
   const inventory = input as ApprovedImportInventory
   if (inventory.kind === 'historical' && (!text(approval.g1bRef) || inventory.evidence?.g1bRef !== approval.g1bRef)) throw new PolicyError('invalid_state', 'g1b_evidence_required')
   if (selection.version !== 1 || !text(selection.planId) || selection.inventoryId !== approval.inventoryId || selection.selectionId !== approval.selectionId || inventory.version !== 1 || inventory.inventoryId !== approval.inventoryId || inventory.selectionId !== approval.selectionId || inventory.sourceInstance !== approval.sourceInstance || inventory.approvalRef !== approval.approvalRef || inventory.kind !== approval.kind || !text(inventory.sourceArtifactId) || !inventory.evidence || inventory.evidence.complete !== true || !hex(inventory.evidence.selectionDigest) || !hex(inventory.evidence.corpusDigest) || !text(inventory.evidence.mappingRef) || !Number.isSafeInteger(inventory.evidence.capturedAt) || (inventory.kind === 'historical' && (!text(approval.g1bRef) || inventory.evidence.g1bRef !== approval.g1bRef)) || !Array.isArray(inventory.files) || !Array.isArray(inventory.operations)) throw new PolicyError('invalid_state')
@@ -118,6 +120,7 @@ export async function admitImportSelection(selection: ImportSelection, input: un
     ids.add(id)
     if (op.kind === 'page_policy') {
       const p = op.policy
+      if (p?.visibility?.value === 'shared' && !isCatalogueId(p.grantId, 'gr')) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
       if (!p || !text(p.pageId) || !text(p.sourcePageId) || !p.visibility || p.visibility.captured !== true || !p.share || p.share.captured !== true || (p.visibility.metadataV !== null && p.visibility.metadataV !== p.visibility.value) || (p.visibility.value === 'shared' && (!p.share.key || !isShareKey(p.share.key) || !text(p.grantId))) || !pagesById.has(p.pageId) || pagesById.get(p.pageId)?.disposition === 'drop' || pagesById.get(p.pageId)?.expectedPolicyEpoch !== p.expectedPolicyEpoch) throw new PolicyError('invalid_state')
       if (policyPages.has(p.pageId) || mappingByPage.get(p.pageId)?.sourcePageId !== p.sourcePageId) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
       if (p.visibility.expiresAt !== null || (p.visibility.value === 'shared' && p.share.expiresAt !== null)) throw new PolicyError('invalid_state', 'expiring_policy_unsupported')

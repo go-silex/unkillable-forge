@@ -329,7 +329,7 @@ describe('selected import translation', () => {
     const prepared = await preflightSelection(input)
     if (prepared.kind !== 'prepared') throw new Error('expected prepared selection')
     const result = await prepared.finish(observations)
-    const projected = projectTranslation(result, [{ unitId: 'slug:sample', code: 'inventory_budget_exceeded' }])
+    const projected = projectTranslation(result, [{ kind: 'unit', unitId: 'slug:sample', code: 'inventory_budget_exceeded' }])
     expect(unitFor(projected, 'slug:').status).toBe('blocked')
     expect(unitFor(projected, 'tree:').status).toBe('representable')
     expect(projected.census.find(row => row.kind === 'consumerUrl')?.disposition).toBe('rejected')
@@ -475,5 +475,115 @@ describe('selected import translation', () => {
     expect(unitFor(result, 'slug:').status).toBe('blocked')
     expect(unitFor(result, 'tree:').status).toBe('representable')
     expect(result.census.filter(row => row.kind === 'alias' || row.kind === 'preview').filter(row => row.unitId === 'slug:sample').every(row => row.disposition === 'rejected')).toBe(true)
+  })
+  it('uses opaque bounded storage keys and retains blocked control locators', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const control = input.entries.find(entry => entry.path === '/tree/asset0.css')!
+    control.locator.relative = 'nested/.ssh/id'
+    const ordinary = input.entries.find(entry => entry.path === '/tree/asset1.css')!
+    ordinary.locator.relative = 'ordinary.css'
+    const prepared = await preflightSelection(input)
+    if (prepared.kind !== 'prepared') throw new Error('expected prepared selection')
+    expect(prepared.protectedLocators.map(item => item.locator.relative)).toContain('nested/.ssh/id')
+    expect(prepared.reads.map(item => item.locator.relative)).not.toContain('ordinary.css')
+    expect(prepared.reads.every(item => /^capture\/v1\/[a-f0-9]{64}\/\d+$/.test(item.sourceKey))).toBe(true)
+    expect(prepared.inventoryKeys.every(key => /^inventory\/v1\/[a-f0-9]{64}\.json$/.test(key))).toBe(true)
+    const result = await prepared.finish(observations)
+    expect(unitFor(result, 'tree:').status).toBe('blocked')
+    expect(unitFor(result, 'slug:').status).toBe('representable')
+  })
+
+  it('retains individual reread absence facts and projects them idempotently', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const prepared = await preflightSelection(input)
+    if (prepared.kind !== 'prepared') throw new Error('expected prepared selection')
+    const result = await prepared.finish(observations)
+    const document = prepared.reads.find(item => item.path === '/tree/one.html')!
+    const css = prepared.reads.find(item => item.path === '/tree/asset0.css')!
+    const failures = [document, css].map(item => ({ kind: 'source' as const, entryOrdinal: item.ordinal, stage: 'pin_reread' as const, reason: 'absent' as const }))
+    const projected = projectTranslation(result, failures)
+    const missing = projected.compatibility.unsupported.filter(issue => issue.code === 'capture_absent')
+    expect(missing).toHaveLength(2)
+    expect(missing.map(issue => issue.entryOrdinal)).toEqual(expect.arrayContaining([document.ordinal, css.ordinal]))
+    expect(projected.compatibility.unsupported.filter(issue => issue.code === 'or1_missing_document')).toHaveLength(1)
+    expect(projectTranslation(projected, failures)).toEqual(projected)
+    expect(() => projectTranslation(result, [{ ...failures[0], entryOrdinal: 999999 }])).toThrow('invalid_pin_failure')
+  })
+
+  it('rejects unused malformed replay values without issuing reads', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const first = await translateSelection(input, null, observations)
+    for (const table of ['pages', 'grants', 'idempotencyKeys', 'inventoryIds', 'selectionIds', 'planIds', 'operationIds'] as const) {
+      const ledger = structuredClone(first.ledger)
+      ledger[table]['unused'] = ''
+      const preflight = await preflightSelection(input, ledger)
+      expect(preflight.kind).toBe('fatal')
+      if (preflight.kind === 'fatal') expect(preflight.result.fatal).toBe('invalid_ledger')
+    }
+  })
+
+  it('distinguishes a subtree stylesheet from the winning document', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const source = input.entries.find(entry => entry.path === '/a/sample/index.html')!
+    const path = '/a/sample/style.css'
+    input.entries.push({ ...source, path, graphClass: 'asset', contentType: 'text/css', locator: { root: 'capture', relative: 'a/sample/style.css' } })
+    observations[path] = observations[source.path]
+    input.consumerUrls.push({ url: 'https://forge.example.test/a/sample/style.css', purpose: 'document', targetSourcePageId: 'sample', mappingRef: null })
+    const result = await translateSelection(input, null, observations)
+    expect(unitFor(result, 'slug:').status).toBe('blocked')
+    expect(unitFor(result, 'tree:').status).toBe('representable')
+  })
+  it('binds reproducible source keys to proposal identity and original ordinal', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const first = await preflightSelection(input)
+    if (first.kind !== 'prepared') throw new Error('expected prepared selection')
+    const translated = await first.finish(observations)
+    const replay = await preflightSelection(input, translated.ledger)
+    if (replay.kind !== 'prepared') throw new Error('expected replay')
+    expect(replay.reads.map(read => read.sourceKey)).toEqual(first.reads.map(read => read.sourceKey))
+    for (const read of first.reads) {
+      const unit = represented(translated, read.unitId)
+      expect(unit.inventory.files.find(file => file.path === read.path)?.sourceRef).toBe(read.sourceKey)
+      expect(read.sourceKey.endsWith(`/${read.ordinal}`)).toBe(true)
+    }
+    const next = structuredClone(input)
+    next.selectionRef = 'another-synthetic-selection'
+    const other = await preflightSelection(next, translated.ledger)
+    if (other.kind !== 'prepared') throw new Error('expected other proposal')
+    expect(other.reads[0].sourceKey).not.toBe(first.reads[0].sourceKey)
+  })
+  it('retains missing and unverified external dependencies for each dependent unit', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const path = '/external/shared.css'
+    for (const ownerSourcePageId of ['tree/one.html', 'sample']) input.owners.push({ path, ownerSourcePageId, evidenceRef: 'synthetic-external-edge', basis: 'declared' })
+    const missing = await translateSelection(input, null, observations)
+    for (const prefix of ['tree:', 'slug:']) {
+      expect(unitFor(missing, prefix).dependencies).toContainEqual({ path, providerArtifactId: null, kind: null, state: 'missing' })
+    }
+    input.providerMounts.push({ path, kind: 'asset', artifactId: 'ar_aaaaaaaaaaaaaaaaaaaaaaaaaa' })
+    const declared = await translateSelection(input, null, observations)
+    for (const prefix of ['tree:', 'slug:']) {
+      expect(unitFor(declared, prefix).dependencies).toContainEqual({ path, providerArtifactId: 'ar_aaaaaaaaaaaaaaaaaaaaaaaaaa', kind: 'asset', state: 'unverified' })
+    }
+    expect(declared.census.find(row => row.kind === 'providerMount')?.affectedUnitIds).toEqual(expect.arrayContaining(['tree:synthetic', 'slug:sample']))
+  })
+
+  it('contains invalid Unicode locator and logical asset to their known unit', async () => {
+    for (const field of ['locator', 'path'] as const) {
+      const { input, observations } = await makeSelectedFixture()
+      const asset = input.entries.find(entry => entry.path === '/tree/asset0.css')!
+      if (field === 'locator') asset.locator.relative = 'tree/\ud800.css'
+      else {
+        const previous = asset.path
+        asset.path = '/tree/\ud800.css'
+        input.owners.find(owner => owner.path === previous)!.path = asset.path
+      }
+      const prepared = await preflightSelection(input)
+      if (prepared.kind !== 'prepared') throw new Error('expected prepared selection')
+      expect(prepared.reads.some(read => read.unitId === 'tree:synthetic')).toBe(false)
+      const result = await prepared.finish(observations)
+      expect(unitFor(result, 'tree:').status).toBe('blocked')
+      expect(unitFor(result, 'slug:').status).toBe('representable')
+    }
   })
 })
