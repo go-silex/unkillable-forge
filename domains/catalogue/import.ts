@@ -7,6 +7,7 @@ import { importShortlinkStatement, type ShortlinkMapping } from './shortlinks'
 import { importPreviewOwned, importPreviewStatements } from './previews'
 import { newId } from './ids'
 import { documentRouteOf } from './revision-paths'
+import { conflictingImportOperationIndexes } from './import-operation-set'
 
 export interface ImportSelection {
   readonly version: 1
@@ -62,6 +63,7 @@ function canonical(value: unknown): string {
   const obj = value as Record<string, unknown>
   return `{${Object.keys(obj).sort().map(k => `${JSON.stringify(k)}:${canonical(obj[k])}`).join(',')}}`
 }
+
 
 export async function admitImportSelection(selection: ImportSelection, input: unknown, approval: ImportApproval, deps: ManageDeps, readContext: ImportReadContext): Promise<AdmittedImportSelection> {
   await requireImportReadContext(readContext, deps)
@@ -131,6 +133,7 @@ export async function admitImportSelection(selection: ImportSelection, input: un
       if (!targetPages.has(op.pageId) || !['image/jpeg','image/png'].includes(filesByPath.get(op.path)?.contentType ?? '')) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
     } else throw new PolicyError('invalid_state')
   }
+  if (conflictingImportOperationIndexes(inventory.operations).size) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
   if (selection.command.pages.some(page => page.disposition === 'new' && !policyPages.has(page.pageId))) throw new PolicyError('invalid_state', 'missing_policy_evidence')
   const planInput = canonical({
     instanceId:deps.config.instanceId,

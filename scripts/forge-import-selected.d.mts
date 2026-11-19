@@ -26,6 +26,7 @@ interface UnitCommon {
   unitId: string; blockers: Issue[]; budget: Budget
   dependencies: { path: string; providerArtifactId: string | null; state: 'active' | 'missing' }[]
   sourceArtifactId: string; maxInventoryBytes: number
+  sourceEvidence: { membership: { sourcePageId: string; evidenceRef: string }[]; placement: { path: string; evidenceRef: string }[] }
 }
 export interface RepresentableUnit extends UnitCommon {
   status: 'representable'
@@ -41,8 +42,9 @@ export interface BlockedUnit extends UnitCommon {
 }
 export type Unit = RepresentableUnit | BlockedUnit
 export interface Translation {
-  ok: boolean; schema: 1; ledger: Ledger
+  ok: boolean; fatal: string | null; schema: 1; ledger: Ledger
   accounting: { path: string; disposition: string; unitId: string | null; reason: string }[]
+  census: { kind: string; ordinal: number; unitId: string | null; disposition: 'represented' | 'excluded' | 'rejected' }[]
   units: Unit[]
   compatibility: { represented: Issue[]; unsupported: Issue[]; notObserved: Issue[] }
   warnings: Issue[]
@@ -51,7 +53,10 @@ export type Observation =
   | { state: 'present'; size: number; sha256: string }
   | { state: 'absent' | 'unreadable' | 'unknown' }
 export function emptyLedger(): Ledger
-export function translateSelection(input: unknown, ledger?: unknown, observations?: unknown): Promise<Translation>
+export function preflightSelection(input: unknown, ledger?: unknown): Promise<
+  | { kind: 'fatal'; result: Translation }
+  | { kind: 'prepared'; readOrdinals: number[]; protectedOrdinals: number[]; finish(observations?: unknown): Promise<Translation> }
+>
 export function assignSourcePins(unit: Unit, pins: unknown):
   | { ok: false; code: string; path?: string }
   | { ok: true; unit: RepresentableUnit; bytes: Uint8Array }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import worker from "../../adapters/http/manageWorker"
-import { assignSourcePins, sealInventory, translateSelection, type RepresentableUnit } from "../../scripts/forge-import-selected.mjs"
-import { makeSelectedFixture } from "./fixtures/import-selected.mjs"
+import { assignSourcePins, sealInventory, preflightSelection, type Observation, type RepresentableUnit } from "../../scripts/forge-import-selected.mjs"
+import { makeSelectedFixture, type SyntheticInput } from "./fixtures/import-selected.mjs"
 import { env, request, setupHttp, signed } from "./fixtures/manage-http"
 import { manageHttpBindings } from "./fixtures/manage-http-bindings"
 
@@ -23,9 +23,12 @@ async function snapshot() {
   return { rows, source: await objects(env.FORGE_IMPORT_SOURCE), target: await objects(env.REVISION_BYTES) }
 }
 
-async function fixture(includeMissing = false) {
+async function fixture(includeMissing = false, mutate?: (selected: { input: SyntheticInput; observations: Record<string, Observation>; files: Record<string, Uint8Array> }) => void) {
   const selected = await makeSelectedFixture({ includeMissing })
-  const translated = await translateSelection(selected.input, null, selected.observations)
+  mutate?.(selected)
+  const preflight = await preflightSelection(selected.input)
+  if (preflight.kind !== "prepared") throw new Error("fixture selector failed preflight")
+  const translated = await preflight.finish(selected.observations)
   const approvals = []
   const units: RepresentableUnit[] = []
   const sourcePins: Record<string, { version: string }> = {}
@@ -114,6 +117,66 @@ describe("selected fixture through native import admission", () => {
     const result = await plan(unit)
     expect(result.result.state).toBe("blocked")
     expect(result.result.issues).toContainEqual({ code: "source_integrity", path: file.path })
+    expect(await snapshot()).toEqual(before)
+  })
+  it("blocks the entire slug when its nested selected member is missing, but plans the independent tree", async () => {
+    const { translated, units, plan } = await fixture(false, selected => {
+      selected.observations["/a/sample/nested/index.html"] = { state: "absent" }
+    })
+    expect(translated.units.find(unit => unit.sourceArtifactId === "slug:sample")?.status).toBe("blocked")
+    expect(translated.accounting).toContainEqual(expect.objectContaining({ path: "/a/sample/nested/index.html", unitId: "slug:sample", disposition: "blocked" }))
+    expect(units.some(unit => unit.sourceArtifactId === "slug:sample")).toBe(false)
+    const tree = units.find(unit => unit.sourceArtifactId === "tree:synthetic")
+    if (!tree) throw new Error("independent tree unit missing")
+    const before = await snapshot()
+    expect((await plan(tree)).result.state).toBe("ready")
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it("does not bind a stale shortlink to the current grant after restoring the nested member", async () => {
+    const { translated, units, plan } = await fixture(false, selected => {
+      selected.input.shortlinks[0].destination = "https://forge.example.test/s/sample/?k=staleSyntheticKey#section"
+    })
+    expect(translated.compatibility.unsupported).toContainEqual(expect.objectContaining({ code: "shortlink_destination_unverified", unitId: "slug:sample" }))
+    expect(translated.units.find(unit => unit.sourceArtifactId === "slug:sample")?.status).toBe("blocked")
+    expect(translated.compatibility.represented).not.toContainEqual(expect.objectContaining({ code: "shortlink_exact_destination", unitId: "slug:sample" }))
+    expect(units.some(unit => unit.sourceArtifactId === "slug:sample")).toBe(false)
+    const tree = units.find(unit => unit.sourceArtifactId === "tree:synthetic")
+    if (!tree) throw new Error("independent tree unit missing")
+    const before = await snapshot()
+    expect((await plan(tree)).result.state).toBe("ready")
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it("admits array and CJK metadata within native limits", async () => {
+    const metadata = ["東京", { title: "漢".repeat(3000) }]
+    const { units, plan } = await fixture(false, selected => {
+      selected.input.pages.find(page => page.sourcePageId === "tree/one.html")!.metadata = metadata
+    })
+    const tree = units.find(unit => unit.sourceArtifactId === "tree:synthetic")
+    if (!tree) throw new Error("tree unit missing")
+    expect(tree.command.pages.find(page => page.documentPath === "/tree/one.html")?.metadata).toEqual(metadata)
+    const before = await snapshot()
+    expect((await plan(tree)).result.state).toBe("ready")
+    expect(await snapshot()).toEqual(before)
+  })
+
+  it("accepts an original slug preview through implicit subtree ownership without a tree edge", async () => {
+    const path = "/a/sample/preview.png"
+    const { units, plan } = await fixture(false, selected => {
+      const original = selected.input.entries.find(entry => entry.path === "/tree/preview.png")
+      if (!original) throw new Error("original PNG missing")
+      selected.input.entries.push({ ...original, path, locator: { root: "capture", relative: path.slice(1) }, placement: { sourceArtifactId: "slug:sample", evidenceRef: "synthetic-placement" } })
+      selected.observations[path] = selected.observations[original.path]
+      selected.files[path] = selected.files[original.path]
+      selected.input.previews.push({ sourcePageId: "sample", path, kind: "original" })
+    })
+    const slug = units.find(unit => unit.sourceArtifactId === "slug:sample")
+    if (!slug) throw new Error("slug unit missing")
+    expect(slug.command.edges.some(edge => edge.path === path)).toBe(false)
+    expect(slug.inventory.operations).toContainEqual(expect.objectContaining({ kind: "preview_selection", path }))
+    const before = await snapshot()
+    expect((await plan(slug)).result.state).toBe("ready")
     expect(await snapshot()).toEqual(before)
   })
 })

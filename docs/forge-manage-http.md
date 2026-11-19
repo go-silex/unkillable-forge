@@ -47,13 +47,18 @@ per declared root; the option may be repeated. `plan` accepts only the workspace
 it cannot replace the selection or capture roots. Unknown flags are rejected.
 The selection is a private JSON document, not a discovery request. Its version 1
 schema includes instance/evidence identifiers, declared transport and inventory
-limits, route/share grammars, capture-root aliases, explicit entries, pages,
-owners, aliases, shortlinks, previews, consumer URLs, exclusions and provider
+limits, the reader projection (canonical and alias hosts, route/share grammars,
+share-cookie setting and shell paths), capture-root aliases, explicit entries,
+pages, owners, aliases, shortlinks, previews, consumer URLs, exclusions and provider
 mounts. See the synthetic [selection fixture](../tests/engine/fixtures/import-selected.mjs)
 and [translator](../scripts/forge-import-selected.mjs) for exact required fields.
 Every entry has a logical path, classification, content type, provenance,
 `locator: { root, relative }`, and an `expected` fingerprint. Content requires
 `{ size, sha256 }`; shell, excluded and unresolved entries may use `null`.
+Each page's `membership` and each content entry's `placement` identify the
+original source artifact and its evidence reference; non-content and unresolved
+entries use null placement. Consumer observations identify their expected target
+page or mapping as well as their purpose.
 Reserved non-content paths still require explicit exclusion evidence and are
 not opened. The root is an alias supplied on the command line; the path is
 relative to that root. Actual content bytes are independently observed and
@@ -62,17 +67,39 @@ or escaping paths are not substituted.
 Treat the selection, workspace and its capture evidence as sensitive: share keys,
 destinations and protected inventories can be present there.
 
+Node 22.12 or later is required. The offline CLI bundles the fixed repository
+translator and Catalogue parser in memory using the existing toolchain; it
+does not require Node's experimental TypeScript loading. Selector, workspace
+and state use the shipped private descriptor checks, including effective access
+checks rather than mode bits alone. Protected and content locators are checked
+across root aliases before any selected body is opened.
+
+Before body reads the selector receives a whole-record preflight and indexed
+census, including malformed relationships. An unassignable contradiction is
+a fatal selector failure, distinct from a valid exclusions-only selection.
+Each attributed missing or unreadable member blocks its complete source
+artifact, not just the missing file; independent units may still proceed.
+Unknown or unreadable policy capture blocks its unit, whereas an observed
+unrecognized visibility value is retained for the native warning.
+Literal shortlink destination preservation is distinct from proving its target,
+key and grant association; neither a selected URL nor a dry-run proves an
+actual consumer HTTP response.
+
 Preparation creates isolated local D1 and R2 state, a synthetic administrator and
 signing material, then pins native object versions and a separately approved
 inventory. Planning reopens those pins, authenticates to the actual manage Worker
 and consumes its bounded dry-run continuations. It does not apply, publish,
 discover providers, use a host provider transport or claim operating-system
-network isolation. The nonsecret receipt reports compatibility separately from
-each native `ready` or `blocked` outcome, and compares logical database contents
-and both bucket inventories before and after. A ready unit does not resolve an
-`or1_missing_document` blocker in another selection, activate a provider, or
-establish whole-corpus historical fidelity or F10 acceptance. Historical
-execution requires separate current authority and approved evidence.
+network isolation. Late inventory byte-budget failures are reported per unit;
+planning groups no more than 1,000 approvals per Worker binding. The nonsecret
+receipt distinguishes fatal, exclusions-only and partial preparations, and
+reports compatibility separately from each native `ready` or `blocked`
+outcome. It compares logical database contents and both bucket inventories
+before and after completed runs. If dispatch, decoding or continuation is
+interrupted, store equality is unknown unless the after-snapshot completes.
+A ready unit does not resolve an `or1_missing_document` blocker in another
+selection, activate a provider, or establish historical fidelity or F10
+acceptance. Historical execution requires separate current authority and evidence.
 
 
 `POST /api/maintenance/import` is a separate, administrator-only interface for
