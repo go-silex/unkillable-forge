@@ -3,6 +3,7 @@ import { executeGuarded, PolicyError, type GuardRequest } from './guard'
 import { newId, isCatalogueId } from './ids'
 import { requireManageActor, type ManageActor } from './principals'
 import { validShortlinkIdentity } from './shortlink-identity'
+import { isUnicodeScalarString } from '../store/revision-store'
 
 /** Protected metadata: destination and its digest must not be exposed in ordinary status. */
 export interface ShortlinkMapping {
@@ -27,6 +28,13 @@ export interface ShortlinkTarget {
   readonly expectedPolicyEpoch: number
   readonly expectedContentVersion: number
 }
+function validMappingTextFields(m: ShortlinkMapping): boolean {
+  return isUnicodeScalarString(m.mappingId) && !!m.mappingId &&
+    (m.providerId === null || isUnicodeScalarString(m.providerId)) &&
+    isUnicodeScalarString(m.pageId) && !!m.pageId &&
+    isUnicodeScalarString(m.destination) && !!m.destination
+}
+
 
 export async function shortlinkDestinationDigest(destination: string): Promise<string> {
   const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(destination)))
@@ -34,7 +42,7 @@ export async function shortlinkDestinationDigest(destination: string): Promise<s
 }
 export async function importShortlinkStatement(db: D1Database, m: ShortlinkMapping): Promise<D1PreparedStatement> {
   if (m && m.grantId !== null && !isCatalogueId(m.grantId, 'gr')) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
-  if (!m || !m.mappingId || !m.providerOrigin || !m.shortCode || !m.shortUrl || !m.destination || !m.pageId || !['created', 'imported'].includes(m.source) || !Number.isSafeInteger(m.observedAt) || m.observedAt < 0 || m.destinationDigest !== await shortlinkDestinationDigest(m.destination) || !validShortlinkIdentity(m.providerOrigin, m.shortDomain, m.shortCode, m.shortUrl)) throw new PolicyError('invalid_state')
+  if (!m || !validMappingTextFields(m) || !m.providerOrigin || !m.shortCode || !m.shortUrl || !['created', 'imported'].includes(m.source) || !Number.isSafeInteger(m.observedAt) || m.observedAt < 0 || m.destinationDigest !== await shortlinkDestinationDigest(m.destination) || !validShortlinkIdentity(m.providerOrigin, m.shortDomain, m.shortCode, m.shortUrl)) throw new PolicyError('invalid_state')
   return db.prepare('INSERT OR IGNORE INTO shortlink_mappings (mapping_id,provider_origin,provider_id,short_domain,short_code,short_url,page_id,grant_id,destination,source,observed_at,destination_digest) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').bind(m.mappingId, m.providerOrigin, m.providerId, m.shortDomain, m.shortCode, m.shortUrl, m.pageId, m.grantId, m.destination, m.source, m.observedAt, m.destinationDigest)
 }
 
@@ -47,7 +55,7 @@ export async function setShortlinkMapping(deps: ManageDeps, actor: ManageActor, 
   requireManageActor(actor, deps)
   const m = command.mapping
   if (m && m.grantId !== null && !isCatalogueId(m.grantId, 'gr')) throw new PolicyError('invalid_state')
-  if (!m || !m.mappingId || !m.providerOrigin || !m.shortCode || !m.shortUrl || !m.destination || m.pageId !== target.pageId || (m.source !== 'created' && m.source !== 'imported') || !Number.isSafeInteger(m.observedAt) || m.observedAt < 0 || m.destinationDigest !== await shortlinkDestinationDigest(m.destination) || (command.op !== 'create' && command.op !== 'reconcile') || (command.op === 'reconcile' && !/^[a-f0-9]{64}$/.test(command.expectedDestinationDigest))) throw new PolicyError('invalid_state')
+  if (!m || !validMappingTextFields(m) || !m.providerOrigin || !m.shortCode || !m.shortUrl || m.pageId !== target.pageId || (m.source !== 'created' && m.source !== 'imported') || !Number.isSafeInteger(m.observedAt) || m.observedAt < 0 || m.destinationDigest !== await shortlinkDestinationDigest(m.destination) || (command.op !== 'create' && command.op !== 'reconcile') || (command.op === 'reconcile' && !/^[a-f0-9]{64}$/.test(command.expectedDestinationDigest))) throw new PolicyError('invalid_state')
   if (!validShortlinkIdentity(m.providerOrigin, m.shortDomain, m.shortCode, m.shortUrl)) throw new PolicyError('invalid_state')
   // Newly-created identities may be recorded by an in-scope publisher. Imported or
   // existing identities require the administrator-only set_shortlink guard.

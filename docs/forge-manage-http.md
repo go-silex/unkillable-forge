@@ -67,12 +67,14 @@ or escaping paths are not substituted.
 Selection and checkpoint JSON are decoded as strict UTF-8 before parsing;
 malformed bytes are rejected rather than replaced, and a leading BOM is rejected
 by JSON parsing rather than silently removed. Logical paths and relative
-locators must be well-formed Unicode scalar strings; no normalization is
-introduced. Capture paths are not R2 keys: the compiler allocates bounded ASCII
-source and inventory keys. The private entry-ordinal fact retains the exact
-supplied `{root, relative}` locator and logical path; its unit and path join to
-the sealed member's source reference and native version. Planning uses the pin,
-not a capture reread, and receipts do not disclose locators.
+locators must be well-formed Unicode scalar strings; the original spelling is
+not rewritten. Capture paths are not R2 keys: the compiler allocates bounded
+ASCII source and inventory keys. A private entry-ordinal fact retains each valid
+original locator component and uses null for an invalid component; executable
+read and protected locators still require both valid strings and a declared root.
+Its unit and logical path join to the sealed member's source reference and native
+version. Planning uses the pin, not a capture reread, and receipts do not disclose
+locators.
 Treat the selection, workspace and its capture evidence as sensitive: share keys,
 destinations and protected inventories can be present there.
 
@@ -86,21 +88,32 @@ checked before the first body read. Descriptor metadata inspection is not a body
 read; identities are checked again when bytes are read. The authorized read and
 protected-locator sets are not complements: omission of ordinary content from a
 blocked unit does not make its inode a protected exclusion.
+Reservation checks every capture-relative component using a conservative
+case/Unicode-normalized comparison for `.env`, `.env.*`, `.git` and `.ssh`.
+The comparison key never rewrites the descriptor path or publication identity.
+Protected metadata and cross-alias physical identity checks still precede all
+body reads.
 
-Before body reads the selector groups declarations by artifact, assesses each
-complete candidate, and builds each eligible native draft once. Only those
-drafts contribute routes, resource placements and aliases to one frozen proposed
-read view. Required consumers are assessed against that view; a failed consumer
-or later pin failure does not recompute a different winner. A subdocument requires
-an evidenced subtree in its own artifact, not merely an owner edge or another
-artifact's subtree. This static view is neither a live route nor access proof.
+Before body reads the selector groups declarations by artifact. Evidence slots
+retain candidate unit sets and declaration multiplicity; a rejected or ambiguous
+relationship is not an admitted owner or operation. Only admitted relationships
+can establish governance, dependencies or local edges. The compiler completes
+artifact-local drafts and their intrinsic checks before comparing viable drafts
+for global conflicts. All participants in a genuine conflict are blocked.
+Surviving drafts contribute routes, placements and aliases to one frozen proposed
+read view; a failed consumer or later pin failure does not select another winner.
+Each page needs its canonical primary address in the selected reader profile.
+A subdocument requires an evidenced subtree in its own artifact. HTML roles use
+the validated media-type essence while preserving the literal Content-Type;
+an asset cannot be HTML. This view is neither a live route nor access proof.
 
 The preflight keeps an indexed census, including malformed relationships.
 An unassignable contradiction is a fatal selector failure, distinct from a
 valid exclusions-only selection; projection preserves a fatal receipt without
 inventing projectable facts. Each ordinal's affected units come from its
-kind-specific semantic relation and remain the same on normal and fatal exits.
-Mapping-only attribution survives an unrelated fatal record. Raw invalid identities
+kind-specific semantic relation and remain the same on normal and fatal exits;
+ambiguous references retain all independently evidenced candidate units without
+choosing a winner. Mapping-only attribution survives an unrelated fatal record. Raw invalid identities
 do not become unit IDs; JSON-safe evidence is the same census checkpointed and
 authenticated in the receipt. Each attributed missing or unreadable member
 blocks its complete source artifact; independent units may still proceed. The ID

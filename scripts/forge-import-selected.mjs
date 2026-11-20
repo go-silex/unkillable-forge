@@ -2,7 +2,7 @@
 // ImportSelection and inventory drafts. This module does not open files,
 // discover captures, decide access, or contact a provider. Native R2 versions
 // are filled only by assignSourcePins after a real local PUT.
-import { parseRequest, isReservedShellPath, subtreeSlugOf } from "../domains/catalogue/routing/grammar.ts"
+import { parseRequest, canonicalUrl, isReservedShellPath, subtreeSlugOf } from "../domains/catalogue/routing/grammar.ts"
 import { importPreviewOwned, orderedOriginalImageCandidatePaths } from "../domains/catalogue/previews.ts"
 import { conflictingImportOperationIndexes } from "../domains/catalogue/import-operation-set.ts"
 import { validateReaderProfile } from "../domains/catalogue/instance-config.ts"
@@ -168,7 +168,10 @@ function shellPath(path, declared, resulting = new Set()) {
   return slug !== null ? !resulting.has(slug) : isReservedShellPath(path) || declared.has(path)
 }
 export function isProtectedCaptureRelative(value) {
-  return typeof value === "string" && value.split("/").some(part => part === ".env" || part.startsWith(".env.") || part === ".git" || part === ".ssh")
+  return typeof value === "string" && value.split("/").some(part => {
+    const key = part.normalize("NFKC").toLowerCase()
+    return key === ".env" || key.startsWith(".env.") || key === ".git" || key === ".ssh"
+  })
 }
 function safeRelative(value) {
   return isUnicodeScalarString(value) && !!value && !value.startsWith("/") && !value.includes("\\") && !value.includes("\0") && !value.split("/").some(part => !part || part === "." || part === "..")
@@ -289,8 +292,8 @@ export async function preflightSelection(input, ledgerInput = null) {
   const account = (path, disposition, unitId, reason) => {
     if (!path || seen.has(path)) return
     seen.add(path)
-    const known = entries.get(path)?.placement?.sourceArtifactId
-    accounting.push({ path, disposition, unitId: text(unitId) ? unitId : text(known) ? known : null, reason })
+    const known = unitsOf(entryCandidates, path)
+    accounting.push({ path, disposition, unitId: known.length === 1 ? known[0] : null, reason })
   }
   const ledger = ledgerOf(ledgerInput)
   const slots = evidenceSlots(input)
@@ -303,6 +306,22 @@ export async function preflightSelection(input, ledgerInput = null) {
     return { kind: "fatal", result: { ok: false, fatal: fatal ?? "invalid_ledger", schema: SELECTED_IMPORT_SCHEMA, ledger: ledger ?? emptyLedger(), accounting, census: fatalCensus(), units: [], compatibility: { represented: [], unsupported: [note(fatal ?? "invalid_ledger")], notObserved: [] }, warnings } }
   }
   const roots = new Set(input.captureRoots)
+  const candidateIndex = (rows, keyOf, unitOf) => {
+    const index = new Map()
+    for (const row of rows) {
+      const key = keyOf(row), unit = unitOf(row)
+      if (typeof key !== "string") continue
+      const item = index.get(key) ?? { count: 0, units: new Set() }
+      item.count++
+      if (text(unit)) item.units.add(unit)
+      index.set(key, item)
+    }
+    return index
+  }
+  const sourceCandidates = candidateIndex(input.pages, row => row?.sourcePageId, row => row?.membership?.sourceArtifactId)
+  const pagePathCandidates = candidateIndex(input.pages, row => row?.documentPath, row => row?.membership?.sourceArtifactId)
+  const entryCandidates = candidateIndex(input.entries, row => row?.path, row => row?.placement?.sourceArtifactId)
+  const unitsOf = (index, key) => [...(index.get(key)?.units ?? [])].sort()
   const shells = new Set(input.reader.shellPaths.filter(path => typeof path === "string"))
   const entries = new Map(), entryOrdinals = new Map()
   let contradictory = false
@@ -336,6 +355,10 @@ export async function preflightSelection(input, ledgerInput = null) {
     if (exclusions.has(exclusion.path)) contradictory = true
     exclusions.set(exclusion.path, exclusion)
   }
+  for (const entry of entries.values()) {
+    const protectedPath = isProtectedCaptureRelative(entry.locator.relative) || exclusions.has(entry.path) || one(entry.graphClass, ["shell", "excluded"])
+    if (protectedPath && (!roots.has(entry.locator.root) || !safeRelative(entry.locator.relative))) contradictory = true
+  }
   const pages = []
   for (const page of input.pages) {
     if (!exact(page, ["sourcePageId", "documentPath", "metadata", "ownershipEvidenceRef", "membership", "visibility", "share"]) || !exact(page.membership, ["sourceArtifactId", "evidenceRef"]) || !text(page.membership.sourceArtifactId) || !text(page.membership.evidenceRef) || !text(page.sourcePageId) || !validPath(page.documentPath) || !text(page.ownershipEvidenceRef) || ENGINE_ID.test(page.sourcePageId)) {
@@ -350,12 +373,12 @@ export async function preflightSelection(input, ledgerInput = null) {
     }
     pages.push({ ...page, visibility, share })
   }
-  const pageBySource = new Map()
+  const pageBySource = new Map(), pageByPath = new Map()
   for (const page of pages) {
-    if (pageBySource.has(page.sourcePageId)) compatibility.unsupported.push(note("duplicate_page", { sourcePageId: page.sourcePageId }))
-    pageBySource.set(page.sourcePageId, page)
+    if (sourceCandidates.get(page.sourcePageId)?.count === 1) pageBySource.set(page.sourcePageId, page)
+    else compatibility.unsupported.push(note("duplicate_page", { sourcePageId: page.sourcePageId }))
+    if (pagePathCandidates.get(page.documentPath)?.count === 1) pageByPath.set(page.documentPath, page)
   }
-  const pageByPath = new Map(pages.map(page => [page.documentPath, page]))
   const relationshipBlocked = new Set()
   const selectedByUnit = new Map()
   for (const page of pages) {
@@ -369,17 +392,17 @@ export async function preflightSelection(input, ledgerInput = null) {
   const mountPaths = new Set(input.providerMounts.filter(record).map(mount => mount.path))
   const ownerUnitsByPath = new Map()
   for (const owner of input.owners) {
-    const unitId = pageBySource.get(owner?.ownerSourcePageId)?.membership.sourceArtifactId
-    if (!unitId || typeof owner?.path !== "string") continue
+    if (typeof owner?.path !== "string") continue
     const list = ownerUnitsByPath.get(owner.path) ?? new Set()
-    list.add(unitId); ownerUnitsByPath.set(owner.path, list)
+    for (const unit of unitsOf(sourceCandidates, owner?.ownerSourcePageId)) list.add(unit)
+    ownerUnitsByPath.set(owner.path, list)
   }
   const mappings = new Map(), unions = new Map()
   for (const mapping of input.shortlinks) if (text(mapping?.mappingId)) {
     const summary = mappings.get(mapping.mappingId) ?? { count: 0, sole: null, page: null, units: new Set() }
     summary.count++
     const page = pageBySource.get(mapping.targetSourcePageId)
-    if (page) summary.units.add(page.membership.sourceArtifactId)
+    for (const unit of unitsOf(sourceCandidates, mapping.targetSourcePageId)) summary.units.add(unit)
     summary.sole = summary.count === 1 ? mapping : null
     summary.page = summary.count === 1 ? page : null
     mappings.set(mapping.mappingId, summary)
@@ -387,9 +410,9 @@ export async function preflightSelection(input, ledgerInput = null) {
   const consumerResolutions = input.consumerUrls.map(row => {
     const summary = typeof row?.mappingRef === "string" ? mappings.get(row.mappingRef) : null
     const directPage = typeof row?.targetSourcePageId === "string" ? pageBySource.get(row.targetSourcePageId) : null
-    const directUnit = directPage?.membership.sourceArtifactId
-    const key = stable([typeof row?.mappingRef === "string" ? row.mappingRef : null, directUnit ?? null])
-    if (!unions.has(key)) unions.set(key, [...new Set([...(summary?.units ?? []), directUnit].filter(value => text(value)))])
+    const directUnits = unitsOf(sourceCandidates, row?.targetSourcePageId)
+    const key = stable([typeof row?.mappingRef === "string" ? row.mappingRef : null, typeof row?.targetSourcePageId === "string" ? row.targetSourcePageId : null])
+    if (!unions.has(key)) unions.set(key, [...new Set([...(summary?.units ?? []), ...directUnits])].sort())
     return { summary, directPage, unitIds: unions.get(key) }
   })
   for (const [kind, key] of EVIDENCE_COLLECTIONS) for (let ordinal = 0; ordinal < input[key].length; ordinal++) {
@@ -397,15 +420,15 @@ export async function preflightSelection(input, ledgerInput = null) {
     if (kind === "consumerUrl") { slot.unitIds = consumerResolutions[ordinal].unitIds; continue }
     if (kind === "providerMount") {
       if (typeof row?.path !== "string") continue
-      const localUnit = entries.get(row.path)?.placement?.sourceArtifactId
-      slot.unitIds = [...new Set([...(ownerUnitsByPath.get(row.path) ?? []), localUnit].filter(Boolean))]
-      if (localUnit) slot.reason = "provider_local_placement_conflict"
+      const localUnits = unitsOf(entryCandidates, row.path)
+      slot.unitIds = [...new Set([...(ownerUnitsByPath.get(row.path) ?? []), ...localUnits])].sort()
+      if (localUnits.length) slot.reason = "provider_local_placement_conflict"
       continue
     }
     const sourceKey = kind === "owner" ? row?.ownerSourcePageId : kind === "preview" ? row?.sourcePageId : row?.targetSourcePageId
-    const primary = kind === "entry" ? row?.placement?.sourceArtifactId : kind === "page" ? row?.membership?.sourceArtifactId : kind === "exclusion" ? entries.get(row?.path)?.placement?.sourceArtifactId : pageBySource.get(sourceKey)?.membership.sourceArtifactId
-    const secondary = kind === "entry" ? pageByPath.get(row?.path)?.membership.sourceArtifactId : null
-    slot.unitIds = [...new Set([primary, secondary].filter(value => text(value)))]
+    const primary = kind === "entry" ? (text(row?.placement?.sourceArtifactId) ? [row.placement.sourceArtifactId] : []) : kind === "page" ? (text(row?.membership?.sourceArtifactId) ? [row.membership.sourceArtifactId] : []) : kind === "exclusion" ? unitsOf(entryCandidates, row?.path) : unitsOf(sourceCandidates, sourceKey)
+    const secondary = kind === "entry" ? unitsOf(pagePathCandidates, row?.path) : []
+    slot.unitIds = [...new Set([...primary, ...secondary])].sort()
   }
   if (contradictory) {
     for (const path of entries.keys()) account(path, "blocked", null, "contradictory_input")
@@ -419,6 +442,12 @@ export async function preflightSelection(input, ledgerInput = null) {
     ["shortlink", input.shortlinks, "targetSourcePageId", ["mappingId", "providerOrigin", "providerId", "shortDomain", "shortCode", "shortUrl", "targetSourcePageId", "destination", "observedAt"]],
     ["preview", input.previews, "sourcePageId", ["sourcePageId", "path", "kind"]],
   ]
+  const ownerCounts = new Map()
+  for (const owner of input.owners) if (typeof owner?.path === "string" && typeof owner?.ownerSourcePageId === "string") {
+    const key = stable([owner.ownerSourcePageId, owner.path])
+    ownerCounts.set(key, (ownerCounts.get(key) ?? 0) + 1)
+  }
+  const owners = [], requestedOwners = [], admittedRelationships = new Set()
   const relationshipKeys = new Set()
   for (const [kind, rows, sourceKey, keys] of relationships) {
     for (let ordinal = 0; ordinal < rows.length; ordinal++) {
@@ -427,7 +456,11 @@ export async function preflightSelection(input, ledgerInput = null) {
       const unitId = page?.membership.sourceArtifactId ?? null
       if (!unitId) unassignable = true
       let valid = exact(row, keys)
-      if (valid && kind === "owner") valid = logicalPath(row.path, true) && isUnicodeScalarString(row.ownerSourcePageId) && text(row.evidenceRef) && row.basis === "declared" && (["fragment", "asset"].includes(entries.get(row.path)?.graphClass) || mountPaths.has(row.path))
+      if (valid && kind === "owner") {
+        const identityValid = !!page && pagePathCandidates.get(page.documentPath)?.count === 1 && isUnicodeScalarString(page.documentPath) && page.sourcePageId === (slugOf(page.documentPath) ?? page.documentPath.slice(1)) && logicalPath(row.path, true) && isUnicodeScalarString(row.ownerSourcePageId) && text(row.evidenceRef) && row.basis === "declared" && ownerCounts.get(stable([row.ownerSourcePageId, row.path])) === 1
+        if (identityValid) requestedOwners.push(row)
+        valid = identityValid && (["fragment", "asset"].includes(entries.get(row.path)?.graphClass) || mountPaths.has(row.path))
+      }
       if (valid && kind === "alias") valid = one(row.aliasKind, ["redirect_exact", "redirect_prefix"]) && isValidAliasPath(row.path) && isValidAliasDestination(row.to) && [301, 302, 307, 308].includes(row.status) && row.capturedBehavior === "team_fallback" && (row.aliasKind !== "redirect_prefix" || row.path.endsWith("/"))
       if (valid && kind === "shortlink") valid = text(row.mappingId) && text(row.providerOrigin) && (row.providerId === null || text(row.providerId)) && text(row.shortDomain) && text(row.shortCode) && text(row.shortUrl) && text(row.destination, 4096) && integer(row.observedAt) && row.observedAt >= 0 && validShortlinkIdentity(row.providerOrigin, row.shortDomain, row.shortCode, row.shortUrl)
       if (valid && kind === "preview") valid = logicalPath(row.path) && one(row.kind, ["original", "derived_only"]) && entries.has(row.path)
@@ -439,6 +472,8 @@ export async function preflightSelection(input, ledgerInput = null) {
         compatibility.unsupported.push(note(`invalid_${kind}`, { unitId }))
       }
       relationshipCensus.push({ kind, ordinal, unitId, disposition: valid ? "pending" : "rejected" })
+      if (valid && page) admittedRelationships.add(row)
+      if (valid && kind === "owner" && page) owners.push(row)
     }
   }
   for (const exclusion of input.exclusions) if (!entries.has(exclusion.path)) unassignable = true
@@ -453,18 +488,6 @@ export async function preflightSelection(input, ledgerInput = null) {
   if (unassignable) {
     compatibility.unsupported.push(note("unassignable_record"))
     return { kind: "fatal", result: { ok: false, fatal: "unassignable_record", schema: SELECTED_IMPORT_SCHEMA, ledger, accounting, census: fatalCensus(), units: [], compatibility, warnings, sourceInstance: input.sourceInstance, kind: input.kind } }
-  }
-  const owners = []
-  for (const owner of input.owners) {
-    if (!exact(owner, ["path", "ownerSourcePageId", "evidenceRef", "basis"]) || !text(owner.path) || !text(owner.ownerSourcePageId) || !text(owner.evidenceRef)) {
-      compatibility.unsupported.push(note("contradictory_owner"))
-      continue
-    }
-    if (owner.basis !== "declared") {
-      compatibility.unsupported.push(note("basename_heuristic_refused", { path: owner.path }))
-      continue
-    }
-    owners.push(owner)
   }
   const ownersByPath = new Map()
   for (const owner of owners) {
@@ -487,6 +510,11 @@ export async function preflightSelection(input, ledgerInput = null) {
     else if (page.metadata === null) code = "missing_metadata"
     else {
       try { if (stable(page.metadata).length > 8192) code = "metadata_too_large" } catch { code = "metadata_too_large" }
+    }
+    if (!code) {
+      const route = documentRoute(page.documentPath)
+      const parsed = route && parseRequest(new Request(`https://${input.reader.canonicalHost}${canonicalUrl(route)}`), input.reader).parsed
+      if (!route || !parsed || !((route.kind === "tree_page" && parsed.kind === "tree" && parsed.pageRef === route.pageRef) || (route.kind === "subtree" && parsed.kind === "subtree" && parsed.slug === route.slug)) || parsed.candidates[0] !== page.documentPath) code = "primary_route_unavailable"
     }
     const visibility = page.visibility, share = page.share
     if (!code && (visibility.state === "unknown" || visibility.state === "unreadable")) code = `visibility_${visibility.state}`
@@ -518,14 +546,22 @@ export async function preflightSelection(input, ledgerInput = null) {
   const subtreesByUnit = new Map()
   for (const [unitId, members] of selectedByUnit) subtreesByUnit.set(unitId, new Set(members.map(page => documentRoute(page.documentPath)).filter(route => route?.kind === "subtree").map(route => route.slug)))
   for (const entry of entries.values()) {
+    const resulting = subtreesByUnit.get(entry.placement?.sourceArtifactId) ?? new Set()
+    const protectedPath = isProtectedCaptureRelative(entry.locator.relative) || exclusions.has(entry.path) || one(entry.graphClass, ["shell", "excluded"]) || (subtreeSlugOf(entry.path) === null && shellPath(entry.path, shells, resulting))
+    if (protectedPath && (!roots.has(entry.locator.root) || !safeRelative(entry.locator.relative))) {
+      compatibility.unsupported.push(note("unsafe_locator", { path: entry.path }))
+      return { kind: "fatal", result: { ok: false, fatal: "contradictory_input", schema: SELECTED_IMPORT_SCHEMA, ledger, accounting, census: fatalCensus(), units: [], compatibility, warnings, sourceInstance: input.sourceInstance, kind: input.kind } }
+    }
+  }
+  for (const entry of entries.values()) {
     if (!entry.placement) continue
     let code = null
     if (!isUnicodeScalarString(entry.path)) code = "invalid_logical_path"
     else if (!roots.has(entry.locator.root) || !safeRelative(entry.locator.relative) || isProtectedCaptureRelative(entry.locator.relative)) code = "unsafe_locator"
     else if (exclusions.has(entry.path)) code = "excluded_content_contradiction"
     else if (entry.graphClass === "fragment" && !(ownersByPath.get(entry.path)?.length)) code = "fragment_without_owner"
-    else if (entry.contentType === null || !MIME.test(entry.contentType) || (entry.graphClass === "asset" && entry.path.endsWith(".html")) || (entry.graphClass === "page_document" && (!documentRoute(entry.path) || entry.contentType !== "text/html")) || (entry.graphClass === "subdocument" && (entry.contentType !== "text/html" || !entry.path.endsWith(".html"))) || (entry.graphClass === "fragment" && entry.contentType !== "text/html")) code = "contradictory_class"
-    else if (entry.graphClass === "subdocument" && ![...(subtreesByUnit.get(entry.placement.sourceArtifactId) ?? [])].some(slug => entry.path.startsWith(`/a/${slug}/`))) code = "subdocument_without_subtree"
+    else if (entry.contentType === null || !MIME.test(entry.contentType) || (entry.graphClass === "asset" && (entry.path.endsWith(".html") || entry.contentType.split(";", 1)[0].trim().toLowerCase() === "text/html")) || (["page_document", "subdocument", "fragment"].includes(entry.graphClass) && entry.contentType.split(";", 1)[0].trim().toLowerCase() !== "text/html") || (entry.graphClass === "page_document" && !documentRoute(entry.path)) || (entry.graphClass === "subdocument" && !entry.path.endsWith(".html"))) code = "contradictory_class"
+    else if (entry.graphClass === "subdocument" && !(subtreesByUnit.get(entry.placement.sourceArtifactId)?.has(subtreeSlugOf(entry.path)))) code = "subdocument_without_subtree"
     else if ((ownersByPath.get(entry.path)?.length ?? 0) > LIMITS.owners) code = "uncapped_owners"
     else if (entry.expected.size > Math.min(input.limits.maxUploadBytes, LIMITS.fileBytes)) code = "file_bytes"
     if (code) {
@@ -550,7 +586,7 @@ export async function preflightSelection(input, ledgerInput = null) {
   }
   const dependenciesByUnit = new Map()
   const dependencyKeysByUnit = new Map()
-  for (const owner of owners) {
+  for (const owner of requestedOwners) {
     const unitId = pageBySource.get(owner.ownerSourcePageId)?.membership.sourceArtifactId
     if (!unitId || entries.get(owner.path)?.placement?.sourceArtifactId === unitId) continue
     const mounts = assessedMountsByPath.get(owner.path) ?? []
@@ -573,7 +609,7 @@ export async function preflightSelection(input, ledgerInput = null) {
       compatibility.unsupported.push(note("provider_mount_required", { path: owner.path, unitId }))
     }
   }
-  for (const preview of input.previews) {
+  for (const preview of input.previews.filter(row => admittedRelationships.has(row))) {
     const page = pageBySource.get(preview?.sourcePageId)
     if (!page) continue
     const unitId = page.membership.sourceArtifactId
@@ -583,7 +619,7 @@ export async function preflightSelection(input, ledgerInput = null) {
       continue
     }
   }
-  const previewByPage = new Map(input.previews.filter(row => row?.kind === "original").map(row => [row.sourcePageId, row.path]))
+  const previewByPage = new Map(input.previews.filter(row => admittedRelationships.has(row) && row.kind === "original").map(row => [row.sourcePageId, row.path]))
   const policyOperations = new Map(), relationshipOperations = new Map(), proposed = [], proposedUnits = []
   const addProposal = (operation, unitId) => { proposed.push(operation); proposedUnits.push(unitId) }
   for (const page of pages) {
@@ -597,13 +633,13 @@ export async function preflightSelection(input, ledgerInput = null) {
     policyOperations.set(page.sourcePageId, operation)
     addProposal(operation, unitId)
   }
-  for (const alias of input.aliases) {
+  for (const alias of input.aliases.filter(row => admittedRelationships.has(row))) {
     const page = pageBySource.get(alias?.targetSourcePageId), unitId = page?.membership.sourceArtifactId
     if (!page || blockedUnits.has(unitId) || !exact(alias, ["aliasKind", "path", "to", "status", "targetSourcePageId", "capturedBehavior"]) || !one(alias.aliasKind, ["redirect_exact", "redirect_prefix"]) || !isValidAliasPath(alias.path) || !isValidAliasDestination(alias.to) || ![301, 302, 307, 308].includes(alias.status) || alias.capturedBehavior !== "team_fallback") continue
     const operation = { kind: "alias", operationId: remember(ledger, "operationIds", proposalKey(unitId, "alias", alias.aliasKind, alias.path), () => `op${opaque()}`), aliasKind: alias.aliasKind, path: alias.path, to: alias.to, status: alias.status, targetPageId: policyOperations.get(page.sourcePageId).policy.pageId }
     relationshipOperations.set(alias, operation); addProposal(operation, unitId)
   }
-  for (const link of input.shortlinks) {
+  for (const link of input.shortlinks.filter(row => admittedRelationships.has(row))) {
     const page = pageBySource.get(link?.targetSourcePageId), unitId = page?.membership.sourceArtifactId
     if (!page || blockedUnits.has(unitId) || !exact(link, ["mappingId", "providerOrigin", "providerId", "shortDomain", "shortCode", "shortUrl", "targetSourcePageId", "destination", "observedAt"]) || !text(link.mappingId) || !text(link.destination, 4096) || !integer(link.observedAt) || link.observedAt < 0 || !validShortlinkIdentity(link.providerOrigin, link.shortDomain, link.shortCode, link.shortUrl)) continue
     const policy = policyOperations.get(page.sourcePageId).policy
@@ -619,16 +655,11 @@ export async function preflightSelection(input, ledgerInput = null) {
     const operation = { kind: "shortlink", operationId: remember(ledger, "operationIds", proposalKey(unitId, "shortlink", link.mappingId), () => `op${opaque()}`), mapping: { mappingId: link.mappingId, providerOrigin: link.providerOrigin, providerId: link.providerId, shortDomain: link.shortDomain, shortCode: link.shortCode, shortUrl: link.shortUrl, pageId: policy.pageId, grantId, destination: link.destination, source: "imported", observedAt: link.observedAt, destinationDigest: await digest(link.destination) } }
     relationshipOperations.set(link, operation); addProposal(operation, unitId)
   }
-  for (const preview of input.previews) {
+  for (const preview of input.previews.filter(row => admittedRelationships.has(row))) {
     const page = pageBySource.get(preview?.sourcePageId), unitId = page?.membership.sourceArtifactId
     if (!page || blockedUnits.has(unitId) || preview.kind !== "original" || !logicalPath(preview.path)) continue
     const operation = { kind: "preview_selection", operationId: remember(ledger, "operationIds", proposalKey(unitId, "preview", preview.sourcePageId, preview.path), () => `op${opaque()}`), pageId: policyOperations.get(page.sourcePageId).policy.pageId, path: preview.path }
     relationshipOperations.set(preview, operation); addProposal(operation, unitId)
-  }
-  for (const index of conflictingImportOperationIndexes(proposed)) {
-    const unitId = proposedUnits[index]
-    blockedUnits.add(unitId)
-    if (!compatibility.unsupported.some(issue => issue.code === "conflicting_import_operations" && issue.unitId === unitId)) compatibility.unsupported.push(note("conflicting_import_operations", { unitId }))
   }
   const knownBudgets = new Map()
   for (const [unitId, members] of selectedByUnit) {
@@ -654,7 +685,7 @@ export async function preflightSelection(input, ledgerInput = null) {
   const staticEdges = new Map(), staticOperations = new Map(), compiled = new Map()
   for (const [path, list] of ownersByPath) for (const owner of list) {
     const unitId = pageBySource.get(owner.ownerSourcePageId)?.membership.sourceArtifactId
-    if (!unitId) continue
+    if (!unitId || entries.get(path)?.placement?.sourceArtifactId !== unitId) continue
     const rows = staticEdges.get(unitId) ?? []
     rows.push({ ownerPageId: ledger.pages[stable(pageKey(pageBySource.get(owner.ownerSourcePageId)))], path, providerArtifactId: null, evidenceRef: owner.evidenceRef })
     staticEdges.set(unitId, rows)
@@ -682,6 +713,10 @@ export async function preflightSelection(input, ledgerInput = null) {
       pageMappings: members.map(page => ({ sourcePageId: page.sourcePageId, pageId: policyOperations.get(page.sourcePageId).policy.pageId, documentPath: page.documentPath, route: routeOf(page.documentPath), ownershipEvidenceRef: page.ownershipEvidenceRef })).sort((a, b) => a.pageId < b.pageId ? -1 : 1),
       edgeEvidence: edges, evidence: { selectionDigest: input.selectionDigest, corpusDigest: input.corpusDigest, mappingRef: input.mappingRef, capturedAt: input.capturedAt, complete: true, g1bRef: input.g1bRef },
       files: sourceEntries.map(entry => ({ path: entry.path, kind: entry.graphClass === "page_document" ? "document" : entry.graphClass, contentType: entry.contentType, size: entry.expected.size, sha256: entry.expected.sha256, sourceRef: `capture/v1/${namespaces.get(unitId)}/${entryOrdinals.get(entry.path)}`, sourceVersion: null, provenance: entry.provenance })), operations: staticOperations.get(unitId) ?? [] }
+    if (conflictingImportOperationIndexes(inventory.operations).size) {
+      blockedUnits.add(unitId)
+      compatibility.unsupported.push(note("conflicting_import_operations", { unitId }))
+    }
     try { validateBeginCommand(command) } catch {
       blockedUnits.add(unitId)
       compatibility.unsupported.push(note("invalid_begin_command", { unitId }))
@@ -697,6 +732,17 @@ export async function preflightSelection(input, ledgerInput = null) {
     }
     compiled.set(unitId, { command, selection, inventory, cost })
   }
+  const viableOperations = [], viableUnits = []
+  for (const [unitId, draft] of compiled) if (!blockedUnits.has(unitId)) for (const operation of draft.inventory.operations) {
+    viableOperations.push(operation); viableUnits.push(unitId)
+  }
+  const conflictingUnits = new Set()
+  for (const index of conflictingImportOperationIndexes(viableOperations)) conflictingUnits.add(viableUnits[index])
+  for (const unitId of conflictingUnits) {
+    blockedUnits.add(unitId)
+    compatibility.unsupported.push(note("conflicting_import_operations", { unitId }))
+  }
+  const frozenUnits = new Set([...compiled.keys()].filter(unitId => !blockedUnits.has(unitId)))
   const aliasExact = new Map(), aliasPrefix = new Map(), mountedResources = new Set()
   const selectedSubtreeSlugs = new Set(), selectedTreePages = new Set()
   for (const [unitId, draft] of compiled) {
@@ -719,7 +765,9 @@ export async function preflightSelection(input, ledgerInput = null) {
   for (let ordinal = 0; ordinal < input.consumerUrls.length; ordinal++) {
     const row = input.consumerUrls[ordinal]
     const { summary, directPage, unitIds } = consumerResolutions[ordinal]
-    const mapping = summary?.sole ?? null
+    const candidateMapping = summary?.sole ?? null
+    const mappedUnit = candidateMapping && pageBySource.get(candidateMapping.targetSourcePageId)?.membership.sourceArtifactId
+    const mapping = candidateMapping && relationshipOperations.has(candidateMapping) && frozenUnits.has(mappedUnit) ? candidateMapping : null
     const mappedPage = summary?.page ?? null
     const page = directPage ?? mappedPage
     if (!page) {
@@ -815,7 +863,7 @@ export async function preflightSelection(input, ledgerInput = null) {
     const disposition = excluded ? "excluded" : !entry.placement || blockedUnits.has(unitId) || protectedPath ? "rejected" : "represented"
     const sourcePage = pageByPath.get(entry.path)
     const publicOrSharedDocument = !!sourcePage && entry.graphClass === "page_document" && sourcePage.membership.sourceArtifactId === unitId && sourcePage.visibility.state === "present" && ["public", "shared"].includes(sourcePage.visibility.value)
-    rowFact("entry", ordinal, [unitId, sourcePage?.membership.sourceArtifactId], disposition, { path: entry.path, locator: { root: entry.locator.root, relative: entry.locator.relative }, unitId, sourcePageId: sourcePage?.sourcePageId ?? null, publicOrSharedDocument, readCohort: protectedPath ? "protected" : disposition === "represented" ? "candidate" : "omitted", reason: excluded ? exclusions.get(entry.path).reason : disposition === "represented" ? "representable" : !entry.placement ? entry.graphClass === "unresolved" ? "unresolved_path" : "exclusion_evidence_required" : "preflight_blocked" })
+    rowFact("entry", ordinal, [unitId, sourcePage?.membership.sourceArtifactId], disposition, { path: entry.path, locator: { root: text(entry.locator.root) && isUnicodeScalarString(entry.locator.root) ? entry.locator.root : null, relative: safeRelative(entry.locator.relative) ? entry.locator.relative : null }, unitId, sourcePageId: sourcePage?.sourcePageId ?? null, publicOrSharedDocument, readCohort: protectedPath ? "protected" : disposition === "represented" ? "candidate" : "omitted", reason: excluded ? exclusions.get(entry.path).reason : disposition === "represented" ? "representable" : !entry.placement ? entry.graphClass === "unresolved" ? "unresolved_path" : "exclusion_evidence_required" : "preflight_blocked" })
     if (protectedPath) protectedLocators.push({ ordinal, locator: entry.locator })
     else if (disposition === "represented") reads.push({ ordinal, path: entry.path, locator: entry.locator, expected: entry.expected, sourceKey: `capture/v1/${namespaces.get(unitId)}/${ordinal}`, unitId, sourcePageId: sourcePage?.sourcePageId ?? null, publicDocument: publicOrSharedDocument })
     if (!entry.placement && !excluded) compatibility.unsupported.push(note(entry.graphClass === "unresolved" ? "unresolved_path" : "exclusion_evidence_required", { path: entry.path }))

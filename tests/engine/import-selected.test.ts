@@ -5,6 +5,8 @@ import { assignSourcePins, sealInventory, preflightSelection, projectTranslation
 import { makeSelectedFixture, type SyntheticInput } from "./fixtures/import-selected.mjs"
 import { env, request, setupHttp, signed } from "./fixtures/manage-http"
 import { manageHttpBindings } from "./fixtures/manage-http-bindings"
+import { configs } from "./fixtures/catalogue"
+import { parseRequest } from "../../domains/catalogue/routing/grammar"
 
 setupHttp()
 
@@ -314,6 +316,93 @@ describe("selected fixture through native import admission", () => {
       expect((await plan(slug)).result.state).toBe("ready")
       expect(await snapshot()).toEqual(before)
     }
+  })
+
+  it("compares only viable operation sets regardless of declaration order", async () => {
+    for (const variant of ["invalid-first", "valid-first", "both-valid"] as const) {
+      const { translated, units, plan } = await fixture(false, selected => {
+        const base = selected.input.shortlinks[0]
+        const colliding = { ...base, mappingId: "tree-collision", targetSourcePageId: "tree/one.html", destination: "https://forge.example.test/tree/one" }
+        const invalid = { ...colliding, mappingId: "tree-invalid", shortCode: "other", shortUrl: "https://links.example.test/other", destination: "https://forge.example.test/tree/two" }
+        if (variant === "invalid-first") selected.input.shortlinks.push(invalid, colliding)
+        else if (variant === "valid-first") selected.input.shortlinks.push(colliding, invalid)
+        else selected.input.shortlinks.push(colliding)
+      })
+      expect(translated.units.find(unit => unit.sourceArtifactId === "tree:synthetic")?.status).toBe("blocked")
+      const slug = units.find(unit => unit.sourceArtifactId === "slug:sample")
+      if (variant === "both-valid") {
+        expect(translated.units.find(unit => unit.sourceArtifactId === "slug:sample")?.status).toBe("blocked")
+        expect(slug).toBeUndefined()
+      } else {
+        if (!slug) throw new Error("independent slug unit missing")
+        const before = await snapshot()
+        expect((await plan(slug)).result.state).toBe("ready")
+        expect(await snapshot()).toEqual(before)
+      }
+    }
+  }, 30000)
+
+  it("requires the canonical page route to be enabled by the selected reader", async () => {
+    const blocked = await fixture(false, selected => {
+      selected.input.reader.routeGrammars = ["subtree"]
+      selected.input.reader.shareGrammars = ["slug"]
+      selected.input.reader.shareCookie = false
+    })
+    expect(blocked.translated.units.find(unit => unit.sourceArtifactId === "tree:synthetic")?.status).toBe("blocked")
+    expect(blocked.reads.some(read => read.path === "/tree/one.html")).toBe(false)
+    const slug = blocked.units.find(unit => unit.sourceArtifactId === "slug:sample")
+    if (!slug) throw new Error("independent slug unit missing")
+    const before = await snapshot()
+    expect((await blocked.plan(slug)).result.state).toBe("ready")
+    expect(await snapshot()).toEqual(before)
+
+    const enabled = await fixture()
+    const tree = enabled.units.find(unit => unit.sourceArtifactId === "tree:synthetic")
+    if (!tree) throw new Error("tree unit missing")
+    const parsed = parseRequest(new Request("https://forge.example.test/tree/one"), { ...(await configs()).read, ...enabled.selected.input.reader }).parsed
+    expect(parsed).toMatchObject({ kind: "tree", pageRef: "tree/one.html", candidates: ["/tree/one.html"] })
+    expect(tree.inventory.pageMappings).toContainEqual(expect.objectContaining({ sourcePageId: "tree/one.html", route: "/tree/one.html" }))
+    const afterPreparation = await snapshot()
+    expect((await enabled.plan(tree)).result.state).toBe("ready")
+    expect(await snapshot()).toEqual(afterPreparation)
+  }, 30000)
+
+  it("preserves parameterized HTML metadata for documents, subdocuments and fragments", async () => {
+    const header = "text/html; charset=utf-8"
+    const { units, plan } = await fixture(false, selected => {
+      for (const path of ["/tree/one.html", "/tree/fragment.html", "/a/sample/nested/index.html"]) {
+        const entry = selected.input.entries.find(value => value.path === path)
+        if (!entry) throw new Error("HTML entry missing")
+        entry.contentType = header
+      }
+    })
+    for (const [id, paths] of [["tree:synthetic", ["/tree/one.html", "/tree/fragment.html"]], ["slug:sample", ["/a/sample/nested/index.html"]]] as const) {
+      const unit = units.find(value => value.sourceArtifactId === id)
+      if (!unit) throw new Error("HTML unit missing")
+      for (const path of paths) {
+        expect(unit.command.files).toContainEqual(expect.objectContaining({ path, contentType: header }))
+        expect(unit.inventory.files).toContainEqual(expect.objectContaining({ path, contentType: header }))
+      }
+      if (id === "tree:synthetic") expect(unit.command.files).toContainEqual(expect.objectContaining({ path: "/tree/preview.png", kind: "asset", contentType: "image/png" }))
+      const before = await snapshot()
+      expect((await plan(unit)).result.state).toBe("ready")
+      expect(await snapshot()).toEqual(before)
+    }
+  }, 30000)
+
+  it("rejects an HTML-essence asset without reclassifying it", async () => {
+    const { translated, units, plan, reads } = await fixture(false, selected => {
+      const asset = selected.input.entries.find(entry => entry.path === "/tree/asset0.css")
+      if (!asset) throw new Error("asset missing")
+      asset.contentType = "text/html; charset=utf-8"
+    })
+    expect(translated.units.find(unit => unit.sourceArtifactId === "tree:synthetic")?.status).toBe("blocked")
+    expect(reads.some(read => read.path === "/tree/asset0.css")).toBe(false)
+    const slug = units.find(unit => unit.sourceArtifactId === "slug:sample")
+    if (!slug) throw new Error("independent slug unit missing")
+    const before = await snapshot()
+    expect((await plan(slug)).result.state).toBe("ready")
+    expect(await snapshot()).toEqual(before)
   })
 
   it("does not count a recognized consumer as represented when its selected artifact is incomplete", async () => {

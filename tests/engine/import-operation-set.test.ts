@@ -122,6 +122,23 @@ describe("native import operation set", () => {
     expect((await checkedPlan(f, [...f.inventory.operations, safe])).state).toBe("ready")
   })
 
+  it("rejects numeric mapping IDs before D1 can coerce them into colliding text", async () => {
+    const f = await fixture()
+    const text: ImportOperation = { kind: "shortlink", operationId: "text-mapping", mapping: { ...f.mapping, mappingId: "7.5", shortCode: "text", shortUrl: "https://links.example.test/text" } }
+    const numeric = { kind: "shortlink", operationId: "numeric-mapping", mapping: { ...f.mapping, mappingId: 7.5, shortCode: "numeric", shortUrl: "https://links.example.test/numeric" } } as unknown as ImportOperation
+    const distinct: ImportOperation = { kind: "shortlink", operationId: "distinct-mapping", mapping: { ...f.mapping, mappingId: "other", shortCode: "numeric", shortUrl: "https://links.example.test/numeric" } }
+    const duplicate: ImportOperation = { ...distinct, mapping: { ...distinct.mapping, mappingId: "7.5" } }
+    const nonScalar: ImportOperation = { kind: "shortlink", operationId: "non-scalar-mapping", mapping: { ...f.mapping, mappingId: "\ud800" } }
+    expect((await checkedPlan(f, [...f.inventory.operations, text])).state).toBe("ready")
+    expect(await checkedPlan(f, [...f.inventory.operations, numeric])).toEqual({ status: 422, code: "invalid_state", state: null, issues: [] })
+    expect(await checkedPlan(f, [...f.inventory.operations, nonScalar])).toEqual({ status: 422, code: "invalid_state", state: null, issues: [] })
+    expect((await checkedPlan(f, [...f.inventory.operations, text, distinct])).state).toBe("ready")
+    const collision = await checkedPlan(f, [...f.inventory.operations, text, duplicate])
+    expect(collision.state).toBe("blocked")
+    expect(collision.issues).toContainEqual({ code: "selection_graph_mismatch" })
+    expect(await checkedPlan(f, [...f.inventory.operations, text, numeric])).toEqual({ status: 422, code: "invalid_state", state: null, issues: [] })
+  })
+
   it("requires a shortlink grant to resolve to its own page across the complete proposed set", async () => {
     const f = await fixture()
     const proposed = newId("gr")

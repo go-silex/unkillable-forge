@@ -15,19 +15,24 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
   local storage and the authenticated manage Worker. A single selector snapshot
   and complete physical metadata authorization precede content reads; per-unit
   failures preserve independent sealed outcomes in one private checkpoint.
-  Static native drafts establish one frozen proposed read view before consumer
-  evaluation; impossible publications cannot shadow an independent alias, and
-  subdocuments require a subtree in the same artifact. Member failures retain
-  indexed private stage-specific evidence and exact original locators;
-  source-failure projection requires an authorized ordinal. Fatal receipts
-  preserve kind-specific attribution and JSON-safe checkpoint evidence.
+  Declaration evidence retains candidate attribution and multiplicity without
+  admitting rejected relationships. Complete local drafts precede global
+  conflict checks and the frozen proposed read view. Canonical page routes must
+  match the selected reader; HTML roles use media-type essence while preserving
+  original headers. Private locator facts retain valid components and mark
+  invalid ones null; executable locators remain strict. Physical reserved-name
+  comparisons conservatively fold case and Unicode without rewriting paths.
+  Member failures retain indexed stage-specific evidence; source-failure
+  projection requires an authorized ordinal. Fatal receipts preserve
+  kind-specific attribution and JSON-safe checkpoint evidence.
   Contradictory provider declarations retain valid private identities while
   blocking affected units; no declaration activates a mount. Selection and
   checkpoint JSON reject invalid UTF-8 and leading BOMs; ledger emission and
   replay share canonical scalar-path tuple validation. Private budgets preserve
   known counts, maxima and breached dimensions; serialized byte measurements
-  are null until measured, and pinned inventory is checked separately. Native planning validates
-  non-null grant IDs and checks referents against the full admitted inventory or
+  are null until measured, and pinned inventory is checked separately. Native
+  planning validates mapping text and non-null grant IDs, and checks referents
+  against the full admitted inventory or
   existing same-page rows, independent of cursor windows; existence is not active
   authorization. Placed assets can shadow aliases without owner edges. Native
   admission rejects alias keys and destinations containing literal `%25`, which

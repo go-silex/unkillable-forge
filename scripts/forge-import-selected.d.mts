@@ -48,7 +48,7 @@ type Disposition = 'represented' | 'excluded' | 'rejected'
 type FactBase = { ordinal: number; unitIds: string[]; disposition: Disposition }
 export type ProviderEvidence = { path: string | null; providerKind: 'fragment' | 'asset' | null; declaredProviderArtifactId: string | null; reason: 'invalid_provider_mount' | 'provider_mount_unverified' | 'provider_local_placement_conflict' }
 export type EvidenceFact =
-  | (FactBase & { kind: 'entry'; path: string; locator: { root: string; relative: string }; unitId: string | null; sourcePageId: string | null; publicOrSharedDocument: boolean; reason: string; readCohort: 'candidate' | 'protected' | 'omitted' })
+  | (FactBase & { kind: 'entry'; path: string; locator: { root: string | null; relative: string | null }; unitId: string | null; sourcePageId: string | null; publicOrSharedDocument: boolean; reason: string; readCohort: 'candidate' | 'protected' | 'omitted' })
   | (FactBase & { kind: 'page'; missingPath?: string })
   | (FactBase & { kind: 'providerMount' } & ProviderEvidence)
   | (FactBase & { kind: 'owner' | 'alias' | 'shortlink' | 'preview' | 'exclusion' | 'consumerUrl' })

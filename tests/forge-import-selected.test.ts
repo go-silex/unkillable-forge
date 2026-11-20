@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { preflightSelection, projectTranslation, assignSourcePins, sealInventory, stable, type Translation, type Unit, type RepresentableUnit } from '../scripts/forge-import-selected.mjs'
+import { preflightSelection, projectTranslation, assignSourcePins, sealInventory, isProtectedCaptureRelative, stable, type Translation, type Unit, type RepresentableUnit } from '../scripts/forge-import-selected.mjs'
 import type { ImportOperation } from '../domains/catalogue/import'
 import { makeSelectedFixture } from './engine/fixtures/import-selected.mjs'
 
@@ -918,5 +918,171 @@ describe('selected import translation', () => {
     expect(budget.pages).toBe(1001)
     expect(budget.failed).toContain('pages')
     expect(budget.commandBytes).toBeNull()
+  })
+  it('reserves mixed-case protected physical components without folding ordinary paths', async () => {
+    for (const path of ['.ENV', 'nested/.GiT/config', 'x/.SsH/key', '.EnV.local', '．ＥＮＶ']) expect(isProtectedCaptureRelative(path)).toBe(true)
+    expect(isProtectedCaptureRelative('nested/.envish')).toBe(false)
+    const { input } = await makeSelectedFixture()
+    const entry = input.entries.find(item => item.path === '/tree/asset0.css')
+    if (!entry) throw new Error('expected entry')
+    entry.locator.relative = 'nested/.EnV.local'
+    const prepared = await preflightSelection(input)
+    if (prepared.kind !== 'prepared') throw new Error('expected prepared')
+    expect(prepared.reads.some(read => read.path === entry.path)).toBe(false)
+    expect(prepared.protectedLocators.some(item => item.locator.relative === entry.locator.relative)).toBe(true)
+  })
+
+  it('keeps malformed locator components nullable and refuses protected unsafe locators', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const entry = input.entries.find(item => item.path === '/tree/asset0.css')
+    if (!entry) throw new Error('expected entry')
+    Object.assign(entry.locator, { relative: Infinity })
+    const prepared = await preflightSelection(input)
+    if (prepared.kind !== 'prepared') throw new Error('expected prepared')
+    const result = await prepared.finish(observations)
+    expect(result.facts.find(fact => fact.kind === 'entry' && fact.path === entry.path)).toEqual(expect.objectContaining({ locator: { root: 'capture', relative: null }, readCohort: 'omitted' }))
+    expect(unitFor(result, 'slug:').status).toBe('representable')
+    Object.assign(entry.locator, { root: 17, relative: 'safe.txt' })
+    const wrongRoot = await preflightSelection(input)
+    if (wrongRoot.kind !== 'prepared') throw new Error('expected prepared')
+    const wrongRootResult = await wrongRoot.finish(observations)
+    expect(wrongRootResult.facts.find(fact => fact.kind === 'entry' && fact.path === entry.path)).toEqual(expect.objectContaining({ locator: { root: null, relative: 'safe.txt' } }))
+    Object.assign(entry.locator, { root: 'capture', relative: Infinity })
+    input.exclusions.push({ path: entry.path, evidenceRef: 'synthetic', reason: 'non_content' })
+    expect((await preflightSelection(input)).kind).toBe('fatal')
+  })
+
+  it('requires the reader primary grammar and accepts HTML media parameters only for HTML roles', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    input.reader.routeGrammars = ['subtree']
+    input.reader.shareGrammars = ['slug']
+    input.reader.shareCookie = false
+    const disabled = await translateSelection(input, null, observations)
+    expect(unitFor(disabled, 'tree:').status).toBe('blocked')
+    expect(unitFor(disabled, 'slug:').status).toBe('representable')
+    input.reader.routeGrammars = ['tree', 'subtree']
+    input.reader.shareGrammars = ['page', 'slug', 'card']
+    input.reader.shareCookie = true
+    for (const entry of input.entries) if (['page_document', 'subdocument', 'fragment'].includes(entry.graphClass)) entry.contentType = 'text/html; charset=utf-8'
+    const allowed = await translateSelection(input, null, observations)
+    expect(represented(allowed, 'tree:').command.files.find(file => file.path === '/tree/one.html')?.contentType).toBe('text/html; charset=utf-8')
+    const asset = input.entries.find(entry => entry.path === '/tree/asset0.css')
+    if (!asset) throw new Error('expected asset')
+    asset.contentType = 'text/html; charset=utf-8'
+    expect(unitFor(await translateSelection(input, null, observations), 'tree:').status).toBe('blocked')
+  })
+
+  it('attributes duplicated source declarations to every candidate unit', async () => {
+    const { input } = await makeSelectedFixture()
+    const page = input.pages.find(item => item.sourcePageId === 'tree/one.html')
+    if (!page) throw new Error('expected page')
+    input.pages.push({ ...page, membership: { sourceArtifactId: 'tree:other', evidenceRef: 'synthetic' } })
+    const result = await preflightSelection(input)
+    if (result.kind !== 'fatal') throw new Error('expected fatal')
+    expect(result.result.census.find(row => row.kind === 'preview')?.affectedUnitIds).toEqual(['tree:other', 'tree:synthetic'])
+  })
+  it('does not treat a rejected foreign owner as fragment evidence', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const page = input.pages.find(item => item.sourcePageId === 'sample')
+    if (!page) throw new Error('expected page')
+    const bad = 'sample\uD800'
+    page.sourcePageId = bad
+    for (const alias of input.aliases) alias.targetSourcePageId = bad
+    for (const link of input.shortlinks) link.targetSourcePageId = bad
+    input.owners = input.owners.filter(owner => owner.path !== '/tree/fragment.html')
+    input.owners.push({ path: '/tree/fragment.html', ownerSourcePageId: bad, evidenceRef: 'synthetic', basis: 'declared' })
+    const prepared = await preflightSelection(input)
+    if (prepared.kind !== 'prepared') throw new Error('expected prepared')
+    expect(prepared.reads.some(read => read.path === '/tree/fragment.html')).toBe(false)
+    const result = await prepared.finish(observations)
+    expect(unitFor(result, 'tree:').blockers).toContainEqual(expect.objectContaining({ code: 'fragment_without_owner' }))
+  })
+
+  it('keeps cross-unit conflicts independent of locally invalid operation order', async () => {
+    const fixture = await makeSelectedFixture()
+    const { input, observations } = fixture
+    const base = input.shortlinks[0]
+    const treeLink = { ...base, mappingId: 'tree-link', targetSourcePageId: 'tree/one.html', destination: 'https://forge.example.test/tree/one' }
+    const badLink = { ...treeLink, mappingId: 'bad-link', shortCode: 'bad', shortUrl: 'https://links.example.test/bad', destination: 'https://forge.example.test/not-tree' }
+    input.shortlinks = [treeLink, badLink, base]
+    const first = await translateSelection(input, null, observations)
+    input.shortlinks = [badLink, treeLink, base]
+    const second = await translateSelection(input, null, observations)
+    for (const result of [first, second]) {
+      expect(unitFor(result, 'tree:').status).toBe('blocked')
+      expect(unitFor(result, 'slug:').status).toBe('representable')
+    }
+    input.shortlinks = [treeLink, base]
+    const conflict = await translateSelection(input, null, observations)
+    expect(unitFor(conflict, 'tree:').status).toBe('blocked')
+    expect(unitFor(conflict, 'slug:').status).toBe('blocked')
+  })
+  it('attributes duplicate entry paths to every candidate placement', async () => {
+    const { input } = await makeSelectedFixture()
+    const entry = input.entries.find(item => item.path === '/tree/asset0.css')
+    if (!entry) throw new Error('expected entry')
+    input.entries.push({ ...entry, placement: { sourceArtifactId: 'slug:sample', evidenceRef: 'synthetic' } })
+    input.exclusions.push({ path: entry.path, evidenceRef: 'synthetic', reason: 'non_content' })
+    const result = await preflightSelection(input)
+    if (result.kind !== 'fatal') throw new Error('expected fatal')
+    expect(result.result.census.find(row => row.kind === 'exclusion')?.affectedUnitIds).toEqual(['slug:sample', 'tree:synthetic'])
+    expect(result.result.accounting.find(row => row.path === entry.path)?.unitId).toBeNull()
+  })
+  it('counts four admitted fragment owners but not a rejected foreign claim', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const page = input.pages.find(item => item.sourcePageId === 'tree/one.html')
+    const document = input.entries.find(item => item.path === '/tree/one.html')
+    if (!page || !document) throw new Error('expected page fixture')
+    const path = '/tree/fragment.html'
+    for (let i = 0; i < 2; i++) {
+      const sourcePageId = `tree/extra-${i}.html`, documentPath = `/${sourcePageId}`
+      input.pages.push({ ...page, sourcePageId, documentPath })
+      input.entries.push({ ...document, path: documentPath, locator: { root: 'capture', relative: sourcePageId } })
+      observations[documentPath] = observations[document.path]
+      input.owners.push({ path, ownerSourcePageId: sourcePageId, evidenceRef: 'synthetic-owner', basis: 'declared' })
+    }
+    const bad = 'tree/\uD800.html'
+    input.pages.push({ ...page, sourcePageId: bad, documentPath: '/other.html', membership: { sourceArtifactId: 'tree:bad', evidenceRef: 'synthetic' } })
+    input.entries.push({ ...document, path: '/other.html', locator: { root: 'capture', relative: 'other.html' }, placement: { sourceArtifactId: 'tree:bad', evidenceRef: 'synthetic' } })
+    observations['/other.html'] = observations[document.path]
+    const owner = input.owners[0]
+    if (!owner) throw new Error('expected owner fixture')
+    const rejected = { ...owner, path, ownerSourcePageId: bad, evidenceRef: 'synthetic-rejected' }
+    input.owners.push(rejected)
+    const prepared = await preflightSelection(input)
+    if (prepared.kind !== 'prepared') throw new Error('expected prepared')
+    expect(prepared.reads.some(read => read.path === path)).toBe(true)
+    const four = await prepared.finish(observations)
+    const tree = four.units.find(unit => unit.unitId === page.membership.sourceArtifactId)
+    if (!tree || tree.status !== 'representable') throw new Error('expected representable tree unit')
+    expect(tree.command.files.some(file => file.path === path)).toBe(true)
+    expect(tree.command.edges.filter(edge => edge.path === path)).toHaveLength(4)
+    expect(four.census.find(row => row.kind === 'owner' && row.ordinal === input.owners.length - 1)?.disposition).toBe('rejected')
+    rejected.ownerSourcePageId = 'sample'
+    const fivePrepared = await preflightSelection(input)
+    if (fivePrepared.kind !== 'prepared') throw new Error('expected prepared')
+    expect(fivePrepared.reads.some(read => read.path === path)).toBe(false)
+    const five = await fivePrepared.finish(observations)
+    const fiveTree = five.units.find(unit => unit.unitId === page.membership.sourceArtifactId)
+    expect(fiveTree?.status).toBe('blocked')
+    expect(fiveTree?.command).toBeNull()
+    expect(five.census.find(row => row.kind === 'owner' && row.ordinal === input.owners.length - 1)?.disposition).toBe('rejected')
+  })
+
+  it('witnesses nested tree index and subtree index primary addresses', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const page = input.pages.find(item => item.sourcePageId === 'tree/one.html')
+    const document = input.entries.find(item => item.path === '/tree/one.html')
+    if (!page || !document) throw new Error('expected page fixture')
+    input.pages.push({ ...page, sourcePageId: 'nested/index.html', documentPath: '/nested/index.html', membership: { sourceArtifactId: 'tree:nested', evidenceRef: 'synthetic' } })
+    input.entries.push({ ...document, path: '/nested/index.html', locator: { root: 'capture', relative: 'nested/index.html' }, placement: { sourceArtifactId: 'tree:nested', evidenceRef: 'synthetic' } })
+    observations['/nested/index.html'] = observations[document.path]
+    const prepared = await preflightSelection(input)
+    if (prepared.kind !== 'prepared') throw new Error('expected prepared')
+    expect(prepared.reads.some(read => read.path === '/nested/index.html')).toBe(true)
+    expect(prepared.reads.some(read => read.path === '/a/sample/index.html')).toBe(true)
+    const result = await prepared.finish(observations)
+    expect(represented(result, 'tree:nested').command.pages.map(item => item.documentPath)).toContain('/nested/index.html')
+    expect(represented(result, 'slug:sample').command.pages.map(item => item.documentPath)).toContain('/a/sample/index.html')
   })
 })
