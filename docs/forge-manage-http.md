@@ -33,6 +33,181 @@ Typical flow: `begin` → upload client files and `materialize` each retained ba
 POST requires `Content-Type: application/json`, optionally `charset=utf-8`. PUT requires `application/octet-stream` without parameters; the resource's content type comes from its manifest, not this header. Content-Encoding must be absent or `identity`. A missing PUT body means zero bytes; a nonzero declared Content-Length with no body is invalid. JSON requires a body.
 
 ## Selected import
+### Local selected-input planner
+
+The offline adapter has two commands and no apply mode:
+
+```sh
+node scripts/forge-import-offline.mjs prepare --selection /private/selection.json --workspace /private/new-workspace --capture-root capture=/private/capture
+node scripts/forge-import-offline.mjs plan --workspace /private/new-workspace
+```
+
+`prepare` requires a new workspace path and one `--capture-root alias=/absolute/directory`
+per declared root; the option may be repeated. `plan` accepts only the workspace:
+it cannot replace the selection or capture roots. Unknown flags are rejected.
+The selection is a private JSON document, not a discovery request. Its version 1
+schema includes instance/evidence identifiers, declared transport and inventory
+limits, the reader projection (canonical and alias hosts, route/share grammars,
+share-cookie setting and shell paths), capture-root aliases, explicit entries,
+pages, owners, aliases, shortlinks, previews, consumer URLs, exclusions and provider
+mounts. See the synthetic [selection fixture](../tests/engine/fixtures/import-selected.mjs)
+and [translator](../scripts/forge-import-selected.mjs) for exact required fields.
+Every entry has a logical path, classification, content type, provenance,
+`locator: { root, relative }`, and an `expected` fingerprint. Content requires
+`{ size, sha256 }`; shell, excluded and unresolved entries may use `null`.
+Each page's `membership` and each content entry's `placement` identify the
+original source artifact and its evidence reference; non-content and unresolved
+entries use null placement. Consumer observations identify their expected target
+page or mapping as well as their purpose.
+Reserved non-content paths still require explicit exclusion evidence and are
+not opened. The root is an alias supplied on the command line; the path is
+relative to that root. Actual content bytes are independently observed and
+compared with both expected fields. Missing, unreadable, mismatched, protected
+or escaping paths are not substituted.
+Selection and checkpoint JSON are decoded as strict UTF-8 before parsing;
+malformed bytes are rejected rather than replaced, and a leading BOM is rejected
+by JSON parsing rather than silently removed. Logical paths and relative
+locators must be well-formed Unicode scalar strings; the original spelling is
+not rewritten. Capture paths are not R2 keys: the compiler allocates bounded
+ASCII source and inventory keys. A private entry-ordinal fact retains each valid
+original locator component and uses null for an invalid component. A valid root
+alias spelling may be unbound; executable read and protected locators require
+both valid strings and a declared root.
+Its unit and logical path join to the sealed member's source reference and native
+version. Planning uses the pin, not a capture reread, and receipts do not disclose
+locators.
+Treat the selection, workspace and its capture evidence as sensitive: share keys,
+destinations and protected inventories can be present there.
+
+Node 22.12 or later is required. The offline CLI bundles the fixed repository
+translator and Catalogue parser in memory using the existing toolchain; it
+does not require Node's experimental TypeScript loading. Selector, workspace
+and state use the shipped private descriptor checks, including effective access
+checks rather than mode bits alone. All candidate and explicitly protected
+locators are resolved across root aliases and their available physical identities
+checked before the first body read. Descriptor metadata inspection is not a body
+read; identities are checked again when bytes are read. The authorized read and
+protected-locator sets are not complements: omission of ordinary content from a
+blocked unit does not make its inode a protected exclusion.
+Reservation checks every capture-relative component using a conservative
+NFKC, case-folded and default-ignorable-character-stripped comparison for
+`.env`, `.env.*`, `.git` and `.ssh`. This deny-only comparison may reserve extra
+names and is not a specification of all filesystems or proof of APFS behavior.
+It never rewrites the descriptor path or publication identity. Protected metadata
+and cross-alias physical identity checks still precede all body reads.
+An overlong ordinary component is unreadable, not absent; an inability to resolve
+protected metadata refuses preparation before any body read.
+
+Before body reads the selector groups declarations by artifact. Evidence slots
+retain candidate unit sets and declaration multiplicity; a rejected or ambiguous
+relationship is not an admitted owner or operation. Admitted relationships
+establish governance and local edges. A rejected but otherwise sound request
+for an unknown external tree resource can still explain a missing dependency;
+known documents, subdocuments and configured shells are not resource targets
+and produce neither resource edges nor dependencies, regardless of provider
+assertions. Impossible subtree claims cannot establish dependencies either.
+A subtree owner must be local to its artifact and under its exact subtree prefix.
+Native import admission independently checks the structural distinction.
+The compiler completes artifact-local drafts and their intrinsic checks before
+comparing viable drafts for global conflicts.
+All participants in a genuine conflict are blocked.
+Surviving drafts contribute routes, placements and aliases to one frozen proposed
+read view; a failed consumer or later pin failure does not select another winner.
+Each page needs its canonical primary address in the selected reader profile.
+An unconstructible canonical HTTPS origin is a global `invalid_grammar` refusal
+before capture binding; a constructible origin with a disabled primary route
+remains a unit-local refusal.
+A subdocument requires an evidenced subtree in its own artifact. HTML roles use
+the validated media-type essence while preserving the literal Content-Type;
+an asset cannot be HTML. This view is neither a live route nor access proof.
+
+The preflight keeps an indexed census, including malformed relationships.
+An unassignable contradiction is a fatal selector failure, distinct from a
+valid exclusions-only selection; projection preserves a fatal receipt without
+inventing projectable facts. Each ordinal's affected units come from its
+kind-specific semantic relation and remain the same on normal and fatal exits;
+ambiguous references retain all independently evidenced candidate units without
+choosing a winner. Mapping-only attribution survives an unrelated fatal record. Raw invalid identities
+do not become unit IDs; JSON-safe evidence is the same census checkpointed and
+authenticated in the receipt. Each attributed missing or unreadable member
+blocks its complete source artifact; independent units may still proceed. The ID
+ledger scopes identity by canonical serialized source tuples, including source
+instance and original artifact. Emission and replay use the same tuple validation;
+noncanonical or malformed keys, including non-scalar paths, are rejected rather
+than reminted. Private member facts retain ordinal, stage and
+reason, including distinct diagnostics for the same member. A projected source
+failure must name an ordinal authorized for source observation.
+The per-unit dependency list retains each required provider's path and kind.
+For contradictory local/provider evidence, the rejected provider ordinal retains
+the valid declared ID and `provider_local_placement_conflict`. For an otherwise
+ownable resource with conflicting placement, the foreign claimant's dependency
+is `missing` with a null ID, not `unverified`, and the local claimant has no
+dependency. For a known nonresource target there is no dependency at all; the
+reason code alone does not promise an actionable dependency. Other valid provider
+declarations may be unverified; none establishes an active mount. Invalid provider IDs retain their
+rejected ordinal and identifiable dependents. An empty dependency list means
+no identified dependency, not an inference from a blocked unit.
+
+Private unit budgets retain known declared file, page and edge counts, largest
+file size and all known breached dimensions even if a unit cannot compile.
+The `commandBytes`, `envelopeBytes` and `inventoryBytes` measurements are null
+until a draft is serialized; afterward they are actual measured bytes, not
+fabricated zeros. The envelope measurement uses the maximum-cursor convention.
+Draft inventory bytes do not predict the later pinned inventory size, which is
+checked separately after native source versions are assigned. These diagnostics
+are not a historical capacity benchmark.
+
+Unknown or unreadable policy capture blocks its unit, whereas an observed
+unrecognized visibility value is retained for the native warning. Static
+recognition, representation by an eligible unit, native `ready`, and actual
+consumer HTTP authorization are separate outcomes. Literal shortlink destination
+preservation does not prove the target, key or grant association; a dry-run
+does not prove an actual consumer HTTP response.
+A valid team-only alias to `/` can be stored without proving that its destination
+is a selected document. Alias keys and destinations containing literal `%25`
+are rejected before readiness because Catalogue route storage forbids them.
+Required consumer claims must resolve to the actual
+winning selected resource and purpose; a share or card destination additionally
+requires the exact captured key and observed shared visibility. A team alias
+does not authenticate its destination. Excluded census names are not primary
+mounts and cannot by themselves shadow an alias; selected routes and eligible
+resource placements determine precedence, including placed assets with no owner
+edge. A non-null shortlink grant must be a valid catalogue grant ID and be
+produced by a validated proposed shared policy on that page anywhere in the
+full admitted inventory, regardless of cursor window or operation order, or
+exist on that page in D1. An existing revoked grant can satisfy this referent
+check: existence
+is not active read authorization, and dry-run does not prove consumer access.
+
+Preparation creates isolated local D1 and R2 state, a synthetic administrator and
+signing material, then pins native object versions and a separately approved
+inventory. Planning reopens those pins, authenticates to the actual manage Worker
+and consumes its bounded dry-run continuations. It does not apply, publish,
+discover providers, use a host provider transport or claim operating-system
+network isolation. Expected source reread failures and late inventory byte-budget
+failures block the affected unit without invalidating independently sealed units;
+one atomic private checkpoint records the resulting outcomes. This is not a
+crash-recovery guarantee. Private member failure facts retain the entry, affected
+unit, stage (`inspect` or `pin_reread`) and reason. An observed absent
+public/shared page document also reports OR-1 at that stage; an absent stylesheet
+or an unreadable file is not evidence of that missing-document condition. Public
+receipts expose fixed codes and counts, not member paths, page IDs or other
+private evidence. Planning groups no more than 1,000 approvals per
+Worker binding and uses a fresh fixture assertion for each unit's planning
+window without extending native cursor expiry. The nonsecret receipt
+distinguishes fatal, exclusions-only and partial preparations, and reports
+compatibility separately from each native `ready` or `blocked`
+outcome. Warning codes and counts are sanitized through a public allowlist;
+unknown codes use a fixed category, and private values are not emitted. The
+receipt compares logical database contents and both bucket inventories before
+and after completed runs. If dispatch, decoding or continuation is interrupted,
+store equality is unknown unless the after-snapshot completes.
+A ready unit does not resolve an `or1_missing_document` blocker in another
+selection, activate a provider, or establish historical fidelity or F10
+acceptance. G1b is closed only for the verified capped historical ownership
+graph; Claude native publication is deferred and no private operation grant
+is active. Historical execution requires separate current authority and evidence.
+
 
 `POST /api/maintenance/import` is a separate, administrator-only interface for
 an operator-approved selection, not an arbitrary source or SQL API. It accepts
@@ -60,11 +235,14 @@ To prepare an inventory, capture the approved source instance and artefact,
 page-to-route and ownership evidence, graph edges, each client file's private
 object key/native version/length/SHA-256, and the selected policy, alias,
 shortlink and original-preview observations. The inventory and its exact
-Publication command must describe the same selection. Protect it with its
-private source objects, then pin its own R2 object key, version and SHA-256 in
+Publication command must describe the same selection. Canonical command
+comparison rejects non-finite numbers rather than treating them as JSON null;
+this is not a claim that every inventory field uses a strict decoder. Protect
+the inventory with its private source objects, then pin its R2 object key,
+version and SHA-256 in
 the operator configuration above. Approval and evidence references are not
-proof by themselves: historical ownership, key and destination provenance
-must actually be established, and G1b remains unresolved.
+proof by themselves: historical key and destination provenance must actually
+be established. G1b was lifted only for the verified capped ownership graph.
 
 For an existing target, include the complete retained base graph: kept pages,
 their resources and ownership edges. Omitting a base resource or edge does not
@@ -135,8 +313,8 @@ new write batch may start after expiry. A D1 write already submitted cannot be
 cancelled and may settle after the deadline; its outcome is awaited.
 Finite visibility or shared-key expiries are explicitly blocked as
 `expiring_policy_unsupported`: the current target policy cannot preserve
-their expiry without extending access. Historical import remains unauthorized
-while G1b ownership evidence and approval are unresolved. This interface adds
+their expiry without extending access. Historical execution remains unauthorized
+without separately approved selection, protected inputs and target basis. This interface adds
 no backup/recovery system, collection scheduler, production migration or
 historical-fidelity claim.
 

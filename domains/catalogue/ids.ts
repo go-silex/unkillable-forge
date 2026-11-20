@@ -1,5 +1,10 @@
 export type IdPrefix = "pg" | "ar" | "rv" | "gr" | "pr" | "rg" | "ev" | "ps" | "pe"
 
+/** The durable Catalogue ID grammar for a specific identity domain. */
+export function isCatalogueId(value: unknown, prefix: IdPrefix): value is string {
+  return typeof value === "string" && value.length === 29 && value.startsWith(`${prefix}_`) && /^[a-z2-7]{26}$/.test(value.slice(3))
+}
+
 /** Encode 128 random bits as unpadded lowercase RFC 4648 base32. */
 export function newId(prefix: IdPrefix): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16))

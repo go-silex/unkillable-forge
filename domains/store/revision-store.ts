@@ -76,13 +76,16 @@ export function derivedObjectKey(instanceId: string, ref: DerivedObjectRef): str
   return `${instanceId}/derived/v1/${ref.artifactId}/${ref.revisionId}/${ref.pageId}/og/${ref.recipeSha256}/${ref.inputSha256}/${ref.contentSha256}.${ref.extension}`
 }
 
+/** TextEncoder otherwise replaces unpaired surrogates, causing key collisions. */
+export function isUnicodeScalarString(value: unknown): value is string {
+  return typeof value === 'string' && !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value)
+}
+
 async function objectKey(instanceId: string, ref: RevisionObjectRef): Promise<string> {
   if (ref.kind === 'og') return derivedObjectKey(instanceId, ref)
   const base = prefix(instanceId, ref)
   if (ref.kind === 'manifest') return `${base}manifest.json`
-  // TextEncoder replaces unpaired surrogates; rejecting them prevents path collisions.
-  if (ref.kind !== 'resource' || typeof ref.path !== 'string' || !ref.path ||
-      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(ref.path)) {
+  if (ref.kind !== 'resource' || !isUnicodeScalarString(ref.path) || !ref.path) {
     throw new StoreError('invalid_input')
   }
   return `${base}resources/${hex(await crypto.subtle.digest('SHA-256', encoder.encode(ref.path)))}`

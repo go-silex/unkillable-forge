@@ -2,7 +2,7 @@
 // Check decoded forms too: encoded or repeatedly encoded separators and controls
 // must not become meaningful when another layer interprets the location.
 function safePath(value: unknown): value is string {
-  if (typeof value !== 'string' || !/^[!-~]+$/.test(value) || !value.startsWith('/') || value.startsWith('//')) return false
+  if (typeof value !== 'string' || !/^[!-~]+$/.test(value) || !value.startsWith('/') || value.startsWith('//') || /%25/i.test(value)) return false
   let path = value
   for (;;) {
     if (/[\\\u0000-\u001f\u007f?#]/.test(path) || path.includes('//') || /%(?:2f|2e|5c)/i.test(path)) return false
@@ -27,4 +27,14 @@ export function isValidAliasPath(value: unknown): boolean {
 /** Validate a same-origin pathname suitable for a Location header. */
 export function isValidAliasDestination(value: unknown): boolean {
   return safePath(value)
+}
+
+/** Match the same exact/prefix predicate as the indexed Catalogue lookup. */
+export function aliasMatchesPath(kind: 'redirect_exact' | 'redirect_prefix', key: string, path: string): boolean {
+  return kind === 'redirect_exact' ? key === path : path.startsWith(key)
+}
+
+/** A prefix redirect appends the decoded unmatched path, never the query. */
+export function aliasLocation(kind: 'redirect_exact' | 'redirect_prefix', key: string, to: string, path: string): string {
+  return to + (kind === 'redirect_prefix' ? path.slice(key.length) : '')
 }

@@ -10,6 +10,50 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 ## [Unreleased]
 
 ### Added
+- Reject non-finite numbers in canonical import command comparison, preventing
+  overflowed pinned JSON numbers from comparing equal to explicit null.
+
+
+- Add a selected-input offline preparation and dry-run adapter using isolated
+  local storage and the authenticated manage Worker. A single selector snapshot
+  and complete physical metadata authorization precede content reads; per-unit
+  failures preserve independent sealed outcomes in one private checkpoint.
+  Declaration evidence retains candidate attribution and multiplicity without
+  admitting rejected relationships. Complete local drafts precede global
+  conflict checks and the frozen proposed read view. Host and native import
+  admission reject impossible subtree ownership. Sound unknown foreign tree
+  requests can remain missing dependencies even when their owner row is rejected;
+  known documents, subdocuments and configured shells produce no resource edge
+  or dependency, regardless of provider assertions; impossible subtree claims
+  cannot establish dependencies. Canonical page routes
+  must match the selected reader; unconstructible origins fail before capture binding.
+  HTML roles preserve original headers. Private locator facts distinguish invalid
+  components from valid unbound aliases; executable locators remain strict.
+  Reserved-name comparison conservatively folds case, Unicode and default
+  ignorables without rewriting paths or claiming all-filesystem equivalence.
+  Overlong ordinary components are unreadable; protected resolution fails closed.
+  Member failures retain indexed stage-specific evidence; source-failure
+  projection requires an authorized ordinal. Fatal receipts preserve
+  kind-specific attribution and JSON-safe checkpoint evidence.
+  Contradictory local/provider evidence retains the valid provider ID on the
+  rejected ordinal. For an otherwise ownable resource with conflicting placement,
+  the foreign dependency is missing with a null ID and the local claimant has
+  none; a known nonresource target has no dependency. The conflict reason alone
+  does not promise an actionable dependency, and no declaration activates a mount.
+  Selection and
+  checkpoint JSON reject invalid UTF-8 and leading BOMs; ledger emission and
+  replay share canonical scalar-path tuple validation. Private budgets preserve
+  known counts, maxima and breached dimensions; serialized byte measurements
+  are null until measured, and pinned inventory is checked separately. Native
+  planning validates mapping text and non-null grant IDs, and checks referents
+  against the full admitted inventory or
+  existing same-page rows, independent of cursor windows; existence is not active
+  authorization. Placed assets can shadow aliases without owner edges. Native
+  admission rejects alias keys and destinations containing literal `%25`, which
+  route storage forbids. Literal links and evidenced associations do not prove
+  consumer HTTP access.
+  This does not authorize historical execution, publication, provider access or
+  cutover, and is not a historical capacity benchmark.
 
 - F10 adds an administrator-only selected-import endpoint using a protected,
   operator-approved inventory and pinned source versions, sizes and hashes.
@@ -19,9 +63,10 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
   actor-bound continuation; retained graph and original preview evidence are
   preserved or explicitly refused. The shared activation guard also rechecks
   current external resource-provider mounts. Finite legacy visibility or share
-  expiry is explicitly blocked because the target cannot preserve it. G1b
-  historical import remains unauthorized; this adds no recovery system, GC
-  scheduler, production migration or historical-fidelity proof. See
+  expiry is explicitly blocked because the target cannot preserve it. G1b was
+  lifted only for the verified capped ownership graph; historical execution
+  remains separately unauthorized. This adds no recovery system, GC scheduler,
+  production migration or historical-fidelity proof. See
   `docs/forge-manage-http.md`.
 
 - F09 source adds authorized preview/card delivery, immutable derived OG bytes,

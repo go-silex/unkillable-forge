@@ -1,12 +1,15 @@
 import type { BeginCommand, PublicationReceipt } from '../publication/types'
+import { isPublicationToken } from '../publication/staging'
 import { importAliasStatement, importPagePolicyStatements, type ManageDeps } from './commands'
 import { requireManageActor, requireImportReadContext, importReadCursorIdentity, type ManageActor, type ImportReadContext } from './principals'
 import { executeGuarded, PolicyError } from './guard'
 import { isShareKey, shareKeyDigests } from './share-secrets'
 import { importShortlinkStatement, type ShortlinkMapping } from './shortlinks'
 import { importPreviewOwned, importPreviewStatements } from './previews'
-import { newId } from './ids'
-import { documentRouteOf } from './revision-paths'
+import { newId, isCatalogueId } from './ids'
+import { documentRouteOf, ownershipEdgeFeasible } from './revision-paths'
+import type { SubtreeOrTree } from './routing/grammar'
+import { conflictingImportOperationIndexes } from './import-operation-set'
 
 export interface ImportSelection {
   readonly version: 1
@@ -51,27 +54,32 @@ export interface ApprovedImportInventory {
 export interface AdmittedImportSelection { readonly selection: ImportSelection; readonly inventory: ApprovedImportInventory; readonly approval: ImportApproval; readonly planKid: string; readonly planDigest: string; readonly sourceDigest: string }
 export interface ImportMappingSummary { readonly pages: number; readonly aliases: number; readonly shortlinks: number; readonly previews: number }
 const admitted = new WeakMap<object, ImportReadContext>()
+const grantProducers = new WeakMap<object, ReadonlyMap<string, string>>()
 type PlanCandidate = { readonly kid:string; readonly planDigest:string; readonly sourceDigest:string }
 const candidates = new WeakMap<object, readonly PlanCandidate[]>()
 export const IMPORT_METADATA_LIMIT = 128
 const hex = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 const text = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 1024
 function canonical(value: unknown): string {
+  if (typeof value === 'number' && !Number.isFinite(value)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
   if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
   const obj = value as Record<string, unknown>
   return `{${Object.keys(obj).sort().map(k => `${JSON.stringify(k)}:${canonical(obj[k])}`).join(',')}}`
 }
 
+
 export async function admitImportSelection(selection: ImportSelection, input: unknown, approval: ImportApproval, deps: ManageDeps, readContext: ImportReadContext): Promise<AdmittedImportSelection> {
   await requireImportReadContext(readContext, deps)
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new PolicyError('invalid_state')
+  if (!isPublicationToken(selection.planId)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
   const inventory = input as ApprovedImportInventory
   if (inventory.kind === 'historical' && (!text(approval.g1bRef) || inventory.evidence?.g1bRef !== approval.g1bRef)) throw new PolicyError('invalid_state', 'g1b_evidence_required')
   if (selection.version !== 1 || !text(selection.planId) || selection.inventoryId !== approval.inventoryId || selection.selectionId !== approval.selectionId || inventory.version !== 1 || inventory.inventoryId !== approval.inventoryId || inventory.selectionId !== approval.selectionId || inventory.sourceInstance !== approval.sourceInstance || inventory.approvalRef !== approval.approvalRef || inventory.kind !== approval.kind || !text(inventory.sourceArtifactId) || !inventory.evidence || inventory.evidence.complete !== true || !hex(inventory.evidence.selectionDigest) || !hex(inventory.evidence.corpusDigest) || !text(inventory.evidence.mappingRef) || !Number.isSafeInteger(inventory.evidence.capturedAt) || (inventory.kind === 'historical' && (!text(approval.g1bRef) || inventory.evidence.g1bRef !== approval.g1bRef)) || !Array.isArray(inventory.files) || !Array.isArray(inventory.operations)) throw new PolicyError('invalid_state')
   if (!inventory.command || !selection.command || canonical(inventory.command) !== canonical(selection.command) || !Array.isArray(selection.command.pages) || selection.command.pages.length === 0 || !Array.isArray(selection.command.files) || !Array.isArray(selection.command.edges)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
   if (!Array.isArray(inventory.pageMappings) || !Array.isArray(inventory.edgeEvidence)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
   if (!Array.isArray(inventory.files) || !Array.isArray(inventory.operations) || (inventory.removals !== undefined && !Array.isArray(inventory.removals))) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
+  if (selection.command.edges.some(edge => !edge || (edge.providerArtifactId !== null && !text(edge.providerArtifactId)))) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
   const filesByPath = new Map(selection.command.files.map(file => [file.path,file]))
   const pagesById = new Map(selection.command.pages.map(page => [page.pageId,page]))
   const declaredEdges = new Set(selection.command.edges.map(edge => canonical([edge.ownerPageId,edge.path,edge.providerArtifactId])))
@@ -86,17 +94,24 @@ export async function admitImportSelection(selection: ImportSelection, input: un
   }
   const livePages = selection.command.pages.filter(page => page.disposition !== 'drop')
   if (inventory.pageMappings.length !== livePages.length || inventory.edgeEvidence.length !== selection.command.edges.length) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
-  const sourcePages = new Set<string>(), targetPages = new Set<string>()
+  const sourcePages = new Set<string>(), targetPages = new Map<string, SubtreeOrTree>()
   for (const mapping of inventory.pageMappings) {
-    if (!mapping || !text(mapping.sourcePageId) || !text(mapping.pageId) || !text(mapping.route) || !text(mapping.ownershipEvidenceRef) || sourcePages.has(mapping.sourcePageId) || targetPages.has(mapping.pageId) || pagesById.get(mapping.pageId)?.disposition === 'drop' || pagesById.get(mapping.pageId)?.documentPath !== mapping.documentPath) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
-    sourcePages.add(mapping.sourcePageId); targetPages.add(mapping.pageId)
+    if (!mapping || !text(mapping.sourcePageId) || !text(mapping.pageId) || !text(mapping.route) || !text(mapping.ownershipEvidenceRef) || sourcePages.has(mapping.sourcePageId) || targetPages.has(mapping.pageId)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
+    const page = pagesById.get(mapping.pageId)
+    if (!page || page.disposition === 'drop' || typeof mapping.documentPath !== 'string' || page.documentPath !== mapping.documentPath) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
+    sourcePages.add(mapping.sourcePageId)
     const route = documentRouteOf(mapping.documentPath)
     if (!route || mapping.route !== (route.kind === 'subtree' ? `/a/${route.slug}/` : `/${route.pageRef}`)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
+    targetPages.set(mapping.pageId, route)
   }
   const edgeKeys = new Set<string>()
   for (const edge of inventory.edgeEvidence) {
+    if (!edge || typeof edge.path !== 'string' || (edge.providerArtifactId !== null && !text(edge.providerArtifactId))) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
     const key = canonical([edge.ownerPageId,edge.path,edge.providerArtifactId])
     if (!text(edge.evidenceRef) || edgeKeys.has(key) || !declaredEdges.has(key)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
+    const owner = targetPages.get(edge.ownerPageId)
+    const providerIsLocal = edge.providerArtifactId === null || edge.providerArtifactId === selection.command.artifactId
+    if (!owner || !ownershipEdgeFeasible(owner, edge.path, providerIsLocal)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
     edgeKeys.add(key)
   }
   const paths = new Set<string>()
@@ -116,6 +131,7 @@ export async function admitImportSelection(selection: ImportSelection, input: un
     ids.add(id)
     if (op.kind === 'page_policy') {
       const p = op.policy
+      if (p?.visibility?.value === 'shared' && !isCatalogueId(p.grantId, 'gr')) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
       if (!p || !text(p.pageId) || !text(p.sourcePageId) || !p.visibility || p.visibility.captured !== true || !p.share || p.share.captured !== true || (p.visibility.metadataV !== null && p.visibility.metadataV !== p.visibility.value) || (p.visibility.value === 'shared' && (!p.share.key || !isShareKey(p.share.key) || !text(p.grantId))) || !pagesById.has(p.pageId) || pagesById.get(p.pageId)?.disposition === 'drop' || pagesById.get(p.pageId)?.expectedPolicyEpoch !== p.expectedPolicyEpoch) throw new PolicyError('invalid_state')
       if (policyPages.has(p.pageId) || mappingByPage.get(p.pageId)?.sourcePageId !== p.sourcePageId) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
       if (p.visibility.expiresAt !== null || (p.visibility.value === 'shared' && p.share.expiresAt !== null)) throw new PolicyError('invalid_state', 'expiring_policy_unsupported')
@@ -131,6 +147,7 @@ export async function admitImportSelection(selection: ImportSelection, input: un
       if (!targetPages.has(op.pageId) || !['image/jpeg','image/png'].includes(filesByPath.get(op.path)?.contentType ?? '')) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
     } else throw new PolicyError('invalid_state')
   }
+  if (conflictingImportOperationIndexes(inventory.operations).size) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
   if (selection.command.pages.some(page => page.disposition === 'new' && !policyPages.has(page.pageId))) throw new PolicyError('invalid_state', 'missing_policy_evidence')
   const planInput = canonical({
     instanceId:deps.config.instanceId,
@@ -151,6 +168,7 @@ export async function admitImportSelection(selection: ImportSelection, input: un
     }
   }
   freeze(result)
+  grantProducers.set(result, new Map(result.inventory.operations.flatMap(op => op.kind === 'page_policy' && op.policy.visibility.value === 'shared' && op.policy.grantId !== null ? [[op.policy.grantId, op.policy.pageId] as const] : [])))
   admitted.set(result, readContext)
   candidates.set(result, options)
   return result
@@ -165,6 +183,7 @@ function selectCandidate(context: AdmittedImportSelection, predicate: (candidate
   if (selected.planDigest === context.planDigest) return context
   const result = Object.freeze({...context,planKid:selected.kid,planDigest:selected.planDigest,sourceDigest:selected.sourceDigest})
   admitted.set(result, authority)
+  grantProducers.set(result, grantProducers.get(context)!)
   candidates.set(result, options)
   return result
 }
@@ -186,6 +205,17 @@ export async function importCursorIdentity(context: AdmittedImportSelection, dep
 }
 
 export async function inspectImportTarget(deps: ManageDeps, context: AdmittedImportSelection, observationKid: string): Promise<string> {
+  return (await inspectImportTargetObserved(deps, context, observationKid)).digest
+}
+
+type GrantReference = {grant_id:string;page_id:string}
+function unproducedGrantIds(context: AdmittedImportSelection): string[] {
+  const producers = grantProducers.get(context)
+  if (!producers) throw new PolicyError('forbidden')
+  return [...new Set(context.inventory.operations.flatMap(op => op.kind === 'shortlink' && op.mapping.grantId !== null && producers.get(op.mapping.grantId) !== op.mapping.pageId ? [op.mapping.grantId] : []))]
+}
+
+async function inspectImportTargetObserved(deps: ManageDeps, context: AdmittedImportSelection, observationKid: string): Promise<{digest:string;grantReferences:GrantReference[]}> {
   if (!admitted.has(context)) throw new PolicyError('forbidden')
   await requireImportReadContext(admitted.get(context)!, deps)
   const command = context.selection.command
@@ -206,12 +236,14 @@ export async function inspectImportTarget(deps: ManageDeps, context: AdmittedImp
     deps.db.prepare('SELECT * FROM mounts WHERE path IN (SELECT value FROM json_each(?)) ORDER BY path').bind(paths),
     deps.db.prepare(`SELECT DISTINCT r.* FROM routes r JOIN json_each(?1) j ON (r.kind='redirect_exact' AND r.route_key=j.value) OR (r.kind='redirect_prefix' AND substr(j.value,1,length(r.route_key))=r.route_key) OR (r.kind='subtree' AND substr(j.value,1,length('/a/'||r.route_key||'/'))='/a/'||r.route_key||'/') UNION SELECT r.* FROM routes r JOIN json_each(?2) j ON r.kind=json_extract(j.value,'$.kind') AND r.route_key=json_extract(j.value,'$.key') UNION SELECT r.* FROM routes r JOIN json_each(?3) j ON r.kind=json_extract(j.value,'$.kind') AND r.route_key=json_extract(j.value,'$.key') ORDER BY kind,route_key`).bind(paths,routes,aliases),
     deps.db.prepare("SELECT DISTINCT s.* FROM shortlink_mappings s JOIN json_each(?) j ON s.mapping_id=json_extract(j.value,'$.mappingId') OR (s.provider_origin=json_extract(j.value,'$.providerOrigin') AND s.short_domain=json_extract(j.value,'$.shortDomain') AND s.short_code=json_extract(j.value,'$.shortCode')) ORDER BY s.mapping_id").bind(links),
+    deps.db.prepare('SELECT grant_id,page_id FROM share_grants WHERE grant_id IN (SELECT value FROM json_each(?)) ORDER BY grant_id').bind(JSON.stringify(unproducedGrantIds(context))),
     deps.db.prepare('SELECT artifact_id FROM publication_imports WHERE instance_id=? AND source_instance=? AND source_artifact_id=? LIMIT 1').bind(deps.config.instanceId,context.inventory.sourceInstance,context.inventory.sourceArtifactId),
   ])
   const related = results.map(result => result.results)
   const key = deps.config.shareVerifierKeys.find(candidate => candidate.kid === observationKid)
   if (!key) throw new PolicyError('conflict')
-  return Array.from(new Uint8Array(await crypto.subtle.sign('HMAC', key.key, new TextEncoder().encode(`forge.import.target.v1\0${canonical(related)}`))), b => b.toString(16).padStart(2,'0')).join('')
+  const digest = Array.from(new Uint8Array(await crypto.subtle.sign('HMAC', key.key, new TextEncoder().encode(`forge.import.target.v1\0${canonical(related)}`))), b => b.toString(16).padStart(2,'0')).join('')
+  return {digest,grantReferences:results[7].results as GrantReference[]}
 }
 
 interface CompletionTarget {
@@ -328,12 +360,20 @@ export async function assertImportReplay(deps: ManageDeps, actor: ManageActor, c
 
 export async function inspectImportConflicts(deps: ManageDeps, context: AdmittedImportSelection): Promise<readonly { code: string; pageId?: string; path?: string }[]> {
   if (!admitted.has(context)) throw new PolicyError('forbidden')
+  return inspectImportConflictsFor(deps, context)
+}
+
+// The producer index belongs to the complete admitted inventory, not a chunk.
+async function inspectImportConflictsFor(deps: ManageDeps, context: AdmittedImportSelection, observedReferences?: readonly GrantReference[]): Promise<readonly { code: string; pageId?: string; path?: string }[]> {
+  if (!admitted.has(context)) throw new PolicyError('forbidden')
   await requireImportReadContext(admitted.get(context)!, deps)
   const issues: { code: string; pageId?: string; path?: string }[] = []
   const { db } = deps
   const mapping = await db.prepare('SELECT artifact_id FROM publication_imports WHERE instance_id=? AND source_instance=? AND source_artifact_id=? LIMIT 1').bind(deps.config.instanceId,context.inventory.sourceInstance,context.inventory.sourceArtifactId).first<{artifact_id:string}>()
   if (mapping && mapping.artifact_id !== context.selection.command.artifactId) issues.push({code:'source_mapping_conflict'})
   const operations = context.inventory.operations
+  const producers = grantProducers.get(context)!
+  const references = observedReferences ?? (await db.prepare('SELECT grant_id,page_id FROM share_grants WHERE grant_id IN (SELECT value FROM json_each(?)) ORDER BY grant_id').bind(JSON.stringify(unproducedGrantIds(context))).all<GrantReference>()).results
   const [policyRows, grantRows, aliasRows, linkRows] = await db.batch([
     db.prepare('SELECT page_id,artifact_id,policy_epoch,tombstoned_at FROM pages WHERE page_id IN (SELECT json_extract(value,\'$.policy.pageId\') FROM json_each(?) WHERE json_extract(value,\'$.kind\')=\'page_policy\')').bind(JSON.stringify(operations)),
     db.prepare('SELECT grant_id,page_id,key_kid,key_hmac,mode,pinned_revision_id,origin,revoked_at FROM share_grants WHERE grant_id IN (SELECT json_extract(value,\'$.policy.grantId\') FROM json_each(?) WHERE json_extract(value,\'$.kind\')=\'page_policy\')').bind(JSON.stringify(operations)),
@@ -356,6 +396,7 @@ export async function inspectImportConflicts(deps: ManageDeps, context: Admitted
       if (row && (row.redirect_to !== op.to || row.redirect_status !== op.status || row.target_page_id !== op.targetPageId)) issues.push({code:'alias_conflict',path:op.path})
     } else if (op.kind === 'shortlink') {
       const m = op.mapping
+      if (m.grantId !== null && producers.get(m.grantId) !== m.pageId && !references.some(grant => grant.grant_id === m.grantId && grant.page_id === m.pageId)) issues.push({code:'grant_conflict',pageId:m.pageId ?? undefined})
       const row = (linkRows.results as Record<string,unknown>[]).find(r => r.mapping_id === m.mappingId || (r.provider_origin === m.providerOrigin && r.short_domain === m.shortDomain && r.short_code === m.shortCode))
       if (row && (row.mapping_id !== m.mappingId || row.provider_origin !== m.providerOrigin || row.provider_id !== m.providerId || row.short_domain !== m.shortDomain || row.short_code !== m.shortCode || row.short_url !== m.shortUrl || row.page_id !== m.pageId || row.grant_id !== m.grantId || row.destination !== m.destination || row.source !== m.source || row.observed_at !== m.observedAt || row.destination_digest !== m.destinationDigest)) issues.push({code:'shortlink_conflict',pageId:m.pageId ?? undefined})
     } else if (op.kind === 'preview_selection' && !importPreviewOwned(context.selection.command, op.pageId, op.path)) {
@@ -410,13 +451,15 @@ export async function inspectImportChunk(deps: ManageDeps, context: AdmittedImpo
     const operations = cursor.phase === 'operations' ? context.inventory.operations.slice(cursor.index,cursor.index + IMPORT_METADATA_LIMIT) : []
     const chunk: AdmittedImportSelection = { ...context, selection:{...context.selection,command:chunkCommand}, inventory:{...context.inventory,operations} }
     admitted.set(chunk, readContext)
-    const targetDigest = await inspectImportTarget(deps, chunk, observationKid)
+    grantProducers.set(chunk, grantProducers.get(context)!)
+    const target = await inspectImportTargetObserved(deps, chunk, observationKid)
     if (cursor.phase === 'operations') {
       const conflictChunk: AdmittedImportSelection = { ...chunk, selection:{...context.selection,command:{...command,expectedRevisionId:null}} }
       admitted.set(conflictChunk, readContext)
-      issues.push(...await inspectImportConflicts(deps, conflictChunk))
+      grantProducers.set(conflictChunk, grantProducers.get(context)!)
+      issues.push(...await inspectImportConflictsFor(deps, conflictChunk, target.grantReferences))
     }
-    observation = {targetDigest}
+    observation = {targetDigest:target.digest}
   } else {
     const base = command.expectedRevisionId
     let rows: Record<string,unknown>[] = []

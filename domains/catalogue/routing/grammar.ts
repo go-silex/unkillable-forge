@@ -20,6 +20,7 @@ export type ParsedRequest =
 export interface RequestCredentials { readonly shareCookie: { readonly pageRef: string; readonly key: string } | null }
 
 const slugRe = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+const validSlug = (value: string): boolean => value.length <= 200 && slugRe.test(value)
 const segmentRe = /^[A-Za-z0-9._-]+$/
 const keyRe = /^[A-Za-z0-9_-]{8,128}$/
 const idRe = /^(?:pg|rv)_[a-z2-7]{26}$/
@@ -29,7 +30,7 @@ export const validPageRef = (value: string): boolean => pageRefRe.test(value) &&
 export function subtreeSlugOf(path: string): string | null {
   if (!path.startsWith("/a/")) return null
   const slug = path.slice(3).split("/", 1)[0]
-  return slugRe.test(slug) ? slug : null
+  return validSlug(slug) ? slug : null
 }
 
 export function safeNext(raw: string | null, origin: string): string {
@@ -83,7 +84,7 @@ function cardTargets(identity: string, config: ReadInstanceConfig): Target[] {
   if (/^og\.(?:jpe?g|png)$/.test(file)) {
     const pageRef = dir ? `${dir}/index.html` : "index.html"
     if (config.routeGrammars.includes("tree") && validPageRef(pageRef)) targets.push({ route: { kind: "tree_page", pageRef }, path: `/${identity}` })
-    if (config.routeGrammars.includes("subtree") && slugRe.test(dir)) targets.push({ route: { kind: "subtree", slug: dir }, path: `/a/${dir}/${file}` })
+    if (config.routeGrammars.includes("subtree") && validSlug(dir)) targets.push({ route: { kind: "subtree", slug: dir }, path: `/a/${dir}/${file}` })
   } else {
     const match = /^(.+)\.og\.(?:jpe?g|png)$/.exec(file)
     if (match && config.routeGrammars.includes("tree")) {
@@ -132,14 +133,14 @@ export function parseRequest(request: Request, config: ReadInstanceConfig): { re
     const qk = url.searchParams.get("k")
     const slug = parts[0] ?? "", key = qk === null ? parts[1] ?? "" : qk
     const rest = parts.slice(qk === null ? 2 : 1)
-    if (!slugRe.test(slug) || !keyRe.test(key) || rest.some(s => !segmentRe.test(s) || s === "." || s === "..")) return deny(404, "malformed")
+    if (!validSlug(slug) || !keyRe.test(key) || rest.some(s => !segmentRe.test(s) || s === "." || s === "..")) return deny(404, "malformed")
     const suffix = rest.length === 0 ? "index.html" : rest.at(-1)!.includes(".") ? rest.join("/") : `${rest.join("/")}/index.html`
     return result({ kind: "share", grammar: "slug", route: { kind: "subtree", slug }, key, candidates: [`/a/${slug}/${suffix}`], browser: false })
   }
   if ((path === "/a" || path.startsWith("/a/")) && config.routeGrammars.includes("subtree")) {
     const parts = path.split("/")
     const slug = parts[2] ?? ""
-    if (!slugRe.test(slug)) return deny(404, "malformed")
+    if (!validSlug(slug)) return deny(404, "malformed")
     const base = `/a/${slug}`
     let candidates: string[]
     if (path === base || path === `${base}/`) candidates = [`${base}/index.html`]
