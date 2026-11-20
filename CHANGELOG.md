@@ -23,7 +23,9 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
   conflict checks and the frozen proposed read view. Host and native import
   admission reject impossible subtree ownership. Sound unknown foreign tree
   requests can remain missing dependencies even when their owner row is rejected;
-  known documents and impossible subtree claims cannot. Canonical page routes
+  known documents, subdocuments and configured shells produce no resource edge
+  or dependency, regardless of provider assertions; impossible subtree claims
+  cannot establish dependencies. Canonical page routes
   must match the selected reader; unconstructible origins fail before capture binding.
   HTML roles preserve original headers. Private locator facts distinguish invalid
   components from valid unbound aliases; executable locators remain strict.
@@ -34,8 +36,11 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
   projection requires an authorized ordinal. Fatal receipts preserve
   kind-specific attribution and JSON-safe checkpoint evidence.
   Contradictory local/provider evidence retains the valid provider ID on the
-  rejected ordinal, while the foreign dependency is missing with a null ID and
-  the local claimant has none; no declaration activates a mount. Selection and
+  rejected ordinal. For an otherwise ownable resource with conflicting placement,
+  the foreign dependency is missing with a null ID and the local claimant has
+  none; a known nonresource target has no dependency. The conflict reason alone
+  does not promise an actionable dependency, and no declaration activates a mount.
+  Selection and
   checkpoint JSON reject invalid UTF-8 and leading BOMs; ledger emission and
   replay share canonical scalar-path tuple validation. Private budgets preserve
   known counts, maxima and breached dimensions; serialized byte measurements

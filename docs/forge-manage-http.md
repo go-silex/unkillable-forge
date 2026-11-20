@@ -103,7 +103,9 @@ retain candidate unit sets and declaration multiplicity; a rejected or ambiguous
 relationship is not an admitted owner or operation. Admitted relationships
 establish governance and local edges. A rejected but otherwise sound request
 for an unknown external tree resource can still explain a missing dependency;
-claims on known documents or subdocuments and impossible subtree claims cannot.
+known documents, subdocuments and configured shells are not resource targets
+and produce neither resource edges nor dependencies, regardless of provider
+assertions. Impossible subtree claims cannot establish dependencies either.
 A subtree owner must be local to its artifact and under its exact subtree prefix.
 Native import admission independently checks the structural distinction.
 The compiler completes artifact-local drafts and their intrinsic checks before
@@ -137,10 +139,12 @@ reason, including distinct diagnostics for the same member. A projected source
 failure must name an ordinal authorized for source observation.
 The per-unit dependency list retains each required provider's path and kind.
 For contradictory local/provider evidence, the rejected provider ordinal retains
-the valid declared ID and `provider_local_placement_conflict`; the foreign
-claimant's dependency is `missing` with a null ID, not `unverified`, and the
-local claimant has no dependency. Other valid provider declarations may be
-unverified; none establishes an active mount. Invalid provider IDs retain their
+the valid declared ID and `provider_local_placement_conflict`. For an otherwise
+ownable resource with conflicting placement, the foreign claimant's dependency
+is `missing` with a null ID, not `unverified`, and the local claimant has no
+dependency. For a known nonresource target there is no dependency at all; the
+reason code alone does not promise an actionable dependency. Other valid provider
+declarations may be unverified; none establishes an active mount. Invalid provider IDs retain their
 rejected ordinal and identifiable dependents. An empty dependency list means
 no identified dependency, not an inference from a blocked unit.
 

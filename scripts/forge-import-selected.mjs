@@ -395,7 +395,7 @@ export async function preflightSelection(input, ledgerInput = null) {
   }
   const pageKey = page => [input.sourceInstance, page.membership.sourceArtifactId, page.sourcePageId]
   const proposalKey = (unitId, ...parts) => [input.sourceInstance, unitId, input.selectionRef, input.selectionDigest, ...parts]
-  const knownNonresource = path => pagePathCandidates.has(path) || ["page_document", "subdocument"].includes(entries.get(path)?.graphClass)
+  const knownNonresource = path => pagePathCandidates.has(path) || ["page_document", "subdocument"].includes(entries.get(path)?.graphClass) || (typeof path === "string" && subtreeSlugOf(path) === null && (isReservedShellPath(path) || shells.has(path)))
   const mountPaths = new Set(input.providerMounts.filter(mount => validProviderMount(mount) && !entryCandidates.get(mount.path) && !knownNonresource(mount.path)).map(mount => mount.path))
   const primaryRoutes = new Map(pages.map(page => [page, documentRoute(page.documentPath)]))
   const ownerUnitsByPath = new Map()
