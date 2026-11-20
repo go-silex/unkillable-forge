@@ -242,6 +242,34 @@ describe("selected fixture through native import admission", () => {
     }
   })
 
+  it("treats placed assets as primary over a team alias whether or not they have owners", async () => {
+    for (const placement of ["excluded", "unowned", "owned"] as const) {
+      const { translated, units, plan } = await fixture(false, selected => {
+        const path = "/brand.css"
+        selected.input.aliases[0].path = path
+        selected.input.consumerUrls.push({ url: `https://forge.example.test${path}`, purpose: "alias", targetSourcePageId: "sample", mappingRef: null })
+        if (placement === "excluded") {
+          selected.input.entries.push({ path, graphClass: "excluded", contentType: null, locator: { root: "capture", relative: "brand.css" }, provenance: "synthetic-exclusion", expected: null, placement: null })
+          selected.input.exclusions.push({ path, evidenceRef: "synthetic-exclusion", reason: "engine" })
+        } else {
+          const original = selected.input.entries.find(entry => entry.path === "/tree/asset0.css")
+          if (!original) throw new Error("asset missing")
+          selected.input.entries.push({ ...original, path, locator: { root: "capture", relative: "brand.css" } })
+          selected.observations[path] = selected.observations[original.path]
+          selected.files[path] = selected.files[original.path]
+          if (placement === "owned") selected.input.owners.push({ path, ownerSourcePageId: "tree/one.html", evidenceRef: "synthetic-edge-evidence", basis: "declared" })
+        }
+      })
+      expect(translated.census).toContainEqual(expect.objectContaining({ kind: "consumerUrl", ordinal: 0, disposition: placement === "excluded" ? "represented" : "rejected" }))
+      const unit = units.find(value => value.sourceArtifactId === (placement === "excluded" ? "slug:sample" : "tree:synthetic"))
+      if (!unit) throw new Error("representable unit missing")
+      if (placement !== "excluded") expect(unit.command.files.some(file => file.path === "/brand.css")).toBe(true)
+      const before = await snapshot()
+      expect((await plan(unit)).result.state).toBe("ready")
+      expect(await snapshot()).toEqual(before)
+    }
+  })
+
   it("does not count a recognized consumer as represented when its selected artifact is incomplete", async () => {
     const { translated, units, plan } = await fixture(false, selected => {
       selected.input.consumerUrls.push({ url: "https://forge.example.test/s/sample/?k=syntheticSlugKey", purpose: "share", targetSourcePageId: "sample", mappingRef: null })

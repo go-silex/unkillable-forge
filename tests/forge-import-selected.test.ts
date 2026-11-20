@@ -709,4 +709,96 @@ describe('selected import translation', () => {
     expect(result.census.find(row => row.kind === 'consumerUrl')?.disposition).toBe('rejected')
     expect(unitFor(result, 'tree:').status).toBe('representable')
   })
+  it('treats an ownerless placed asset as a mounted alias collision', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const template = input.entries.find(entry => entry.path === '/tree/asset0.css')!
+    input.entries.push({ ...template, path: '/legacy-sample.css', locator: { root: 'capture', relative: 'legacy-sample.css' } })
+    observations['/legacy-sample.css'] = observations[template.path]
+    input.aliases[0].path = '/legacy-sample.css'
+    input.consumerUrls.push({ url: 'https://forge.example.test/legacy-sample.css', purpose: 'alias', targetSourcePageId: 'sample', mappingRef: null })
+    const collision = await translateSelection(input, null, observations)
+    expect(unitFor(collision, 'slug:').status).toBe('blocked')
+    const tree = represented(collision, 'tree:')
+    expect(tree.command.files.some(file => file.path === '/legacy-sample.css')).toBe(true)
+    expect(tree.command.edges.some(edge => edge.path === '/legacy-sample.css')).toBe(false)
+  })
+
+  it('retains every provider slot and all conflicting placement units on fatal input', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const path = '/tree/asset0.css'
+    const artifactId = `ar_${'a'.repeat(26)}`
+    input.owners.push({ path, ownerSourcePageId: 'sample', evidenceRef: 'synthetic-owner', basis: 'declared' })
+    input.providerMounts.push({ path, kind: 'asset', artifactId })
+    const page = input.pages.find(item => item.sourcePageId === 'tree/one.html')!
+    const document = input.entries.find(item => item.path === '/tree/one.html')!
+    input.pages.push({ ...page, sourcePageId: 'other.html', documentPath: '/other.html', membership: { sourceArtifactId: 'tree:other', evidenceRef: 'synthetic-membership' } })
+    input.entries.push({ ...document, path: '/other.html', locator: { root: 'capture', relative: 'other.html' }, placement: { sourceArtifactId: 'tree:other', evidenceRef: 'synthetic-placement' } })
+    observations['/other.html'] = observations[document.path]
+    const conflict = await translateSelection(input, null, observations)
+    expect(unitFor(conflict, 'slug:').dependencies).toContainEqual({ path, providerArtifactId: null, kind: 'asset', state: 'missing' })
+    expect(unitFor(conflict, 'tree:synthetic').dependencies.some(dependency => dependency.path === path)).toBe(false)
+    expect(unitFor(conflict, 'tree:other').status).toBe('representable')
+    expect(conflict.census.find(row => row.kind === 'providerMount')).toEqual(expect.objectContaining({ declaredProviderArtifactId: artifactId, reason: 'provider_local_placement_conflict' }))
+    input.providerMounts.push({ kind: 'asset', artifactId } as typeof input.providerMounts[number])
+    const prepared = await preflightSelection(input)
+    if (prepared.kind !== 'fatal') throw new Error('expected fatal')
+    const providers = prepared.result.census.filter(row => row.kind === 'providerMount')
+    expect(providers).toHaveLength(2)
+    expect(providers[0]).toEqual(expect.objectContaining({ declaredProviderArtifactId: artifactId, reason: 'provider_local_placement_conflict', affectedUnitIds: expect.arrayContaining(['tree:synthetic', 'slug:sample']) }))
+    expect(providers[1]).toEqual(expect.objectContaining({ path: null, providerKind: 'asset', declaredProviderArtifactId: artifactId, affectedUnitIds: [] }))
+    expect(JSON.parse(JSON.stringify(providers))).toEqual(providers)
+  })
+
+  it('rejects fabricated source failures for protected and omitted entries', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    input.exclusions.push({ path: '/tree/one.html', evidenceRef: 'synthetic-exclusion', reason: 'non_content' })
+    const prepared = await preflightSelection(input)
+    if (prepared.kind !== 'prepared') throw new Error('expected prepared')
+    const result = await prepared.finish(observations)
+    const protectedOrdinal = input.entries.findIndex(entry => entry.path === '/tree/one.html')
+    const omittedOrdinal = input.entries.findIndex(entry => entry.path === '/tree/asset0.css')
+    for (const entryOrdinal of [protectedOrdinal, omittedOrdinal]) {
+      for (const stage of ['inspect', 'pin_reread'] as const) {
+        expect(() => projectTranslation(result, [{ kind: 'source', entryOrdinal, stage, reason: 'absent' }])).toThrow('invalid_pin_failure')
+      }
+    }
+    const candidate = prepared.reads.find(read => read.unitId === 'slug:sample')!
+    expect(unitFor(projectTranslation(result, [{ kind: 'source', entryOrdinal: candidate.ordinal, stage: 'inspect', reason: 'absent' }]), 'slug:').status).toBe('blocked')
+  })
+
+  it('attributes a consumer to direct and all duplicate mapping targets even on an early fatal', async () => {
+    const { input } = await makeSelectedFixture()
+    const original = input.shortlinks[0]
+    input.shortlinks.push({ ...original, targetSourcePageId: 'tree/one.html' })
+    input.consumerUrls.push({ url: original.shortUrl, purpose: 'shortlink', targetSourcePageId: 'sample', mappingRef: original.mappingId })
+    input.providerMounts.push({ path: '/unowned.css', kind: 'asset', artifactId: `ar_${'a'.repeat(26)}` })
+    const prepared = await preflightSelection(input)
+    if (prepared.kind !== 'fatal') throw new Error('expected fatal')
+    expect(prepared.result.census.find(row => row.kind === 'consumerUrl')).toEqual(expect.objectContaining({
+      affectedUnitIds: expect.arrayContaining(['tree:synthetic', 'slug:sample']), disposition: 'rejected',
+    }))
+  })
+
+  it('contains a non-scalar provider path to its evidenced owner unit', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const path = '/asset-\uD800.css'
+    input.owners.push({ path, ownerSourcePageId: 'sample', evidenceRef: 'synthetic-owner', basis: 'declared' })
+    input.providerMounts.push({ path, kind: 'asset', artifactId: `ar_${'a'.repeat(26)}` })
+    const result = await translateSelection(input, null, observations)
+    expect(unitFor(result, 'slug:').status).toBe('blocked')
+    expect(unitFor(result, 'tree:').status).toBe('representable')
+    expect(result.census.find(row => row.kind === 'providerMount')).toEqual(expect.objectContaining({ reason: 'invalid_provider_mount', affectedUnitIds: ['slug:sample'] }))
+  })
+
+  it('rejects a non-scalar unused preview ledger path but preserves replacement characters', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const first = await translateSelection(input, null, observations)
+    const ledger = structuredClone(first.ledger)
+    const key = (path: string) => stable([input.sourceInstance, 'tree:synthetic', input.selectionRef, input.selectionDigest, 'preview', 'tree/one.html', path])
+    ledger.operationIds[key('/bad\uD800.png')] = 'opsynthetic'
+    expect((await preflightSelection(input, ledger)).kind).toBe('fatal')
+    delete ledger.operationIds[key('/bad\uD800.png')]
+    ledger.operationIds[key('/valid\uFFFD.png')] = 'opsynthetic'
+    expect((await preflightSelection(input, ledger)).kind).toBe('prepared')
+  })
 })

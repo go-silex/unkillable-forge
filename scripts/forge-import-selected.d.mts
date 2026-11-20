@@ -41,10 +41,22 @@ export interface BlockedUnit extends UnitCommon {
   command: null; selection: null; inventory: null
 }
 export type Unit = RepresentableUnit | BlockedUnit
+export type EvidenceKind = 'entry' | 'page' | 'owner' | 'alias' | 'shortlink' | 'preview' | 'exclusion' | 'providerMount' | 'consumerUrl'
+type Disposition = 'represented' | 'excluded' | 'rejected'
+type FactBase = { ordinal: number; unitIds: string[]; disposition: Disposition }
+export type ProviderEvidence = { path: string | null; providerKind: 'fragment' | 'asset' | null; declaredProviderArtifactId: string | null; reason: 'invalid_provider_mount' | 'provider_mount_unverified' | 'provider_local_placement_conflict' }
+export type EvidenceFact =
+  | (FactBase & { kind: 'entry'; path: string; locator: { root: string; relative: string }; unitId: string | null; sourcePageId: string | null; publicOrSharedDocument: boolean; reason: string; readCohort: 'candidate' | 'protected' | 'omitted' })
+  | (FactBase & { kind: 'page'; missingPath?: string })
+  | (FactBase & { kind: 'providerMount' } & ProviderEvidence)
+  | (FactBase & { kind: 'owner' | 'alias' | 'shortlink' | 'preview' | 'exclusion' | 'consumerUrl' })
+  | { kind: 'diagnostic'; category: 'represented' | 'unsupported' | 'notObserved' | 'warnings'; unitIds: string[]; issue: Issue }
+type CensusBase = { ordinal: number; unitId: string | null; affectedUnitIds: string[]; disposition: Disposition }
+export type CensusRow = (CensusBase & { kind: Exclude<EvidenceKind, 'providerMount'> }) | (CensusBase & { kind: 'providerMount' } & ProviderEvidence)
 interface TranslationCommon {
   schema: 1; ledger: Ledger
   accounting: { path: string; disposition: string; unitId: string | null; reason: string }[]
-  census: { kind: string; ordinal: number; unitId: string | null; affectedUnitIds: string[]; disposition: 'represented' | 'excluded' | 'rejected' }[]
+  census: CensusRow[]
   units: Unit[]
   compatibility: { represented: Issue[]; unsupported: Issue[]; notObserved: Issue[] }
   warnings: Issue[]
@@ -53,7 +65,7 @@ export interface FatalTranslation extends TranslationCommon {
   ok: false; fatal: string; facts?: never
 }
 export interface ProjectableTranslation extends TranslationCommon {
-  ok: boolean; fatal: null; facts: unknown[]
+  ok: boolean; fatal: null; facts: EvidenceFact[]
 }
 export type Translation = FatalTranslation | ProjectableTranslation
 export type Observation =

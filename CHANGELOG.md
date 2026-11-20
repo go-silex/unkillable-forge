@@ -17,13 +17,15 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
   failures preserve independent sealed outcomes in one private checkpoint.
   Record census and artifact membership remain distinct from native readiness.
   Member failures retain indexed private stage-specific evidence and exact
-  original locators; partial provider failures remain attributed to dependent
-  units without treating a declaration as an active mount. Selection and
+  original locators; source-failure projection requires an authorized ordinal.
+  Fatal receipts preserve resolved consumer attribution and JSON-safe evidence.
+  Contradictory provider declarations retain valid private identities while
+  blocking affected units; no declaration activates a mount. Selection and
   checkpoint JSON reject invalid UTF-8 and leading BOMs; ledger identities use
-  validated canonical source tuples. Fatal projection preserves the fatal receipt
-  without inventing facts. Native planning checks shortlink grant referents
-  against the full admitted inventory or existing same-page rows, independent of
-  cursor windows; existence is not active authorization.
+  validated canonical scalar-path source tuples. Native planning validates
+  non-null grant IDs and checks referents against the full admitted inventory or
+  existing same-page rows, independent of cursor windows; existence is not active
+  authorization. Placed assets can shadow aliases without owner edges.
   Literal links and evidenced associations do not prove consumer HTTP access.
   This does not authorize historical execution, publication, provider access or
   cutover, and is not a historical capacity benchmark.

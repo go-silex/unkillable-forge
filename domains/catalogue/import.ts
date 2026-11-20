@@ -158,7 +158,7 @@ export async function admitImportSelection(selection: ImportSelection, input: un
     }
   }
   freeze(result)
-  grantProducers.set(result, new Map(result.inventory.operations.flatMap(op => op.kind === 'page_policy' && op.policy.visibility.value === 'shared' && op.policy.grantId ? [[op.policy.grantId, op.policy.pageId] as const] : [])))
+  grantProducers.set(result, new Map(result.inventory.operations.flatMap(op => op.kind === 'page_policy' && op.policy.visibility.value === 'shared' && op.policy.grantId !== null ? [[op.policy.grantId, op.policy.pageId] as const] : [])))
   admitted.set(result, readContext)
   candidates.set(result, options)
   return result
@@ -202,7 +202,7 @@ type GrantReference = {grant_id:string;page_id:string}
 function unproducedGrantIds(context: AdmittedImportSelection): string[] {
   const producers = grantProducers.get(context)
   if (!producers) throw new PolicyError('forbidden')
-  return [...new Set(context.inventory.operations.flatMap(op => op.kind === 'shortlink' && op.mapping.grantId && producers.get(op.mapping.grantId) !== op.mapping.pageId ? [op.mapping.grantId] : []))]
+  return [...new Set(context.inventory.operations.flatMap(op => op.kind === 'shortlink' && op.mapping.grantId !== null && producers.get(op.mapping.grantId) !== op.mapping.pageId ? [op.mapping.grantId] : []))]
 }
 
 async function inspectImportTargetObserved(deps: ManageDeps, context: AdmittedImportSelection, observationKid: string): Promise<{digest:string;grantReferences:GrantReference[]}> {
@@ -386,7 +386,7 @@ async function inspectImportConflictsFor(deps: ManageDeps, context: AdmittedImpo
       if (row && (row.redirect_to !== op.to || row.redirect_status !== op.status || row.target_page_id !== op.targetPageId)) issues.push({code:'alias_conflict',path:op.path})
     } else if (op.kind === 'shortlink') {
       const m = op.mapping
-      if (m.grantId && producers.get(m.grantId) !== m.pageId && !references.some(grant => grant.grant_id === m.grantId && grant.page_id === m.pageId)) issues.push({code:'grant_conflict',pageId:m.pageId ?? undefined})
+      if (m.grantId !== null && producers.get(m.grantId) !== m.pageId && !references.some(grant => grant.grant_id === m.grantId && grant.page_id === m.pageId)) issues.push({code:'grant_conflict',pageId:m.pageId ?? undefined})
       const row = (linkRows.results as Record<string,unknown>[]).find(r => r.mapping_id === m.mappingId || (r.provider_origin === m.providerOrigin && r.short_domain === m.shortDomain && r.short_code === m.shortCode))
       if (row && (row.mapping_id !== m.mappingId || row.provider_origin !== m.providerOrigin || row.provider_id !== m.providerId || row.short_domain !== m.shortDomain || row.short_code !== m.shortCode || row.short_url !== m.shortUrl || row.page_id !== m.pageId || row.grant_id !== m.grantId || row.destination !== m.destination || row.source !== m.source || row.observed_at !== m.observedAt || row.destination_digest !== m.destinationDigest)) issues.push({code:'shortlink_conflict',pageId:m.pageId ?? undefined})
     } else if (op.kind === 'preview_selection' && !importPreviewOwned(context.selection.command, op.pageId, op.path)) {

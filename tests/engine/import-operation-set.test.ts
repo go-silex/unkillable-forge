@@ -124,6 +124,17 @@ describe("native import operation set", () => {
     expect((await checkedPlan(f, [{ kind: "shortlink", operationId: "null-link", mapping: f.mapping }, ...f.inventory.operations])).state).toBe("ready")
   })
 
+  it("rejects malformed non-null and missing shortlink grant IDs before readiness", async () => {
+    const f = await fixture()
+    for (const grantId of ["", "gr_bad", "pg_aaaaaaaaaaaaaaaaaaaaaaaaaa", false, 0, undefined]) {
+      const mapping = { ...f.mapping, grantId }
+      const link = { kind: "shortlink", operationId: "malformed-grant-link", mapping } as unknown as ImportOperation
+      const result = await checkedPlan(f, [link, ...f.inventory.operations])
+      expect(result.state).toBe("blocked")
+      expect(result.issues).toContainEqual({ code: "selection_graph_mismatch" })
+    }
+  })
+
   it("rejects a shortlink grant belonging to a different existing page", async () => {
     const existingPage = newId("pg")
     await pageFixture({ artifact: newId("ar"), revision: newId("rv"), page: existingPage, route: { kind: "subtree", slug: "existing-grant" } })

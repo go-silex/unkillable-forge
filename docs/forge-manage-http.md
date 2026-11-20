@@ -92,17 +92,23 @@ census, including malformed relationships. It compiles one complete proposal;
 finishing observations checks that snapshot rather than recompiling a smaller
 selection. An unassignable contradiction is a fatal selector failure, distinct
 from a valid exclusions-only selection; projection preserves a fatal receipt
-without inventing projectable facts. Each attributed missing or unreadable
-member blocks its complete source artifact, not just the missing file;
+without inventing projectable facts. Resolved consumer-to-unit attribution,
+including mapping-only references, survives an unrelated fatal record. Missing
+optional evidence fields are represented as JSON-safe nulls so private checkpoint
+serialization and receipt authentication agree. Each attributed missing or
+unreadable member blocks its complete source artifact, not just the missing file;
 independent units may still proceed. The ID ledger scopes identity by canonical
 serialized source tuples, including source instance and original artifact;
-noncanonical or malformed supplied ledger keys are rejected rather than reminted.
-Private member facts retain ordinal, stage and reason, including distinct
-diagnostics for the same member. The per-unit dependency list retains each
-required provider's path and kind. A valid supplied artifact ID is `unverified`,
-not an active mount; an invalid provider ID is rejected while identifiable
-dependent units retain the rejected provider ordinal and a `missing` dependency.
-An empty list means no identified dependency, not an inference from a blocked unit.
+noncanonical or malformed supplied ledger keys, including non-scalar paths, are
+rejected rather than reminted. Private member facts retain ordinal, stage and
+reason, including distinct diagnostics for the same member. A projected source
+failure must name an ordinal authorized for source observation.
+The per-unit dependency list retains each required provider's path and kind.
+A valid supplied artifact ID stays private even when contradictory local/provider
+evidence blocks the dependent unit; it is `unverified`, not an active mount.
+An invalid provider ID is rejected while identifiable dependent units retain the
+rejected provider ordinal and a `missing` dependency. An empty list means no
+identified dependency, not an inference from a blocked unit.
 
 Unknown or unreadable policy capture blocks its unit, whereas an observed
 unrecognized visibility value is retained for the native warning. Static
@@ -116,7 +122,8 @@ winning selected resource and purpose; a share or card destination additionally
 requires the exact captured key and observed shared visibility. A team alias
 does not authenticate its destination. Excluded census names are not primary
 mounts and cannot by themselves shadow an alias; selected routes and eligible
-resource placements determine precedence. A non-null shortlink grant must be
+resource placements determine precedence, including placed assets with no owner
+edge. A non-null shortlink grant must be a valid catalogue grant ID and be
 produced by a validated proposed shared policy on that page anywhere in the
 full admitted inventory, regardless of cursor window or operation order, or
 exist on that page in D1. An existing revoked grant can satisfy this referent

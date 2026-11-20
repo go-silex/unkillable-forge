@@ -57,7 +57,7 @@ async function sandbox() {
 const receiptSchema = z.object({
   fatal: z.string().nullable().optional(), error: z.string().nullable().optional(),
   pinned: z.number().optional(), units: z.number().optional(),
-  census: z.object({ counts: z.record(z.string(), z.record(z.string(), z.number())) }).optional(),
+  census: z.object({ counts: z.record(z.string(), z.record(z.string(), z.number())), digest: z.string().optional() }).optional(),
   compatibility: z.object({ unsupported: z.record(z.string(), z.number()), represented: z.record(z.string(), z.number()).optional() }).optional(),
   warnings: z.record(z.string(), z.number()).optional(),
   results: z.array(z.object({ state: z.string(), status: z.number().optional(), codes: z.array(z.string()).optional(), warnings: z.record(z.string(), z.number()).optional() })).optional(),
@@ -100,6 +100,40 @@ function allExcluded(input: SyntheticInput) {
 }
 
 describe('offline selected import CLI', () => {
+  it('checkpoints and replays a specific fatal receipt for a provider declaration missing its path', async () => {
+    const box = await sandbox()
+    try {
+      const fixture = await makeSelectedFixture()
+      await box.save(fixture)
+      const provider = { artifactId: `ar_${'a'.repeat(26)}`, kind: 'asset' }
+      await writeFile(box.selection, JSON.stringify({ ...fixture.input, providerMounts: [provider] }), { mode: 0o600 })
+      const prepared = receipt(await box.prepare(), 1)
+      expect(prepared.error).toBeUndefined()
+      expect(prepared.fatal).toBe('unassignable_record')
+      expect(prepared.pinned).toBe(0); expect(prepared.units).toBe(0)
+      expect(prepared.compatibility!.unsupported.unassignable_record).toBe(1)
+      expect(prepared.census!.counts.providerMount.rejected).toBe(1)
+      expect(prepared.census!.digest).toMatch(/^[a-f0-9]{64}$/)
+      const before = await readFile(join(box.workspace, 'state.json'))
+      const fatalCheckpoint = z.object({
+        preparation: z.literal('fatal'), fatal: z.literal('unassignable_record'),
+        census: z.array(z.object({ kind: z.string(), ordinal: z.number(), unitId: z.string().nullable(), affectedUnitIds: z.array(z.string()), disposition: z.string(), path: z.string().nullable().optional(), providerKind: z.string().nullable().optional(), reason: z.string().optional() })),
+      }).parse(JSON.parse(before.toString('utf8')))
+      const providerRow = fatalCheckpoint.census.find(row => row.kind === 'providerMount')
+      expect(providerRow).toMatchObject({ ordinal: 0, unitId: null, affectedUnitIds: [], disposition: 'rejected', path: null, providerKind: 'asset', reason: 'invalid_provider_mount' })
+      const planned = receipt(await box.plan(), 1)
+      expect(planned.error).toBeUndefined()
+      expect(planned.fatal).toBe('unassignable_record')
+      expect(planned.results).toEqual([])
+      expect(planned.census).toEqual(prepared.census)
+      expect(planned.stores).toMatchObject({ status: 'not_prepared', equal: null })
+      expect((await readFile(join(box.workspace, 'state.json'))).equals(before)).toBe(true)
+      const observed = receipt(await run(process.execPath, [physicalRunner, 'observe', box.selection, join(box.root, 'observed-workspace'), box.capture], box.home), 1)
+      expect(observed.fatal).toBe('unassignable_record')
+      expect(observed.metadataPaths).toEqual([]); expect(observed.bodyReads).toEqual([])
+    } finally { await box.cleanup() }
+  }, 600_000)
+
   it('rejects malformed UTF-8 before source access despite an existing replacement-character file', async () => {
     const invalid = await sandbox(), valid = await sandbox()
     try {
