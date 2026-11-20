@@ -61,6 +61,7 @@ export const IMPORT_METADATA_LIMIT = 128
 const hex = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 const text = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 1024
 function canonical(value: unknown): string {
+  if (typeof value === 'number' && !Number.isFinite(value)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
   if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
   const obj = value as Record<string, unknown>

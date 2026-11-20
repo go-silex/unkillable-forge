@@ -1251,4 +1251,34 @@ describe('selected import translation', () => {
       expect(prepared.reads.some(read => read.path === path)).toBe(true)
     }
   })
+  it('retains a missing page document role against foreign ownership and provider claims', async () => {
+    for (const withProvider of [false, true]) {
+      const { input, observations } = await makeSelectedFixture({ includeMissing: true })
+      const path = '/missing.html'
+      const baseline = await translateSelection(input, null, observations)
+      const baselineEdges = unitFor(baseline, 'tree:synthetic').budget.edges
+      input.owners.push({ path, ownerSourcePageId: 'tree/one.html', evidenceRef: 'synthetic', basis: 'declared' })
+      const artifactId = `ar_${'a'.repeat(26)}`
+      if (withProvider) input.providerMounts.push({ path, kind: 'asset', artifactId })
+      const prepared = await preflightSelection(input)
+      if (prepared.kind !== 'prepared') throw new Error('expected prepared')
+      expect(prepared.reads.some(read => read.path === path)).toBe(false)
+      const result = await prepared.finish(observations)
+      const claimant = unitFor(result, 'tree:synthetic')
+      expect(claimant.status).toBe('blocked')
+      expect(claimant.command).toBeNull()
+      expect(claimant.budget.edges).toBe(baselineEdges)
+      expect(claimant.blockers).toContainEqual(expect.objectContaining({ code: 'invalid_owner' }))
+      expect(claimant.dependencies.some(dependency => dependency.path === path)).toBe(false)
+      expect(unitFor(result, 'tree:missing').blockers).toContainEqual(expect.objectContaining({ code: 'or1_missing_document', path }))
+      expect(unitFor(result, 'slug:sample').status).toBe('representable')
+      expect(result.census.find(row => row.kind === 'owner' && row.ordinal === input.owners.length - 1)?.disposition).toBe('rejected')
+      if (withProvider) {
+        expect(result.census.find(row => row.kind === 'providerMount')).toEqual(expect.objectContaining({
+          ordinal: 0, disposition: 'rejected', declaredProviderArtifactId: artifactId,
+          affectedUnitIds: ['tree:missing', 'tree:synthetic'], reason: 'provider_local_placement_conflict',
+        }))
+      }
+    }
+  })
 })

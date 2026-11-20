@@ -231,8 +231,11 @@ To prepare an inventory, capture the approved source instance and artefact,
 page-to-route and ownership evidence, graph edges, each client file's private
 object key/native version/length/SHA-256, and the selected policy, alias,
 shortlink and original-preview observations. The inventory and its exact
-Publication command must describe the same selection. Protect it with its
-private source objects, then pin its own R2 object key, version and SHA-256 in
+Publication command must describe the same selection. Canonical command
+comparison rejects non-finite numbers rather than treating them as JSON null;
+this is not a claim that every inventory field uses a strict decoder. Protect
+the inventory with its private source objects, then pin its R2 object key,
+version and SHA-256 in
 the operator configuration above. Approval and evidence references are not
 proof by themselves: historical key and destination provenance must actually
 be established. G1b was lifted only for the verified capped ownership graph.

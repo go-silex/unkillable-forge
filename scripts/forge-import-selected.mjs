@@ -327,7 +327,7 @@ export async function preflightSelection(input, ledgerInput = null) {
   const entryCandidates = candidateIndex(input.entries, row => row?.path, row => row?.placement?.sourceArtifactId)
   const emptyUnits = []
   const unitsOf = (index, key) => index.get(key)?.units ?? emptyUnits
-  const unionUnits = (left, right) => !left.length ? right : !right.length ? left : [...new Set([...left, ...right])].sort()
+  const unionUnits = (left, right) => left === right || !right.length ? left : !left.length ? right : [...new Set([...left, ...right])].sort()
   const shells = new Set(input.reader.shellPaths.filter(path => typeof path === "string"))
   const entries = new Map(), entryOrdinals = new Map()
   let contradictory = false
@@ -395,7 +395,8 @@ export async function preflightSelection(input, ledgerInput = null) {
   }
   const pageKey = page => [input.sourceInstance, page.membership.sourceArtifactId, page.sourcePageId]
   const proposalKey = (unitId, ...parts) => [input.sourceInstance, unitId, input.selectionRef, input.selectionDigest, ...parts]
-  const mountPaths = new Set(input.providerMounts.filter(mount => validProviderMount(mount) && !entryCandidates.get(mount.path)).map(mount => mount.path))
+  const knownNonresource = path => pagePathCandidates.has(path) || ["page_document", "subdocument"].includes(entries.get(path)?.graphClass)
+  const mountPaths = new Set(input.providerMounts.filter(mount => validProviderMount(mount) && !entryCandidates.get(mount.path) && !knownNonresource(mount.path)).map(mount => mount.path))
   const primaryRoutes = new Map(pages.map(page => [page, documentRoute(page.documentPath)]))
   const ownerUnitsByPath = new Map()
   for (const owner of input.owners) {
@@ -433,9 +434,9 @@ export async function preflightSelection(input, ledgerInput = null) {
     if (kind === "consumerUrl") { slot.unitIds = consumerResolutions[ordinal].unitIds; continue }
     if (kind === "providerMount") {
       if (typeof row?.path !== "string") continue
-      const localUnits = unitsOf(entryCandidates, row.path)
+      const localUnits = unionUnits(unitsOf(entryCandidates, row.path), unitsOf(pagePathCandidates, row.path))
       slot.unitIds = [...new Set([...(ownerUnitsByPath.get(row.path) ?? []), ...localUnits])].sort()
-      if (localUnits.length) slot.reason = "provider_local_placement_conflict"
+      if (localUnits.length || knownNonresource(row.path)) slot.reason = "provider_local_placement_conflict"
       continue
     }
     const sourceKey = kind === "owner" ? row?.ownerSourcePageId : kind === "preview" ? row?.sourcePageId : row?.targetSourcePageId
@@ -474,9 +475,10 @@ export async function preflightSelection(input, ledgerInput = null) {
         const local = !!document && !!entries.get(row.path)?.placement?.sourceArtifactId && entries.get(row.path).placement.sourceArtifactId === page?.membership.sourceArtifactId
         const identityValid = !!page && !!route && pagePathCandidates.get(page.documentPath)?.count === 1 && entryCandidates.get(page.documentPath)?.count === 1 && document?.graphClass === "page_document" && document.placement?.sourceArtifactId === page.membership.sourceArtifactId && isUnicodeScalarString(page.documentPath) && page.sourcePageId === (slugOf(page.documentPath) ?? page.documentPath.slice(1)) && logicalPath(row.path, true) && isUnicodeScalarString(row.ownerSourcePageId) && text(row.evidenceRef) && row.basis === "declared" && ownerCounts.get(stable([row.ownerSourcePageId, row.path])) === 1 && ownershipEdgeFeasible(route, row.path, local)
         const resource = entries.get(row.path)
-        const ownable = !!resource && ["fragment", "asset"].includes(resource.graphClass)
-        if (identityValid && (!resource || ownable)) requestedOwners.push(row)
-        valid = identityValid && (ownable || (!resource && mountPaths.has(row.path)))
+        const nonresource = knownNonresource(row.path)
+        const ownable = !nonresource && !!resource && ["fragment", "asset"].includes(resource.graphClass)
+        if (identityValid && !nonresource && (!resource || ownable)) requestedOwners.push(row)
+        valid = identityValid && !nonresource && (ownable || (!resource && mountPaths.has(row.path)))
       }
       if (valid && kind === "alias") valid = one(row.aliasKind, ["redirect_exact", "redirect_prefix"]) && isValidAliasPath(row.path) && isValidAliasDestination(row.to) && [301, 302, 307, 308].includes(row.status) && row.capturedBehavior === "team_fallback" && (row.aliasKind !== "redirect_prefix" || row.path.endsWith("/"))
       if (valid && kind === "shortlink") valid = validShortlinkSourceText(row) && text(row.mappingId) && text(row.providerOrigin) && (row.providerId === null || text(row.providerId)) && text(row.shortDomain) && text(row.shortCode) && text(row.shortUrl) && text(row.destination, 4096) && integer(row.observedAt) && row.observedAt >= 0 && validShortlinkIdentity(row.providerOrigin, row.shortDomain, row.shortCode, row.shortUrl)

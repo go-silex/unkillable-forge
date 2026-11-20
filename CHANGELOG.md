@@ -10,6 +10,9 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
 ## [Unreleased]
 
 ### Added
+- Reject non-finite numbers in canonical import command comparison, preventing
+  overflowed pinned JSON numbers from comparing equal to explicit null.
+
 
 - Add a selected-input offline preparation and dry-run adapter using isolated
   local storage and the authenticated manage Worker. A single selector snapshot

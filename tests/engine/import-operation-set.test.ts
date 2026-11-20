@@ -74,8 +74,8 @@ async function snapshot() {
   return { rows, source: await objects(env.FORGE_IMPORT_SOURCE), target: await objects(env.REVISION_BYTES) }
 }
 
-async function checkedPlan(f: { seed: { approval: Record<string, unknown>; bindings: Record<string, unknown> }; inventory: ApprovedImportInventory; selection: ImportSelection }, operations: readonly ImportOperation[], wireInventory?: unknown) {
-  const encoded = JSON.stringify(wireInventory ?? { ...f.inventory, operations })
+async function checkedPlan(f: { seed: { approval: Record<string, unknown>; bindings: Record<string, unknown> }; inventory: ApprovedImportInventory; selection: ImportSelection }, operations: readonly ImportOperation[], wireInventory?: unknown, rawInventory?: string) {
+  const encoded = rawInventory ?? JSON.stringify(wireInventory ?? { ...f.inventory, operations })
   if (encoded === undefined) throw new Error("inventory is not JSON-serializable")
   const object = await env.FORGE_IMPORT_SOURCE.put(`synthetic/set-${crypto.randomUUID()}.json`, encoded)
   if (!object) throw new Error("inventory upload failed")
@@ -112,6 +112,20 @@ function existingPolicyEpoch(operations: readonly ImportOperation[], page: strin
 }
 
 describe("native import operation set", () => {
+  it("rejects a nonfinite provider in the pinned command rather than equating it with null", async () => {
+    const f = await fixture()
+    expect((await checkedPlan(f, f.inventory.operations)).state).toBe("ready")
+    const marker = "synthetic-provider-overflow-token"
+    const command = { ...f.inventory.command, edges: f.inventory.command.edges.map(edge => ({ ...edge, providerArtifactId: marker })) }
+    const encoded = JSON.stringify({ ...f.inventory, command })
+    expect(encoded.split(JSON.stringify(marker))).toHaveLength(2)
+    const rawInventory = encoded.replace(JSON.stringify(marker), "1e400")
+    const result = await checkedPlan(f, f.inventory.operations, undefined, rawInventory)
+    expect(result.status).toBe(200)
+    expect(result.state).toBe("blocked")
+    expect(result.issues).toContainEqual({ code: "selection_graph_mismatch" })
+  })
+
   it("requires the explicit local sentinel in pinned tree-edge evidence", async () => {
     const f = await fixture()
     expect((await checkedPlan(f, f.inventory.operations)).state).toBe("ready")
