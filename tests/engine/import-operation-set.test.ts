@@ -74,8 +74,9 @@ async function snapshot() {
   return { rows, source: await objects(env.FORGE_IMPORT_SOURCE), target: await objects(env.REVISION_BYTES) }
 }
 
-async function checkedPlan(f: { seed: { approval: Record<string, unknown>; bindings: Record<string, unknown> }; inventory: ApprovedImportInventory; selection: ImportSelection }, operations: readonly ImportOperation[]) {
-  const encoded = JSON.stringify({ ...f.inventory, operations })
+async function checkedPlan(f: { seed: { approval: Record<string, unknown>; bindings: Record<string, unknown> }; inventory: ApprovedImportInventory; selection: ImportSelection }, operations: readonly ImportOperation[], wireInventory?: unknown) {
+  const encoded = JSON.stringify(wireInventory ?? { ...f.inventory, operations })
+  if (encoded === undefined) throw new Error("inventory is not JSON-serializable")
   const object = await env.FORGE_IMPORT_SOURCE.put(`synthetic/set-${crypto.randomUUID()}.json`, encoded)
   if (!object) throw new Error("inventory upload failed")
   const approval = { ...f.seed.approval, objectKey: object.key, objectVersion: object.version, sha256: (await content(encoded)).sha256 }
@@ -111,6 +112,39 @@ function existingPolicyEpoch(operations: readonly ImportOperation[], page: strin
 }
 
 describe("native import operation set", () => {
+  it("requires the explicit local sentinel in pinned tree-edge evidence", async () => {
+    const f = await fixture()
+    expect((await checkedPlan(f, f.inventory.operations)).state).toBe("ready")
+    const edge = f.inventory.edgeEvidence[0]
+    const { providerArtifactId: _providerArtifactId, ...incomplete } = edge
+    const wireInventory = { ...f.inventory, edgeEvidence: [incomplete] }
+    const result = await checkedPlan(f, f.inventory.operations, wireInventory)
+    expect(result.status).toBe(200)
+    expect(result.state).toBe("blocked")
+    expect(result.issues).toContainEqual({ code: "selection_graph_mismatch" })
+  })
+
+  it("rejects unmapped or null-path live page mappings at admission", async () => {
+    const f = await fixture()
+    expect((await checkedPlan(f, f.inventory.operations)).state).toBe("ready")
+    const mapping = f.inventory.pageMappings[0]
+    const { documentPath: _documentPath, ...withoutPath } = mapping
+    const unknownPage = { ...withoutPath, pageId: newId("pg") }
+    const absentInventory = { ...f.inventory, pageMappings: [unknownPage, ...f.inventory.pageMappings.slice(1)] }
+    const absent = await checkedPlan(f, f.inventory.operations, absentInventory)
+    expect(absent.status).toBe(200)
+    expect(absent.state).toBe("blocked")
+    expect(absent.issues).toContainEqual({ code: "selection_graph_mismatch" })
+
+    const command = { ...f.selection.command, pages: f.selection.command.pages.map(page => page.pageId === f.seed.pageId ? { ...page, documentPath: null } : page) }
+    const selection = { ...f.selection, command }
+    const wireInventory = { ...f.inventory, command, pageMappings: [{ ...mapping, documentPath: null }, ...f.inventory.pageMappings.slice(1)] }
+    const nullPath = await checkedPlan({ ...f, selection }, f.inventory.operations, wireInventory)
+    expect(nullPath.status).toBe(200)
+    expect(nullPath.state).toBe("blocked")
+    expect(nullPath.issues).toContainEqual({ code: "selection_graph_mismatch" })
+  })
+
   it("checks the complete native ownership graph before target provider lookup", async () => {
     const f = await fixture()
     for (const reversed of [false, true]) {

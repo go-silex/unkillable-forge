@@ -1219,16 +1219,36 @@ describe('selected import translation', () => {
       for (const mappingRef of [null, 'disputed-a', 'disputed-b']) for (let i = 0; i < 3; i++) {
         input.consumerUrls.push({ url: mapping.shortUrl, purpose: 'shortlink', targetSourcePageId: page.sourcePageId, mappingRef })
       }
+      for (const mappingRef of ['disputed-a', 'disputed-b']) {
+        input.consumerUrls.push({ url: mapping.shortUrl, purpose: 'shortlink', targetSourcePageId: null, mappingRef })
+      }
       const result = await preflightSelection(input)
       if (result.kind !== 'fatal') throw new Error('expected ambiguous fatal')
       const rows = result.result.census.filter(row => row.kind === 'consumerUrl')
       const expected = sameUnit ? ['tree:synthetic'] : ['tree:other', 'tree:synthetic']
-      expect(rows).toHaveLength(9)
+      expect(rows).toHaveLength(11)
       for (const row of rows) {
         expect(row.affectedUnitIds).toEqual(expected)
         expect(row.unitId).toBe(sameUnit ? 'tree:synthetic' : null)
         expect(row.disposition).toBe('rejected')
       }
+    }
+  })
+  it('rejects known foreign documents without inventing a provider dependency', async () => {
+    for (const path of ['/a/sample/index.html', '/a/sample/nested/index.html']) {
+      const { input, observations } = await makeSelectedFixture()
+      input.owners.push({ path, ownerSourcePageId: 'tree/one.html', evidenceRef: 'synthetic', basis: 'declared' })
+      const prepared = await preflightSelection(input)
+      if (prepared.kind !== 'prepared') throw new Error('expected prepared')
+      const result = await prepared.finish(observations)
+      const ownerUnit = unitFor(result, 'tree:synthetic')
+      expect(ownerUnit.blockers).toContainEqual(expect.objectContaining({ code: 'invalid_owner' }))
+      expect(ownerUnit.dependencies.some(item => item.path === path)).toBe(false)
+      expect(ownerUnit.command).toBeNull()
+      expect(result.census.find(row => row.kind === 'owner' && row.ordinal === input.owners.length - 1)?.disposition).toBe('rejected')
+      const provider = represented(result, 'slug:sample')
+      expect(provider.command.files.some(file => file.path === path)).toBe(true)
+      expect(prepared.reads.some(read => read.path === path)).toBe(true)
     }
   })
 })

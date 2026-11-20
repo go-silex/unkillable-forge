@@ -100,13 +100,14 @@ protected metadata refuses preparation before any body read.
 
 Before body reads the selector groups declarations by artifact. Evidence slots
 retain candidate unit sets and declaration multiplicity; a rejected or ambiguous
-relationship is not an admitted owner or operation. Only admitted relationships
-can establish governance, dependencies or local edges. A subtree owner must
-be local to its artifact and under its exact subtree prefix to be admitted;
-a foreign tree-page claimant instead remains a separate provider requirement,
-never proof that a mount is active. Native import admission independently checks
-the same structural distinction. The compiler completes artifact-local drafts
-and their intrinsic checks before comparing viable drafts for global conflicts.
+relationship is not an admitted owner or operation. Admitted relationships
+establish governance and local edges. A rejected but otherwise sound request
+for an unknown external tree resource can still explain a missing dependency;
+claims on known documents or subdocuments and impossible subtree claims cannot.
+A subtree owner must be local to its artifact and under its exact subtree prefix.
+Native import admission independently checks the structural distinction.
+The compiler completes artifact-local drafts and their intrinsic checks before
+comparing viable drafts for global conflicts.
 All participants in a genuine conflict are blocked.
 Surviving drafts contribute routes, placements and aliases to one frozen proposed
 read view; a failed consumer or later pin failure does not select another winner.
@@ -135,11 +136,13 @@ than reminted. Private member facts retain ordinal, stage and
 reason, including distinct diagnostics for the same member. A projected source
 failure must name an ordinal authorized for source observation.
 The per-unit dependency list retains each required provider's path and kind.
-A valid supplied artifact ID stays private even when contradictory local/provider
-evidence blocks the dependent unit; it is `unverified`, not an active mount.
-An invalid provider ID is rejected while identifiable dependent units retain the
-rejected provider ordinal and a `missing` dependency. An empty list means no
-identified dependency, not an inference from a blocked unit.
+For contradictory local/provider evidence, the rejected provider ordinal retains
+the valid declared ID and `provider_local_placement_conflict`; the foreign
+claimant's dependency is `missing` with a null ID, not `unverified`, and the
+local claimant has no dependency. Other valid provider declarations may be
+unverified; none establishes an active mount. Invalid provider IDs retain their
+rejected ordinal and identifiable dependents. An empty dependency list means
+no identified dependency, not an inference from a blocked unit.
 
 Private unit budgets retain known declared file, page and edge counts, largest
 file size and all known breached dimensions even if a unit cannot compile.

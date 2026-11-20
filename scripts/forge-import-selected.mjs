@@ -406,15 +406,21 @@ export async function preflightSelection(input, ledgerInput = null) {
   }
   const mappings = new Map(), unions = new Map()
   for (const mapping of input.shortlinks) if (text(mapping?.mappingId)) {
-    const summary = mappings.get(mapping.mappingId) ?? { count: 0, sole: null, page: null, units: new Set() }
-    summary.count++
+    let summary = mappings.get(mapping.mappingId)
     const page = pageBySource.get(mapping.targetSourcePageId)
-    for (const unit of unitsOf(sourceCandidates, mapping.targetSourcePageId)) summary.units.add(unit)
-    summary.sole = summary.count === 1 ? mapping : null
-    summary.page = summary.count === 1 ? page : null
-    mappings.set(mapping.mappingId, summary)
+    const candidates = unitsOf(sourceCandidates, mapping.targetSourcePageId)
+    if (!summary) {
+      summary = { count: 1, sole: mapping, page, units: candidates }
+      mappings.set(mapping.mappingId, summary)
+      continue
+    }
+    if (summary.count === 1) summary.units = new Set(summary.units)
+    summary.count++
+    for (const unit of candidates) summary.units.add(unit)
+    summary.sole = null
+    summary.page = null
   }
-  for (const summary of mappings.values()) summary.units = summary.units.size > 1 ? [...summary.units].sort() : [...summary.units]
+  for (const summary of mappings.values()) if (summary.count > 1) summary.units = summary.units.size > 1 ? [...summary.units].sort() : [...summary.units]
   const consumerResolutions = input.consumerUrls.map(row => {
     const summary = typeof row?.mappingRef === "string" ? mappings.get(row.mappingRef) : null
     const directPage = typeof row?.targetSourcePageId === "string" ? pageBySource.get(row.targetSourcePageId) : null
@@ -467,8 +473,10 @@ export async function preflightSelection(input, ledgerInput = null) {
         const document = page && entries.get(page.documentPath), route = page && primaryRoutes.get(page)
         const local = !!document && !!entries.get(row.path)?.placement?.sourceArtifactId && entries.get(row.path).placement.sourceArtifactId === page?.membership.sourceArtifactId
         const identityValid = !!page && !!route && pagePathCandidates.get(page.documentPath)?.count === 1 && entryCandidates.get(page.documentPath)?.count === 1 && document?.graphClass === "page_document" && document.placement?.sourceArtifactId === page.membership.sourceArtifactId && isUnicodeScalarString(page.documentPath) && page.sourcePageId === (slugOf(page.documentPath) ?? page.documentPath.slice(1)) && logicalPath(row.path, true) && isUnicodeScalarString(row.ownerSourcePageId) && text(row.evidenceRef) && row.basis === "declared" && ownerCounts.get(stable([row.ownerSourcePageId, row.path])) === 1 && ownershipEdgeFeasible(route, row.path, local)
-        if (identityValid) requestedOwners.push(row)
-        valid = identityValid && (["fragment", "asset"].includes(entries.get(row.path)?.graphClass) || mountPaths.has(row.path))
+        const resource = entries.get(row.path)
+        const ownable = !!resource && ["fragment", "asset"].includes(resource.graphClass)
+        if (identityValid && (!resource || ownable)) requestedOwners.push(row)
+        valid = identityValid && (ownable || (!resource && mountPaths.has(row.path)))
       }
       if (valid && kind === "alias") valid = one(row.aliasKind, ["redirect_exact", "redirect_prefix"]) && isValidAliasPath(row.path) && isValidAliasDestination(row.to) && [301, 302, 307, 308].includes(row.status) && row.capturedBehavior === "team_fallback" && (row.aliasKind !== "redirect_prefix" || row.path.endsWith("/"))
       if (valid && kind === "shortlink") valid = validShortlinkSourceText(row) && text(row.mappingId) && text(row.providerOrigin) && (row.providerId === null || text(row.providerId)) && text(row.shortDomain) && text(row.shortCode) && text(row.shortUrl) && text(row.destination, 4096) && integer(row.observedAt) && row.observedAt >= 0 && validShortlinkIdentity(row.providerOrigin, row.shortDomain, row.shortCode, row.shortUrl)

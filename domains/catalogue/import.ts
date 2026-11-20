@@ -78,6 +78,7 @@ export async function admitImportSelection(selection: ImportSelection, input: un
   if (!inventory.command || !selection.command || canonical(inventory.command) !== canonical(selection.command) || !Array.isArray(selection.command.pages) || selection.command.pages.length === 0 || !Array.isArray(selection.command.files) || !Array.isArray(selection.command.edges)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
   if (!Array.isArray(inventory.pageMappings) || !Array.isArray(inventory.edgeEvidence)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
   if (!Array.isArray(inventory.files) || !Array.isArray(inventory.operations) || (inventory.removals !== undefined && !Array.isArray(inventory.removals))) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
+  if (selection.command.edges.some(edge => !edge || (edge.providerArtifactId !== null && !text(edge.providerArtifactId)))) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
   const filesByPath = new Map(selection.command.files.map(file => [file.path,file]))
   const pagesById = new Map(selection.command.pages.map(page => [page.pageId,page]))
   const declaredEdges = new Set(selection.command.edges.map(edge => canonical([edge.ownerPageId,edge.path,edge.providerArtifactId])))
@@ -94,7 +95,9 @@ export async function admitImportSelection(selection: ImportSelection, input: un
   if (inventory.pageMappings.length !== livePages.length || inventory.edgeEvidence.length !== selection.command.edges.length) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
   const sourcePages = new Set<string>(), targetPages = new Map<string, SubtreeOrTree>()
   for (const mapping of inventory.pageMappings) {
-    if (!mapping || !text(mapping.sourcePageId) || !text(mapping.pageId) || !text(mapping.route) || !text(mapping.ownershipEvidenceRef) || sourcePages.has(mapping.sourcePageId) || targetPages.has(mapping.pageId) || pagesById.get(mapping.pageId)?.disposition === 'drop' || pagesById.get(mapping.pageId)?.documentPath !== mapping.documentPath) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
+    if (!mapping || !text(mapping.sourcePageId) || !text(mapping.pageId) || !text(mapping.route) || !text(mapping.ownershipEvidenceRef) || sourcePages.has(mapping.sourcePageId) || targetPages.has(mapping.pageId)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
+    const page = pagesById.get(mapping.pageId)
+    if (!page || page.disposition === 'drop' || typeof mapping.documentPath !== 'string' || page.documentPath !== mapping.documentPath) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
     sourcePages.add(mapping.sourcePageId)
     const route = documentRouteOf(mapping.documentPath)
     if (!route || mapping.route !== (route.kind === 'subtree' ? `/a/${route.slug}/` : `/${route.pageRef}`)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
@@ -102,7 +105,7 @@ export async function admitImportSelection(selection: ImportSelection, input: un
   }
   const edgeKeys = new Set<string>()
   for (const edge of inventory.edgeEvidence) {
-    if (!edge || typeof edge.path !== 'string') throw new PolicyError('invalid_state', 'selection_graph_mismatch')
+    if (!edge || typeof edge.path !== 'string' || (edge.providerArtifactId !== null && !text(edge.providerArtifactId))) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
     const key = canonical([edge.ownerPageId,edge.path,edge.providerArtifactId])
     if (!text(edge.evidenceRef) || edgeKeys.has(key) || !declaredEdges.has(key)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
     const owner = targetPages.get(edge.ownerPageId)

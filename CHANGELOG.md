@@ -18,9 +18,10 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
   Declaration evidence retains candidate attribution and multiplicity without
   admitting rejected relationships. Complete local drafts precede global
   conflict checks and the frozen proposed read view. Host and native import
-  admission reject impossible subtree ownership; valid foreign tree claims
-  remain unverified provider requirements. Canonical page routes must match the
-  selected reader; unconstructible origins fail globally before capture binding.
+  admission reject impossible subtree ownership. Sound unknown foreign tree
+  requests can remain missing dependencies even when their owner row is rejected;
+  known documents and impossible subtree claims cannot. Canonical page routes
+  must match the selected reader; unconstructible origins fail before capture binding.
   HTML roles preserve original headers. Private locator facts distinguish invalid
   components from valid unbound aliases; executable locators remain strict.
   Reserved-name comparison conservatively folds case, Unicode and default
@@ -29,8 +30,9 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
   Member failures retain indexed stage-specific evidence; source-failure
   projection requires an authorized ordinal. Fatal receipts preserve
   kind-specific attribution and JSON-safe checkpoint evidence.
-  Contradictory provider declarations retain valid private identities while
-  blocking affected units; no declaration activates a mount. Selection and
+  Contradictory local/provider evidence retains the valid provider ID on the
+  rejected ordinal, while the foreign dependency is missing with a null ID and
+  the local claimant has none; no declaration activates a mount. Selection and
   checkpoint JSON reject invalid UTF-8 and leading BOMs; ledger emission and
   replay share canonical scalar-path tuple validation. Private budgets preserve
   known counts, maxima and breached dimensions; serialized byte measurements
