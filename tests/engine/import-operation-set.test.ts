@@ -74,7 +74,7 @@ async function snapshot() {
   return { rows, source: await objects(env.FORGE_IMPORT_SOURCE), target: await objects(env.REVISION_BYTES) }
 }
 
-async function checkedPlan(f: { seed: { approval: Record<string, unknown>; bindings: Record<string, unknown> }; inventory: ApprovedImportInventory; selection: ImportSelection }, operations: ImportOperation[]) {
+async function checkedPlan(f: { seed: { approval: Record<string, unknown>; bindings: Record<string, unknown> }; inventory: ApprovedImportInventory; selection: ImportSelection }, operations: readonly ImportOperation[]) {
   const encoded = JSON.stringify({ ...f.inventory, operations })
   const object = await env.FORGE_IMPORT_SOURCE.put(`synthetic/set-${crypto.randomUUID()}.json`, encoded)
   if (!object) throw new Error("inventory upload failed")
@@ -106,11 +106,52 @@ async function historicalGrant(page: string) {
   return grant
 }
 
-function existingPolicyEpoch(operations: ImportOperation[], page: string): ImportOperation[] {
+function existingPolicyEpoch(operations: readonly ImportOperation[], page: string): ImportOperation[] {
   return operations.map(op => op.kind === "page_policy" && op.policy.pageId === page ? { ...op, policy: { ...op.policy, expectedPolicyEpoch: 0 } } : op)
 }
 
 describe("native import operation set", () => {
+  it("checks the complete native ownership graph before target provider lookup", async () => {
+    const f = await fixture()
+    for (const reversed of [false, true]) {
+      for (const scenario of ["subtree-local-inside", "tree-local-outside", "subtree-local-outside", "subtree-foreign-inside"] as const) {
+        const edge = {
+          ownerPageId: scenario === "tree-local-outside" ? f.other : f.seed.pageId,
+          path: scenario === "tree-local-outside" || scenario === "subtree-local-outside" ? f.image2.path : f.image.path,
+          providerArtifactId: scenario === "subtree-foreign-inside" ? newId("ar") : null,
+        }
+        const companion = { ownerPageId: f.other, path: f.image.path, providerArtifactId: null }
+        const edges = reversed ? [companion, edge] : [edge, companion]
+        const evidence = edges.map((value, index) => ({ ...value, evidenceRef: `synthetic-edge-${index}` }))
+        const command = { ...f.selection.command, pages: reversed ? [...f.selection.command.pages].reverse() : f.selection.command.pages, files: reversed ? [...f.selection.command.files].reverse() : f.selection.command.files, edges }
+        const inventory = { ...f.inventory, command, files: reversed ? [...f.inventory.files].reverse() : f.inventory.files, pageMappings: reversed ? [...f.inventory.pageMappings].reverse() : f.inventory.pageMappings, edgeEvidence: reversed ? [...evidence].reverse() : evidence }
+        const result = await checkedPlan({ ...f, selection: { ...f.selection, command }, inventory }, inventory.operations)
+        if (scenario === "subtree-local-inside" || scenario === "tree-local-outside") expect(result.state).toBe("ready")
+        else {
+          expect(result.state).toBe("blocked")
+          expect(result.issues).toContainEqual({ code: "selection_graph_mismatch" })
+        }
+      }
+    }
+  }, 30000)
+
+  it("treats null and explicit self provider as local for an existing artifact", async () => {
+    const f = await existingTarget(await fixture())
+    for (const providerArtifactId of [null, f.selection.command.artifactId]) {
+      const edge = { ownerPageId: f.seed.pageId, path: f.image.path, providerArtifactId }
+      const command = { ...f.selection.command, edges: [edge] }
+      const inventory = { ...f.inventory, command, edgeEvidence: [{ ...edge, evidenceRef: "synthetic-edge" }] }
+      const operations = existingPolicyEpoch(inventory.operations, f.seed.pageId)
+      expect((await checkedPlan({ ...f, selection: { ...f.selection, command }, inventory }, operations)).state).toBe("ready")
+    }
+  })
+
+  it("rejects a non-scalar provider ID in a pinned native shortlink", async () => {
+    const f = await fixture()
+    const link: ImportOperation = { kind: "shortlink", operationId: "invalid-provider", mapping: { ...f.mapping, providerId: "\ud800" } }
+    expect(await checkedPlan(f, [...f.inventory.operations, link])).toEqual({ status: 422, code: "invalid_state", state: null, issues: [] })
+  })
+
   it("refuses aliases whose literal source or destination cannot be stored", async () => {
     const f = await fixture()
     const alias = { kind: "alias" as const, operationId: "storage-alias", aliasKind: "redirect_exact" as const, path: "/old", to: "/archive", status: 301 as const, targetPageId: f.seed.pageId }

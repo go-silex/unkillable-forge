@@ -7,7 +7,8 @@ import { isShareKey, shareKeyDigests } from './share-secrets'
 import { importShortlinkStatement, type ShortlinkMapping } from './shortlinks'
 import { importPreviewOwned, importPreviewStatements } from './previews'
 import { newId, isCatalogueId } from './ids'
-import { documentRouteOf } from './revision-paths'
+import { documentRouteOf, ownershipEdgeFeasible } from './revision-paths'
+import type { SubtreeOrTree } from './routing/grammar'
 import { conflictingImportOperationIndexes } from './import-operation-set'
 
 export interface ImportSelection {
@@ -91,17 +92,22 @@ export async function admitImportSelection(selection: ImportSelection, input: un
   }
   const livePages = selection.command.pages.filter(page => page.disposition !== 'drop')
   if (inventory.pageMappings.length !== livePages.length || inventory.edgeEvidence.length !== selection.command.edges.length) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
-  const sourcePages = new Set<string>(), targetPages = new Set<string>()
+  const sourcePages = new Set<string>(), targetPages = new Map<string, SubtreeOrTree>()
   for (const mapping of inventory.pageMappings) {
     if (!mapping || !text(mapping.sourcePageId) || !text(mapping.pageId) || !text(mapping.route) || !text(mapping.ownershipEvidenceRef) || sourcePages.has(mapping.sourcePageId) || targetPages.has(mapping.pageId) || pagesById.get(mapping.pageId)?.disposition === 'drop' || pagesById.get(mapping.pageId)?.documentPath !== mapping.documentPath) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
-    sourcePages.add(mapping.sourcePageId); targetPages.add(mapping.pageId)
+    sourcePages.add(mapping.sourcePageId)
     const route = documentRouteOf(mapping.documentPath)
     if (!route || mapping.route !== (route.kind === 'subtree' ? `/a/${route.slug}/` : `/${route.pageRef}`)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
+    targetPages.set(mapping.pageId, route)
   }
   const edgeKeys = new Set<string>()
   for (const edge of inventory.edgeEvidence) {
+    if (!edge || typeof edge.path !== 'string') throw new PolicyError('invalid_state', 'selection_graph_mismatch')
     const key = canonical([edge.ownerPageId,edge.path,edge.providerArtifactId])
     if (!text(edge.evidenceRef) || edgeKeys.has(key) || !declaredEdges.has(key)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
+    const owner = targetPages.get(edge.ownerPageId)
+    const providerIsLocal = edge.providerArtifactId === null || edge.providerArtifactId === selection.command.artifactId
+    if (!owner || !ownershipEdgeFeasible(owner, edge.path, providerIsLocal)) throw new PolicyError('invalid_state', 'selection_graph_mismatch')
     edgeKeys.add(key)
   }
   const paths = new Set<string>()

@@ -1,3 +1,12 @@
+import { isUnicodeScalarString } from '../store/revision-store'
+
+/** Validate the literal source text stored for a shortlink mapping. */
+export function validShortlinkSourceText(m: { readonly mappingId: unknown; readonly providerId: unknown; readonly destination: unknown }): boolean {
+  return isUnicodeScalarString(m.mappingId) && !!m.mappingId &&
+    (m.providerId === null || isUnicodeScalarString(m.providerId)) &&
+    isUnicodeScalarString(m.destination) && !!m.destination
+}
+
 /** Exact provider/alias identity shared by live mapping admission and archive restore. */
 export function validShortlinkIdentity(providerOrigin: unknown, shortDomain: unknown, shortCode: unknown, shortUrl: unknown): boolean {
   if (typeof providerOrigin !== 'string' || typeof shortDomain !== 'string' || typeof shortCode !== 'string' || !shortCode || typeof shortUrl !== 'string') return false

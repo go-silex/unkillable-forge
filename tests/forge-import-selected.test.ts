@@ -555,17 +555,22 @@ describe('selected import translation', () => {
   it('retains missing and unverified external dependencies for each dependent unit', async () => {
     const { input, observations } = await makeSelectedFixture()
     const path = '/external/shared.css'
-    for (const ownerSourcePageId of ['tree/one.html', 'sample']) input.owners.push({ path, ownerSourcePageId, evidenceRef: 'synthetic-external-edge', basis: 'declared' })
+    const page = input.pages.find(item => item.sourcePageId === 'tree/one.html')!
+    const document = input.entries.find(item => item.path === '/tree/one.html')!
+    input.pages.push({ ...page, sourcePageId: 'foreign.html', documentPath: '/foreign.html', membership: { sourceArtifactId: 'tree:foreign', evidenceRef: 'synthetic' } })
+    input.entries.push({ ...document, path: '/foreign.html', locator: { root: 'capture', relative: 'foreign.html' }, placement: { sourceArtifactId: 'tree:foreign', evidenceRef: 'synthetic' } })
+    observations['/foreign.html'] = observations[document.path]
+    for (const ownerSourcePageId of ['tree/one.html', 'foreign.html']) input.owners.push({ path, ownerSourcePageId, evidenceRef: 'synthetic-external-edge', basis: 'declared' })
     const missing = await translateSelection(input, null, observations)
-    for (const prefix of ['tree:', 'slug:']) {
+    for (const prefix of ['tree:synthetic', 'tree:foreign']) {
       expect(unitFor(missing, prefix).dependencies).toContainEqual({ path, providerArtifactId: null, kind: null, state: 'missing' })
     }
     input.providerMounts.push({ path, kind: 'asset', artifactId: 'ar_aaaaaaaaaaaaaaaaaaaaaaaaaa' })
     const declared = await translateSelection(input, null, observations)
-    for (const prefix of ['tree:', 'slug:']) {
+    for (const prefix of ['tree:synthetic', 'tree:foreign']) {
       expect(unitFor(declared, prefix).dependencies).toContainEqual({ path, providerArtifactId: 'ar_aaaaaaaaaaaaaaaaaaaaaaaaaa', kind: 'asset', state: 'unverified' })
     }
-    expect(declared.census.find(row => row.kind === 'providerMount')?.affectedUnitIds).toEqual(expect.arrayContaining(['tree:synthetic', 'slug:sample']))
+    expect(declared.census.find(row => row.kind === 'providerMount')?.affectedUnitIds).toEqual(expect.arrayContaining(['tree:synthetic', 'tree:foreign']))
   })
 
   it('contains invalid Unicode locator and logical asset to their known unit', async () => {
@@ -678,18 +683,21 @@ describe('selected import translation', () => {
     input.entries.push({ ...templateEntry, path: '/other.html', locator: { root: 'capture', relative: 'other.html' }, placement: { sourceArtifactId: 'tree:other', evidenceRef: 'synthetic-placement' } })
     observations['/other.html'] = observations[templateEntry.path]
     const path = '/external/shared.css'
-    for (const ownerSourcePageId of ['tree/one.html', 'sample']) input.owners.push({ path, ownerSourcePageId, evidenceRef: 'synthetic-external', basis: 'declared' })
+    input.pages.push({ ...templatePage, sourcePageId: 'foreign.html', documentPath: '/foreign.html', membership: { sourceArtifactId: 'tree:foreign', evidenceRef: 'synthetic' } })
+    input.entries.push({ ...templateEntry, path: '/foreign.html', locator: { root: 'capture', relative: 'foreign.html' }, placement: { sourceArtifactId: 'tree:foreign', evidenceRef: 'synthetic' } })
+    observations['/foreign.html'] = observations[templateEntry.path]
+    for (const ownerSourcePageId of ['tree/one.html', 'foreign.html']) input.owners.push({ path, ownerSourcePageId, evidenceRef: 'synthetic-external', basis: 'declared' })
     input.providerMounts.push({ path, kind: 'asset', artifactId: 'mistyped-provider' })
     const result = await translateSelection(input, null, observations)
-    for (const prefix of ['tree:synthetic', 'slug:']) {
+    for (const prefix of ['tree:synthetic', 'tree:foreign']) {
       expect(unitFor(result, prefix).dependencies).toContainEqual({ path, providerArtifactId: null, kind: 'asset', state: 'missing' })
     }
     expect(unitFor(result, 'tree:other').status).toBe('representable')
-    expect(result.census.find(row => row.kind === 'providerMount')).toEqual(expect.objectContaining({ ordinal: 0, affectedUnitIds: expect.arrayContaining(['tree:synthetic', 'slug:sample']), reason: 'invalid_provider_mount' }))
+    expect(result.census.find(row => row.kind === 'providerMount')).toEqual(expect.objectContaining({ ordinal: 0, affectedUnitIds: expect.arrayContaining(['tree:synthetic', 'tree:foreign']), reason: 'invalid_provider_mount' }))
     input.providerMounts.push({ path: '/unknown.css', kind: 'asset', artifactId: 'mistyped-provider' })
     const fatal = await preflightSelection(input)
     if (fatal.kind !== 'fatal') throw new Error('expected fatal')
-    expect(fatal.result.census.find(row => row.kind === 'providerMount' && row.ordinal === 0)?.affectedUnitIds).toEqual(expect.arrayContaining(['tree:synthetic', 'slug:sample']))
+    expect(fatal.result.census.find(row => row.kind === 'providerMount' && row.ordinal === 0)?.affectedUnitIds).toEqual(expect.arrayContaining(['tree:synthetic', 'tree:foreign']))
   })
   it('retains the exact private locator on its ordinal fact', async () => {
     const { input, observations } = await makeSelectedFixture()
@@ -727,15 +735,18 @@ describe('selected import translation', () => {
     const { input, observations } = await makeSelectedFixture()
     const path = '/tree/asset0.css'
     const artifactId = `ar_${'a'.repeat(26)}`
-    input.owners.push({ path, ownerSourcePageId: 'sample', evidenceRef: 'synthetic-owner', basis: 'declared' })
+    input.owners.push({ path, ownerSourcePageId: 'foreign.html', evidenceRef: 'synthetic-owner', basis: 'declared' })
     input.providerMounts.push({ path, kind: 'asset', artifactId })
     const page = input.pages.find(item => item.sourcePageId === 'tree/one.html')!
     const document = input.entries.find(item => item.path === '/tree/one.html')!
     input.pages.push({ ...page, sourcePageId: 'other.html', documentPath: '/other.html', membership: { sourceArtifactId: 'tree:other', evidenceRef: 'synthetic-membership' } })
     input.entries.push({ ...document, path: '/other.html', locator: { root: 'capture', relative: 'other.html' }, placement: { sourceArtifactId: 'tree:other', evidenceRef: 'synthetic-placement' } })
     observations['/other.html'] = observations[document.path]
+    input.pages.push({ ...page, sourcePageId: 'foreign.html', documentPath: '/foreign.html', membership: { sourceArtifactId: 'tree:foreign', evidenceRef: 'synthetic' } })
+    input.entries.push({ ...document, path: '/foreign.html', locator: { root: 'capture', relative: 'foreign.html' }, placement: { sourceArtifactId: 'tree:foreign', evidenceRef: 'synthetic' } })
+    observations['/foreign.html'] = observations[document.path]
     const conflict = await translateSelection(input, null, observations)
-    expect(unitFor(conflict, 'slug:').dependencies).toContainEqual({ path, providerArtifactId: null, kind: 'asset', state: 'missing' })
+    expect(unitFor(conflict, 'tree:foreign').dependencies).toContainEqual({ path, providerArtifactId: null, kind: 'asset', state: 'missing' })
     expect(unitFor(conflict, 'tree:synthetic').dependencies.some(dependency => dependency.path === path)).toBe(false)
     expect(unitFor(conflict, 'tree:other').status).toBe('representable')
     expect(conflict.census.find(row => row.kind === 'providerMount')).toEqual(expect.objectContaining({ declaredProviderArtifactId: artifactId, reason: 'provider_local_placement_conflict' }))
@@ -744,7 +755,7 @@ describe('selected import translation', () => {
     if (prepared.kind !== 'fatal') throw new Error('expected fatal')
     const providers = prepared.result.census.filter(row => row.kind === 'providerMount')
     expect(providers).toHaveLength(2)
-    expect(providers[0]).toEqual(expect.objectContaining({ declaredProviderArtifactId: artifactId, reason: 'provider_local_placement_conflict', affectedUnitIds: expect.arrayContaining(['tree:synthetic', 'slug:sample']) }))
+    expect(providers[0]).toEqual(expect.objectContaining({ declaredProviderArtifactId: artifactId, reason: 'provider_local_placement_conflict', affectedUnitIds: expect.arrayContaining(['tree:synthetic', 'tree:foreign']) }))
     expect(providers[1]).toEqual(expect.objectContaining({ path: null, providerKind: 'asset', declaredProviderArtifactId: artifactId, affectedUnitIds: [] }))
     expect(JSON.parse(JSON.stringify(providers))).toEqual(providers)
   })
@@ -920,12 +931,12 @@ describe('selected import translation', () => {
     expect(budget.commandBytes).toBeNull()
   })
   it('reserves mixed-case protected physical components without folding ordinary paths', async () => {
-    for (const path of ['.ENV', 'nested/.GiT/config', 'x/.SsH/key', '.EnV.local', '．ＥＮＶ']) expect(isProtectedCaptureRelative(path)).toBe(true)
+    for (const path of ['.ENV', 'nested/.GiT/config', 'x/.SsH/key', '.EnV.local', '．ＥＮＶ', '.e\u200cnv', 'nested/.g\u200dit/config', '.env\u200b.local']) expect(isProtectedCaptureRelative(path)).toBe(true)
     expect(isProtectedCaptureRelative('nested/.envish')).toBe(false)
     const { input } = await makeSelectedFixture()
     const entry = input.entries.find(item => item.path === '/tree/asset0.css')
     if (!entry) throw new Error('expected entry')
-    entry.locator.relative = 'nested/.EnV.local'
+    entry.locator.relative = 'nested/.e\u200cnv.local'
     const prepared = await preflightSelection(input)
     if (prepared.kind !== 'prepared') throw new Error('expected prepared')
     expect(prepared.reads.some(read => read.path === entry.path)).toBe(false)
@@ -947,6 +958,15 @@ describe('selected import translation', () => {
     if (wrongRoot.kind !== 'prepared') throw new Error('expected prepared')
     const wrongRootResult = await wrongRoot.finish(observations)
     expect(wrongRootResult.facts.find(fact => fact.kind === 'entry' && fact.path === entry.path)).toEqual(expect.objectContaining({ locator: { root: null, relative: 'safe.txt' } }))
+    for (const [root, expected] of [['not/a-root', null], ['unknown-root', 'unknown-root']] as const) {
+      Object.assign(entry.locator, { root, relative: 'safe.txt' })
+      const result = await preflightSelection(input)
+      if (result.kind !== 'prepared') throw new Error('expected prepared')
+      expect(result.reads.some(read => read.path === entry.path)).toBe(false)
+      const projected = await result.finish(observations)
+      expect(projected.facts.find(fact => fact.kind === 'entry' && fact.path === entry.path)).toEqual(expect.objectContaining({ locator: { root: expected, relative: 'safe.txt' }, readCohort: 'omitted' }))
+      expect(unitFor(projected, 'slug:').status).toBe('representable')
+    }
     Object.assign(entry.locator, { root: 'capture', relative: Infinity })
     input.exclusions.push({ path: entry.path, evidenceRef: 'synthetic', reason: 'non_content' })
     expect((await preflightSelection(input)).kind).toBe('fatal')
@@ -1059,14 +1079,37 @@ describe('selected import translation', () => {
     expect(tree.command.edges.filter(edge => edge.path === path)).toHaveLength(4)
     expect(four.census.find(row => row.kind === 'owner' && row.ordinal === input.owners.length - 1)?.disposition).toBe('rejected')
     rejected.ownerSourcePageId = 'sample'
-    const fivePrepared = await preflightSelection(input)
-    if (fivePrepared.kind !== 'prepared') throw new Error('expected prepared')
-    expect(fivePrepared.reads.some(read => read.path === path)).toBe(false)
-    const five = await fivePrepared.finish(observations)
-    const fiveTree = five.units.find(unit => unit.unitId === page.membership.sourceArtifactId)
-    expect(fiveTree?.status).toBe('blocked')
-    expect(fiveTree?.command).toBeNull()
-    expect(five.census.find(row => row.kind === 'owner' && row.ordinal === input.owners.length - 1)?.disposition).toBe('rejected')
+    for (const reverse of [false, true]) {
+      if (reverse) input.owners.reverse()
+      const attempt = await preflightSelection(input)
+      if (attempt.kind !== 'prepared') throw new Error('expected prepared')
+      expect(attempt.reads.some(read => read.path === path)).toBe(true)
+      const result = await attempt.finish(observations)
+      const provider = result.units.find(unit => unit.unitId === page.membership.sourceArtifactId)
+      if (!provider || provider.status !== 'representable') throw new Error('expected provider')
+      expect(provider.command.edges.filter(edge => edge.path === path)).toHaveLength(4)
+      expect(provider.inventory.edgeEvidence.filter(edge => edge.path === path)).toHaveLength(4)
+      expect(unitFor(result, 'slug:sample').dependencies.some(dependency => dependency.path === path)).toBe(false)
+      expect(result.census.find(row => row.kind === 'owner' && row.ordinal === input.owners.indexOf(rejected))?.disposition).toBe('rejected')
+      if (reverse) input.owners.reverse()
+    }
+    const fifth = 'tree/fifth.html'
+    input.pages.push({ ...page, sourcePageId: fifth, documentPath: `/${fifth}` })
+    input.entries.push({ ...document, path: `/${fifth}`, locator: { root: 'capture', relative: fifth } })
+    observations[`/${fifth}`] = observations[document.path]
+    rejected.ownerSourcePageId = fifth
+    for (const reverse of [false, true]) {
+      if (reverse) input.owners.reverse()
+      const attempt = await preflightSelection(input)
+      if (attempt.kind !== 'prepared') throw new Error('expected prepared')
+      expect(attempt.reads.some(read => read.path === path)).toBe(false)
+      const result = await attempt.finish(observations)
+      const provider = result.units.find(unit => unit.unitId === page.membership.sourceArtifactId)
+      expect(provider?.status).toBe('blocked')
+      expect(provider?.command).toBeNull()
+      expect(provider?.blockers).toContainEqual(expect.objectContaining({ code: 'uncapped_owners' }))
+      if (reverse) input.owners.reverse()
+    }
   })
 
   it('witnesses nested tree index and subtree index primary addresses', async () => {
@@ -1084,5 +1127,108 @@ describe('selected import translation', () => {
     const result = await prepared.finish(observations)
     expect(represented(result, 'tree:nested').command.pages.map(item => item.documentPath)).toContain('/nested/index.html')
     expect(represented(result, 'slug:sample').command.pages.map(item => item.documentPath)).toContain('/a/sample/index.html')
+  })
+  it('rejects impossible subtree owners before qualifying or requesting a fragment', async () => {
+    for (const local of [false, true]) {
+      const { input, observations } = await makeSelectedFixture()
+      const path = '/tree/fragment.html'
+      input.owners = input.owners.filter(owner => owner.path !== path)
+      input.owners.push({ path, ownerSourcePageId: 'sample', evidenceRef: 'synthetic', basis: 'declared' })
+      if (local) {
+        const fragment = input.entries.find(entry => entry.path === path)!
+        fragment.placement = { sourceArtifactId: 'slug:sample', evidenceRef: 'synthetic' }
+      }
+      const prepared = await preflightSelection(input)
+      if (prepared.kind !== 'prepared') throw new Error('expected prepared')
+      expect(prepared.reads.some(read => read.path === path)).toBe(false)
+      const result = await prepared.finish(observations)
+      expect(unitFor(result, 'slug:sample').blockers).toContainEqual(expect.objectContaining({ code: 'invalid_owner' }))
+      expect(unitFor(result, 'slug:sample').dependencies.some(item => item.path === path)).toBe(false)
+      const owner = result.census.find(row => row.kind === 'owner' && row.ordinal === input.owners.length - 1)
+      expect(owner?.disposition).toBe('rejected')
+      const provider = unitFor(result, local ? 'slug:sample' : 'tree:synthetic')
+      expect(provider.blockers).toContainEqual(expect.objectContaining({ code: 'fragment_without_owner' }))
+      expect(provider.command).toBeNull()
+    }
+  })
+
+  it('rejects non-scalar shortlink source text before sibling collision', async () => {
+    for (const field of ['mappingId', 'providerId'] as const) for (const reverse of [false, true]) {
+      const { input, observations } = await makeSelectedFixture()
+      const base = input.shortlinks[0]
+      const bad = { ...base, mappingId: 'bad-link', targetSourcePageId: 'tree/one.html', destination: 'https://forge.example.test/tree/one', [field]: '\uD800' }
+      input.shortlinks = reverse ? [base, bad] : [bad, base]
+      const prepared = await preflightSelection(input)
+      if (prepared.kind !== 'prepared') throw new Error('expected prepared')
+      expect(prepared.reads.some(read => read.unitId === 'tree:synthetic')).toBe(false)
+      const result = await prepared.finish(observations)
+      expect(unitFor(result, 'tree:synthetic').blockers).toContainEqual(expect.objectContaining({ code: 'invalid_shortlink' }))
+      expect(unitFor(result, 'slug:sample').status).toBe('representable')
+      expect(result.census.find(row => row.kind === 'shortlink' && row.ordinal === input.shortlinks.indexOf(bad))?.disposition).toBe('rejected')
+    }
+    for (const value of ['\uFFFD', '\u{1F600}', null]) {
+      const { input, observations } = await makeSelectedFixture()
+      input.shortlinks[0].providerId = value
+      expect(unitFor(await translateSelection(input, null, observations), 'slug:sample').status).toBe('representable')
+    }
+  })
+
+  it('rejects an unconstructible canonical origin before page iteration', async () => {
+    for (const empty of [false, true]) {
+      const { input } = await makeSelectedFixture()
+      input.reader.canonicalHost = '999.999.999.999'
+      if (empty) input.pages = []
+      const result = await preflightSelection(input)
+      if (result.kind !== 'fatal') throw new Error('expected fatal')
+      expect(result.result.fatal).toBe('invalid_grammar')
+    }
+  })
+  it('admits a subtree edge only within its own prefix and placement', async () => {
+    for (const [path, foreign, allowed] of [
+      ['/a/sample/style.css', false, true],
+      ['/a/sample-other/style.css', false, false],
+      ['/a/sample/style.css', true, false],
+    ] as const) {
+      const { input, observations } = await makeSelectedFixture()
+      const asset = input.entries.find(entry => entry.path === '/tree/asset0.css')!
+      input.entries.push({ ...asset, path, locator: { root: 'capture', relative: path.slice(1) }, placement: { sourceArtifactId: foreign ? 'tree:synthetic' : 'slug:sample', evidenceRef: 'synthetic' } })
+      observations[path] = observations[asset.path]
+      input.owners.push({ path, ownerSourcePageId: 'sample', evidenceRef: 'synthetic', basis: 'declared' })
+      const prepared = await preflightSelection(input)
+      if (prepared.kind !== 'prepared') throw new Error('expected prepared')
+      const result = await prepared.finish(observations)
+      const owner = result.census.find(row => row.kind === 'owner' && row.ordinal === input.owners.length - 1)
+      expect(owner?.disposition).toBe(allowed ? 'represented' : 'rejected')
+      const unit = unitFor(result, 'slug:sample')
+      expect(unit.dependencies.some(item => item.path === path)).toBe(false)
+      if (allowed) {
+        if (unit.status !== 'representable') throw new Error('expected representable subtree')
+        expect(unit.command.edges.some(edge => edge.path === path)).toBe(true)
+      } else expect(unit.command).toBeNull()
+    }
+  })
+  it('retains complete disputed candidate attribution across repeated direct and mapped references', async () => {
+    for (const sameUnit of [false, true]) for (const reverse of [false, true]) {
+      const { input } = await makeSelectedFixture()
+      const page = input.pages.find(item => item.sourcePageId === 'tree/one.html')!
+      input.pages.push({ ...page, membership: { sourceArtifactId: sameUnit ? 'tree:synthetic' : 'tree:other', evidenceRef: 'synthetic' } })
+      if (reverse) input.pages.reverse()
+      const mapping = input.shortlinks[0]
+      input.shortlinks.push({ ...mapping, mappingId: 'disputed-a', targetSourcePageId: page.sourcePageId })
+      input.shortlinks.push({ ...mapping, mappingId: 'disputed-b', targetSourcePageId: page.sourcePageId })
+      for (const mappingRef of [null, 'disputed-a', 'disputed-b']) for (let i = 0; i < 3; i++) {
+        input.consumerUrls.push({ url: mapping.shortUrl, purpose: 'shortlink', targetSourcePageId: page.sourcePageId, mappingRef })
+      }
+      const result = await preflightSelection(input)
+      if (result.kind !== 'fatal') throw new Error('expected ambiguous fatal')
+      const rows = result.result.census.filter(row => row.kind === 'consumerUrl')
+      const expected = sameUnit ? ['tree:synthetic'] : ['tree:other', 'tree:synthetic']
+      expect(rows).toHaveLength(9)
+      for (const row of rows) {
+        expect(row.affectedUnitIds).toEqual(expected)
+        expect(row.unitId).toBe(sameUnit ? 'tree:synthetic' : null)
+        expect(row.disposition).toBe('rejected')
+      }
+    }
   })
 })

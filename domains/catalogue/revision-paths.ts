@@ -1,6 +1,6 @@
 import { PolicyError } from './guard'
 import type { ManageInstanceConfig, ReadInstanceConfig } from './instance-config'
-import { isReservedShellPath, subtreeSlugOf, validPageRef, type SubtreeOrTree } from './routing/grammar'
+import { canonicalUrl, isReservedShellPath, subtreeSlugOf, validPageRef, type SubtreeOrTree } from './routing/grammar'
 
 export interface RevisionPathDeps {
   readonly db: D1Database
@@ -27,6 +27,11 @@ export function documentRouteOf(path: string): SubtreeOrTree | null {
   return validPageRef(pageRef)
     ? { kind: 'tree_page', pageRef }
     : null
+}
+
+/** Structural feasibility only; the Catalogue guard remains authoritative. */
+export function ownershipEdgeFeasible(owner: SubtreeOrTree, resourcePath: string, providerIsLocal: boolean): boolean {
+  return owner.kind === 'tree_page' || (providerIsLocal && resourcePath.startsWith(canonicalUrl(owner)))
 }
 
 /** Bound JSON by UTF-8 bytes without limiting the total number of slugs. */

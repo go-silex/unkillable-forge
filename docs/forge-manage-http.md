@@ -70,8 +70,9 @@ by JSON parsing rather than silently removed. Logical paths and relative
 locators must be well-formed Unicode scalar strings; the original spelling is
 not rewritten. Capture paths are not R2 keys: the compiler allocates bounded
 ASCII source and inventory keys. A private entry-ordinal fact retains each valid
-original locator component and uses null for an invalid component; executable
-read and protected locators still require both valid strings and a declared root.
+original locator component and uses null for an invalid component. A valid root
+alias spelling may be unbound; executable read and protected locators require
+both valid strings and a declared root.
 Its unit and logical path join to the sealed member's source reference and native
 version. Planning uses the pin, not a capture reread, and receipts do not disclose
 locators.
@@ -89,20 +90,30 @@ read; identities are checked again when bytes are read. The authorized read and
 protected-locator sets are not complements: omission of ordinary content from a
 blocked unit does not make its inode a protected exclusion.
 Reservation checks every capture-relative component using a conservative
-case/Unicode-normalized comparison for `.env`, `.env.*`, `.git` and `.ssh`.
-The comparison key never rewrites the descriptor path or publication identity.
-Protected metadata and cross-alias physical identity checks still precede all
-body reads.
+NFKC, case-folded and default-ignorable-character-stripped comparison for
+`.env`, `.env.*`, `.git` and `.ssh`. This deny-only comparison may reserve extra
+names and is not a specification of all filesystems or proof of APFS behavior.
+It never rewrites the descriptor path or publication identity. Protected metadata
+and cross-alias physical identity checks still precede all body reads.
+An overlong ordinary component is unreadable, not absent; an inability to resolve
+protected metadata refuses preparation before any body read.
 
 Before body reads the selector groups declarations by artifact. Evidence slots
 retain candidate unit sets and declaration multiplicity; a rejected or ambiguous
 relationship is not an admitted owner or operation. Only admitted relationships
-can establish governance, dependencies or local edges. The compiler completes
-artifact-local drafts and their intrinsic checks before comparing viable drafts
-for global conflicts. All participants in a genuine conflict are blocked.
+can establish governance, dependencies or local edges. A subtree owner must
+be local to its artifact and under its exact subtree prefix to be admitted;
+a foreign tree-page claimant instead remains a separate provider requirement,
+never proof that a mount is active. Native import admission independently checks
+the same structural distinction. The compiler completes artifact-local drafts
+and their intrinsic checks before comparing viable drafts for global conflicts.
+All participants in a genuine conflict are blocked.
 Surviving drafts contribute routes, placements and aliases to one frozen proposed
 read view; a failed consumer or later pin failure does not select another winner.
 Each page needs its canonical primary address in the selected reader profile.
+An unconstructible canonical HTTPS origin is a global `invalid_grammar` refusal
+before capture binding; a constructible origin with a disabled primary route
+remains a unit-local refusal.
 A subdocument requires an evidenced subtree in its own artifact. HTML roles use
 the validated media-type essence while preserving the literal Content-Type;
 an asset cannot be HTML. This view is neither a live route nor access proof.

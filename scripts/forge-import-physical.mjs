@@ -7,7 +7,7 @@ const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const identity = info => `${info.dev}:${info.ino}`
 const sameFile = (a, b) => a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs
 const invalidRelative = path => typeof path !== 'string' || path.includes('\\') || path.includes('\0') || path.split('/').some(part => !part || part === '.' || part === '..')
-const unreadable = error => ['EACCES', 'EPERM', 'EIO', 'ELOOP', 'ENOTDIR', 'EINVAL'].includes(error?.code)
+const unreadable = error => ['EACCES', 'EPERM', 'EIO', 'ELOOP', 'ENOTDIR', 'EINVAL', 'ENAMETOOLONG'].includes(error?.code)
 
 export const sourceAccess = {
   async metadata(source, relative) {

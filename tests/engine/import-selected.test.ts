@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import worker from "../../adapters/http/manageWorker"
 import type { ImportOperation } from "../../domains/catalogue/import"
-import { assignSourcePins, sealInventory, preflightSelection, projectTranslation, type Observation, type RepresentableUnit } from "../../scripts/forge-import-selected.mjs"
+import { assignSourcePins, sealInventory, preflightSelection, projectTranslation, emptyLedger, type Ledger, type Observation, type RepresentableUnit } from "../../scripts/forge-import-selected.mjs"
 import { makeSelectedFixture, type SyntheticInput } from "./fixtures/import-selected.mjs"
 import { env, request, setupHttp, signed } from "./fixtures/manage-http"
 import { manageHttpBindings } from "./fixtures/manage-http-bindings"
@@ -26,10 +26,10 @@ async function snapshot() {
   return { rows, source: await objects(env.FORGE_IMPORT_SOURCE), target: await objects(env.REVISION_BYTES) }
 }
 
-async function fixture(includeMissing = false, mutate?: (selected: { input: SyntheticInput; observations: Record<string, Observation>; files: Record<string, Uint8Array> }) => void) {
+async function fixture(includeMissing = false, mutate?: (selected: { input: SyntheticInput; observations: Record<string, Observation>; files: Record<string, Uint8Array> }) => void, ledger?: Ledger) {
   const selected = await makeSelectedFixture({ includeMissing })
   mutate?.(selected)
-  const preflight = await preflightSelection(selected.input)
+  const preflight = await preflightSelection(selected.input, ledger)
   if (preflight.kind !== "prepared") throw new Error("fixture selector failed preflight")
   const observations: Record<string, Observation> = {}
   for (const read of preflight.reads) observations[read.path] = selected.observations[read.path]
@@ -339,6 +339,42 @@ describe("selected fixture through native import admission", () => {
         expect((await plan(slug)).result.state).toBe("ready")
         expect(await snapshot()).toEqual(before)
       }
+    }
+  }, 30000)
+
+  it("excludes non-scalar shortlink source text before comparing viable artifacts", async () => {
+    for (const field of ["providerId", "mappingId"] as const) {
+      let ledger = emptyLedger()
+      for (const order of ["alone", "first", "last"] as const) {
+        const { translated, units, plan, reads } = await fixture(false, selected => {
+          const base = selected.input.shortlinks[0]
+          const invalid = { ...base, mappingId: "tree-invalid", targetSourcePageId: "tree/one.html", destination: "https://forge.example.test/tree/one", [field]: "\ud800" }
+          selected.input.shortlinks = order === "alone" ? [invalid] : order === "first" ? [invalid, base] : [base, invalid]
+        }, ledger)
+        ledger = translated.ledger
+        expect(translated.units.find(unit => unit.sourceArtifactId === "tree:synthetic")?.status).toBe("blocked")
+        expect(translated.census).toContainEqual(expect.objectContaining({ kind: "shortlink", ordinal: order === "last" ? 1 : 0, disposition: "rejected" }))
+        expect(reads.some(read => read.unitId === "tree:synthetic")).toBe(false)
+        expect(units.some(unit => unit.sourceArtifactId === "tree:synthetic")).toBe(false)
+        const slug = units.find(unit => unit.sourceArtifactId === "slug:sample")
+        if (!slug) throw new Error("independent slug missing")
+        const before = await snapshot()
+        expect((await plan(slug)).result.state).toBe("ready")
+        expect(await snapshot()).toEqual(before)
+      }
+    }
+  }, 60000)
+
+  it("keeps scalar replacement, non-BMP and null provider text valid", async () => {
+    for (const providerId of ["\ufffd", "\u{1f600}", null]) {
+      const { units, plan } = await fixture(false, selected => {
+        selected.input.shortlinks[0].providerId = providerId
+      })
+      const slug = units.find(unit => unit.sourceArtifactId === "slug:sample")
+      if (!slug) throw new Error("scalar shortlink unit missing")
+      const before = await snapshot()
+      expect((await plan(slug)).result.state).toBe("ready")
+      expect(await snapshot()).toEqual(before)
     }
   }, 30000)
 

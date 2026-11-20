@@ -17,11 +17,15 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
   failures preserve independent sealed outcomes in one private checkpoint.
   Declaration evidence retains candidate attribution and multiplicity without
   admitting rejected relationships. Complete local drafts precede global
-  conflict checks and the frozen proposed read view. Canonical page routes must
-  match the selected reader; HTML roles use media-type essence while preserving
-  original headers. Private locator facts retain valid components and mark
-  invalid ones null; executable locators remain strict. Physical reserved-name
-  comparisons conservatively fold case and Unicode without rewriting paths.
+  conflict checks and the frozen proposed read view. Host and native import
+  admission reject impossible subtree ownership; valid foreign tree claims
+  remain unverified provider requirements. Canonical page routes must match the
+  selected reader; unconstructible origins fail globally before capture binding.
+  HTML roles preserve original headers. Private locator facts distinguish invalid
+  components from valid unbound aliases; executable locators remain strict.
+  Reserved-name comparison conservatively folds case, Unicode and default
+  ignorables without rewriting paths or claiming all-filesystem equivalence.
+  Overlong ordinary components are unreadable; protected resolution fails closed.
   Member failures retain indexed stage-specific evidence; source-failure
   projection requires an authorized ordinal. Fatal receipts preserve
   kind-specific attribution and JSON-safe checkpoint evidence.

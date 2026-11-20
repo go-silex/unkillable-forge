@@ -2,7 +2,7 @@ import type { ManageDeps } from './commands'
 import { executeGuarded, PolicyError, type GuardRequest } from './guard'
 import { newId, isCatalogueId } from './ids'
 import { requireManageActor, type ManageActor } from './principals'
-import { validShortlinkIdentity } from './shortlink-identity'
+import { validShortlinkIdentity, validShortlinkSourceText } from './shortlink-identity'
 import { isUnicodeScalarString } from '../store/revision-store'
 
 /** Protected metadata: destination and its digest must not be exposed in ordinary status. */
@@ -29,10 +29,7 @@ export interface ShortlinkTarget {
   readonly expectedContentVersion: number
 }
 function validMappingTextFields(m: ShortlinkMapping): boolean {
-  return isUnicodeScalarString(m.mappingId) && !!m.mappingId &&
-    (m.providerId === null || isUnicodeScalarString(m.providerId)) &&
-    isUnicodeScalarString(m.pageId) && !!m.pageId &&
-    isUnicodeScalarString(m.destination) && !!m.destination
+  return validShortlinkSourceText(m) && isUnicodeScalarString(m.pageId) && !!m.pageId
 }
 
 

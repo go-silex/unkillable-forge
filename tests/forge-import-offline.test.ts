@@ -260,7 +260,7 @@ describe('offline selected import CLI', () => {
   }, 600_000)
 
   it('denies a protected inode reused through another root before any body read', async () => {
-    for (const protectedName of ['.env.fixture', '.ENV.FiXtUrE']) {
+    for (const protectedName of ['.env.fixture', '.ENV.FiXtUrE', '.e\u200cnv.fixture']) {
       const box = await sandbox()
       try {
         const fixture = await makeSelectedFixture()
@@ -276,10 +276,10 @@ describe('offline selected import CLI', () => {
         expect(output.bodyReads).toEqual([])
       } finally { await box.cleanup() }
     }
-  }, 480_000)
+  }, 720_000)
 
-  it('protects mixed-case reserved components without a canonical exclusion row', async () => {
-    for (const relative of ['.ENV.FiXtUrE', 'nested/.GiT/marker.css', 'nested/.sSh/marker.css', 'nested/.EnV/marker.css']) {
+  it('protects reserved comparison spellings without a canonical exclusion row', async () => {
+    for (const relative of ['.ENV.FiXtUrE', '.ＥＮＶ.fixture', '.e\u200cnv.FiXtUrE', 'nested/.g\u200cit/marker.css', 'nested/.sSh/marker.css', 'nested/.EnV/marker.css', 'nested/.e\u200cnv.prefix/marker.css']) {
       const box = await sandbox()
       try {
         const fixture = await makeSelectedFixture()
@@ -298,12 +298,13 @@ describe('offline selected import CLI', () => {
         expect(output.bodyReads!).not.toContain(relative)
         const state = await checkpoint(box.workspace)
         const fact = state.facts!.find(item => item.kind === 'entry' && item.ordinal === ordinal)
+        expect(fact?.locator).toEqual({ root: 'capture', relative })
         expect(fact?.path).toBe('/tree/asset0.css')
         const planned = receipt(await box.plan())
         expect(planned.results!.map(item => item.state).sort()).toEqual(['ready', 'translation_blocked'])
       } finally { await box.cleanup() }
     }
-  }, 1_800_000)
+  }, 3_600_000)
 
   it('keeps a similarly named ordinary component eligible for actual source reads', async () => {
     const box = await sandbox()
@@ -326,6 +327,135 @@ describe('offline selected import CLI', () => {
       expect(planned.stores).toMatchObject({ status: 'observed', equal: true })
     } finally { await box.cleanup() }
   }, 600_000)
+
+  it('contains an overlong native component as unreadable without stranding an independent unit', async () => {
+    for (const intermediate of [false, true]) {
+      const box = await sandbox()
+      try {
+        const fixture = await makeSelectedFixture()
+        const ordinal = fixture.input.entries.findIndex(entry => entry.path === '/tree/asset0.css')
+        const huge = '界'.repeat(1500)
+        expect(Buffer.byteLength(huge, 'utf8')).toBeGreaterThanOrEqual(4096)
+        const relative = intermediate ? `tree/${huge}/member.css` : `tree/${huge}`
+        fixture.input.entries[ordinal].locator.relative = relative
+        // Only the JSON carries the impossible component; fixture setup never creates it.
+        await box.save(fixture)
+        const output = receipt(await run(process.execPath, [physicalRunner, 'observe', box.selection, box.workspace, box.capture], box.home))
+        expect(output.error).toBeUndefined(); expect(output.fatal).toBeNull(); expect(output.pinned).toBe(1)
+        expect(output.compatibility!.unsupported.capture_unreadable).toBe(1)
+        expect(output.compatibility!.unsupported.capture_absent ?? 0).toBe(0)
+        expect(output.compatibility!.unsupported.or1_missing_document ?? 0).toBe(0)
+        expect(output.metadataPaths!.includes(relative)).toBe(true)
+        expect(output.bodyReads!.includes(relative)).toBe(false)
+        const state = await checkpoint(box.workspace)
+        expect(state.approvals).toHaveLength(1)
+        const bad = state.units.find(unit => unit.unitId === 'tree:synthetic')
+        const healthy = state.units.find(unit => unit.unitId === 'slug:sample')
+        expect(bad?.pinState).toBe('blocked'); expect(healthy?.pinState).toBe('pinned')
+        expect(bad?.blockers).toContainEqual(expect.objectContaining({ code: 'capture_unreadable', unitId: 'tree:synthetic', entryOrdinal: ordinal, path: '/tree/asset0.css', stage: 'inspect', reason: 'unreadable' }))
+        const planned = receipt(await box.plan())
+        expect(planned.results!.map(item => item.state).sort()).toEqual(['ready', 'translation_blocked'])
+        expect(planned.stores).toMatchObject({ status: 'observed', equal: true })
+      } finally { await box.cleanup() }
+    }
+  }, 1_200_000)
+
+  it('fails closed before body reads when a protected native component is overlong', async () => {
+    const box = await sandbox()
+    try {
+      const fixture = await makeSelectedFixture()
+      excluded(fixture.input)
+      const entry = fixture.input.entries.find(item => item.path === '/asset-owners.json')!
+      entry.locator.relative = `tree/${'界'.repeat(1500)}`
+      await box.save(fixture)
+      const output = receipt(await run(process.execPath, [physicalRunner, 'observe', box.selection, box.workspace, box.capture], box.home), 1)
+      expect(output.error).toBe('offline_operation_failed')
+      expect(output.bodyReads).toEqual([])
+    } finally { await box.cleanup() }
+  }, 240_000)
+
+  it('rejects an unconstructible canonical origin before root binding, with and without pages', async () => {
+    for (const empty of [false, true]) {
+      const box = await sandbox()
+      try {
+        const fixture = await makeSelectedFixture()
+        fixture.input.reader.canonicalHost = '999.999.999.999'
+        if (empty) {
+          fixture.input.entries = []; fixture.input.pages = []; fixture.input.owners = []; fixture.input.aliases = []; fixture.input.shortlinks = []; fixture.input.previews = []; fixture.input.consumerUrls = []
+        }
+        await box.save(fixture)
+        await rm(box.capture, { recursive: true })
+        const prepared = receipt(await box.prepare(), 1)
+        expect(prepared.error).toBeUndefined(); expect(prepared.fatal).toBe('invalid_grammar')
+        expect(prepared.units).toBe(0); expect(prepared.pinned).toBe(0)
+        expect(prepared.census!.digest).toMatch(/^[a-f0-9]{64}$/)
+        if (empty) expect(prepared.census!.counts.page).toBeUndefined()
+        else expect(prepared.census!.counts.page.rejected).toBe(fixture.input.pages.length)
+        const observed = receipt(await run(process.execPath, [physicalRunner, 'observe', box.selection, join(box.root, 'observed-workspace'), box.capture], box.home), 1)
+        expect(observed.fatal).toBe('invalid_grammar')
+        expect(observed.metadataPaths).toEqual([]); expect(observed.bodyReads).toEqual([])
+        const planned = receipt(await box.plan(), 1)
+        expect(planned.fatal).toBe('invalid_grammar'); expect(planned.census).toEqual(prepared.census)
+        expect(planned.results).toEqual([])
+        expect(planned.stores).toMatchObject({ status: 'not_prepared', equal: null })
+        await expect(stat(join(box.workspace, 'persist'))).rejects.toMatchObject({ code: 'ENOENT' })
+      } finally { await box.cleanup() }
+    }
+  }, 600_000)
+
+  it('retains a valid unbound root spelling but nulls a malformed root in private locator evidence', async () => {
+    for (const root of ['not/a-root', 'unbound'] as const) {
+      const box = await sandbox()
+      try {
+        const fixture = await makeSelectedFixture()
+        const ordinal = fixture.input.entries.findIndex(entry => entry.path === '/tree/asset0.css')
+        fixture.input.entries[ordinal].locator.root = root
+        const preflight = await preflightSelection(fixture.input)
+        expect(preflight.kind).toBe('prepared')
+        if (preflight.kind !== 'prepared') throw new Error('expected prepared selection')
+        expect(preflight.reads.some(item => item.ordinal === ordinal)).toBe(false)
+        expect(preflight.protectedLocators.some(item => item.ordinal === ordinal)).toBe(false)
+        const translated = await preflight.finish(fixture.observations)
+        const fact = translated.facts.find(item => item.kind === 'entry' && item.ordinal === ordinal)
+        if (!fact || fact.kind !== 'entry') throw new Error('expected entry evidence')
+        const expected = { root: root === 'unbound' ? root : null, relative: 'tree/asset0.css' }
+        expect(fact.locator).toEqual(expected)
+        expect(fact.unitId).toBe('tree:synthetic')
+        expect(translated.compatibility.unsupported.some(issue => issue.code === 'unsafe_locator')).toBe(true)
+        await box.save(fixture)
+        const output = receipt(await run(process.execPath, [physicalRunner, 'observe', box.selection, box.workspace, box.capture], box.home))
+        expect(output.fatal).toBeNull(); expect(output.pinned).toBe(1)
+        expect(output.compatibility!.unsupported.unsafe_locator).toBeGreaterThan(0)
+        expect(output.compatibility!.unsupported.capture_absent ?? 0).toBe(0)
+        expect(output.compatibility!.unsupported.or1_missing_document ?? 0).toBe(0)
+        expect(output.metadataPaths!).not.toContain('tree/asset0.css')
+        expect(output.bodyReads!).not.toContain('tree/asset0.css')
+        const saved = await checkpoint(box.workspace)
+        expect(saved.facts!.find(item => item.kind === 'entry' && item.ordinal === ordinal)?.locator).toEqual(expected)
+        const planned = receipt(await box.plan())
+        expect(planned.results!.map(item => item.state).sort()).toEqual(['ready', 'translation_blocked'])
+        expect(planned.stores).toMatchObject({ status: 'observed', equal: true })
+        const replay = await checkpoint(box.workspace)
+        expect(replay.facts!.find(item => item.kind === 'entry' && item.ordinal === ordinal)?.locator).toEqual(fact.locator)
+      } finally { await box.cleanup() }
+    }
+  }, 1_200_000)
+
+  it('rejects malformed or unbound roots on protected locators before any body read', async () => {
+    for (const root of ['not/a-root', 'unbound'] as const) {
+      const box = await sandbox()
+      try {
+        const fixture = await makeSelectedFixture()
+        excluded(fixture.input)
+        fixture.input.entries.find(item => item.path === '/asset-owners.json')!.locator.root = root
+        await box.save(fixture)
+        const output = receipt(await run(process.execPath, [physicalRunner, 'observe', box.selection, box.workspace, box.capture], box.home), 1)
+        expect(output.error).toBeUndefined(); expect(typeof output.fatal).toBe('string')
+        expect(output.pinned).toBe(0)
+        expect(output.metadataPaths).toEqual([]); expect(output.bodyReads).toEqual([])
+      } finally { await box.cleanup() }
+    }
+  }, 480_000)
 
   it('keeps each valid locator component in memory and checkpoint when the other is raw 1e400', async () => {
     for (const invalidComponent of ['relative', 'root'] as const) {

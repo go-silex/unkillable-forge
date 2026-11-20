@@ -6,10 +6,10 @@ import { parseRequest, canonicalUrl, isReservedShellPath, subtreeSlugOf } from "
 import { importPreviewOwned, orderedOriginalImageCandidatePaths } from "../domains/catalogue/previews.ts"
 import { conflictingImportOperationIndexes } from "../domains/catalogue/import-operation-set.ts"
 import { validateReaderProfile } from "../domains/catalogue/instance-config.ts"
-import { documentRouteOf } from "../domains/catalogue/revision-paths.ts"
+import { documentRouteOf, ownershipEdgeFeasible } from "../domains/catalogue/revision-paths.ts"
 import { validateBeginCommand, isPublicationToken } from "../domains/publication/staging.ts"
 import { isValidAliasPath, isValidAliasDestination, aliasMatchesPath, aliasLocation } from "../domains/catalogue/alias-validation.ts"
-import { validShortlinkIdentity } from "../domains/catalogue/shortlink-identity.ts"
+import { validShortlinkIdentity, validShortlinkSourceText } from "../domains/catalogue/shortlink-identity.ts"
 import { newId, isCatalogueId } from "../domains/catalogue/ids.ts"
 import { isUnicodeScalarString } from "../domains/store/revision-store.ts"
 
@@ -169,12 +169,15 @@ function shellPath(path, declared, resulting = new Set()) {
 }
 export function isProtectedCaptureRelative(value) {
   return typeof value === "string" && value.split("/").some(part => {
-    const key = part.normalize("NFKC").toLowerCase()
+    const key = part.normalize("NFKC").toLowerCase().replace(/\p{Default_Ignorable_Code_Point}/gu, "")
     return key === ".env" || key.startsWith(".env.") || key === ".git" || key === ".ssh"
   })
 }
 function safeRelative(value) {
   return isUnicodeScalarString(value) && !!value && !value.startsWith("/") && !value.includes("\\") && !value.includes("\0") && !value.split("/").some(part => !part || part === "." || part === "..")
+}
+function validCaptureRootAlias(value) {
+  return typeof value === "string" && /^[a-z][a-z0-9-]{0,31}$/.test(value)
 }
 function observationOf(observations, path) {
   if (!record(observations) || !Object.hasOwn(observations, path)) return { state: "unknown" }
@@ -198,9 +201,9 @@ function header(input) {
   if (input.kind === "historical" ? !text(input.g1bRef) : input.g1bRef !== null) return "g1b_evidence_required"
   const limits = input.limits
   if (!exact(limits, ["maxCommandBytes", "maxJsonDepth", "maxUploadBytes", "maxInventoryBytes"]) || [limits.maxCommandBytes, limits.maxUploadBytes, limits.maxInventoryBytes].some(item => !integer(item) || item <= 0) || !integer(limits.maxJsonDepth) || limits.maxJsonDepth < 1 || limits.maxJsonDepth > 64) return "invalid_limits"
-  if (!exact(input.reader, ["canonicalHost", "aliasHosts", "routeGrammars", "shareGrammars", "shareCookie", "shellPaths"]) || !validateReaderProfile(input.reader).ok) return "invalid_grammar"
+  if (!exact(input.reader, ["canonicalHost", "aliasHosts", "routeGrammars", "shareGrammars", "shareCookie", "shellPaths"]) || !validateReaderProfile(input.reader).ok || !URL.canParse(`https://${input.reader.canonicalHost}/`)) return "invalid_grammar"
   if (["captureRoots", "entries", "pages", "owners", "aliases", "shortlinks", "previews", "consumerUrls", "exclusions", "providerMounts"].some(key => !Array.isArray(input[key]))) return "invalid_selection"
-  if (input.captureRoots.some(root => typeof root !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(root)) || new Set(input.captureRoots).size !== input.captureRoots.length) return "invalid_capture_root"
+  if (input.captureRoots.some(root => !validCaptureRootAlias(root)) || new Set(input.captureRoots).size !== input.captureRoots.length) return "invalid_capture_root"
   return null
 }
 async function digest(value) {
@@ -316,12 +319,15 @@ export async function preflightSelection(input, ledgerInput = null) {
       if (text(unit)) item.units.add(unit)
       index.set(key, item)
     }
+    for (const item of index.values()) item.units = item.units.size > 1 ? [...item.units].sort() : [...item.units]
     return index
   }
   const sourceCandidates = candidateIndex(input.pages, row => row?.sourcePageId, row => row?.membership?.sourceArtifactId)
   const pagePathCandidates = candidateIndex(input.pages, row => row?.documentPath, row => row?.membership?.sourceArtifactId)
   const entryCandidates = candidateIndex(input.entries, row => row?.path, row => row?.placement?.sourceArtifactId)
-  const unitsOf = (index, key) => [...(index.get(key)?.units ?? [])].sort()
+  const emptyUnits = []
+  const unitsOf = (index, key) => index.get(key)?.units ?? emptyUnits
+  const unionUnits = (left, right) => !left.length ? right : !right.length ? left : [...new Set([...left, ...right])].sort()
   const shells = new Set(input.reader.shellPaths.filter(path => typeof path === "string"))
   const entries = new Map(), entryOrdinals = new Map()
   let contradictory = false
@@ -389,7 +395,8 @@ export async function preflightSelection(input, ledgerInput = null) {
   }
   const pageKey = page => [input.sourceInstance, page.membership.sourceArtifactId, page.sourcePageId]
   const proposalKey = (unitId, ...parts) => [input.sourceInstance, unitId, input.selectionRef, input.selectionDigest, ...parts]
-  const mountPaths = new Set(input.providerMounts.filter(record).map(mount => mount.path))
+  const mountPaths = new Set(input.providerMounts.filter(mount => validProviderMount(mount) && !entryCandidates.get(mount.path)).map(mount => mount.path))
+  const primaryRoutes = new Map(pages.map(page => [page, documentRoute(page.documentPath)]))
   const ownerUnitsByPath = new Map()
   for (const owner of input.owners) {
     if (typeof owner?.path !== "string") continue
@@ -407,12 +414,12 @@ export async function preflightSelection(input, ledgerInput = null) {
     summary.page = summary.count === 1 ? page : null
     mappings.set(mapping.mappingId, summary)
   }
+  for (const summary of mappings.values()) summary.units = summary.units.size > 1 ? [...summary.units].sort() : [...summary.units]
   const consumerResolutions = input.consumerUrls.map(row => {
     const summary = typeof row?.mappingRef === "string" ? mappings.get(row.mappingRef) : null
     const directPage = typeof row?.targetSourcePageId === "string" ? pageBySource.get(row.targetSourcePageId) : null
-    const directUnits = unitsOf(sourceCandidates, row?.targetSourcePageId)
     const key = stable([typeof row?.mappingRef === "string" ? row.mappingRef : null, typeof row?.targetSourcePageId === "string" ? row.targetSourcePageId : null])
-    if (!unions.has(key)) unions.set(key, [...new Set([...(summary?.units ?? []), ...directUnits])].sort())
+    if (!unions.has(key)) unions.set(key, unionUnits(summary?.units ?? emptyUnits, unitsOf(sourceCandidates, row?.targetSourcePageId)))
     return { summary, directPage, unitIds: unions.get(key) }
   })
   for (const [kind, key] of EVIDENCE_COLLECTIONS) for (let ordinal = 0; ordinal < input[key].length; ordinal++) {
@@ -428,7 +435,7 @@ export async function preflightSelection(input, ledgerInput = null) {
     const sourceKey = kind === "owner" ? row?.ownerSourcePageId : kind === "preview" ? row?.sourcePageId : row?.targetSourcePageId
     const primary = kind === "entry" ? (text(row?.placement?.sourceArtifactId) ? [row.placement.sourceArtifactId] : []) : kind === "page" ? (text(row?.membership?.sourceArtifactId) ? [row.membership.sourceArtifactId] : []) : kind === "exclusion" ? unitsOf(entryCandidates, row?.path) : unitsOf(sourceCandidates, sourceKey)
     const secondary = kind === "entry" ? unitsOf(pagePathCandidates, row?.path) : []
-    slot.unitIds = [...new Set([...primary, ...secondary])].sort()
+    slot.unitIds = unionUnits(primary, secondary)
   }
   if (contradictory) {
     for (const path of entries.keys()) account(path, "blocked", null, "contradictory_input")
@@ -457,12 +464,14 @@ export async function preflightSelection(input, ledgerInput = null) {
       if (!unitId) unassignable = true
       let valid = exact(row, keys)
       if (valid && kind === "owner") {
-        const identityValid = !!page && pagePathCandidates.get(page.documentPath)?.count === 1 && isUnicodeScalarString(page.documentPath) && page.sourcePageId === (slugOf(page.documentPath) ?? page.documentPath.slice(1)) && logicalPath(row.path, true) && isUnicodeScalarString(row.ownerSourcePageId) && text(row.evidenceRef) && row.basis === "declared" && ownerCounts.get(stable([row.ownerSourcePageId, row.path])) === 1
+        const document = page && entries.get(page.documentPath), route = page && primaryRoutes.get(page)
+        const local = !!document && !!entries.get(row.path)?.placement?.sourceArtifactId && entries.get(row.path).placement.sourceArtifactId === page?.membership.sourceArtifactId
+        const identityValid = !!page && !!route && pagePathCandidates.get(page.documentPath)?.count === 1 && entryCandidates.get(page.documentPath)?.count === 1 && document?.graphClass === "page_document" && document.placement?.sourceArtifactId === page.membership.sourceArtifactId && isUnicodeScalarString(page.documentPath) && page.sourcePageId === (slugOf(page.documentPath) ?? page.documentPath.slice(1)) && logicalPath(row.path, true) && isUnicodeScalarString(row.ownerSourcePageId) && text(row.evidenceRef) && row.basis === "declared" && ownerCounts.get(stable([row.ownerSourcePageId, row.path])) === 1 && ownershipEdgeFeasible(route, row.path, local)
         if (identityValid) requestedOwners.push(row)
         valid = identityValid && (["fragment", "asset"].includes(entries.get(row.path)?.graphClass) || mountPaths.has(row.path))
       }
       if (valid && kind === "alias") valid = one(row.aliasKind, ["redirect_exact", "redirect_prefix"]) && isValidAliasPath(row.path) && isValidAliasDestination(row.to) && [301, 302, 307, 308].includes(row.status) && row.capturedBehavior === "team_fallback" && (row.aliasKind !== "redirect_prefix" || row.path.endsWith("/"))
-      if (valid && kind === "shortlink") valid = text(row.mappingId) && text(row.providerOrigin) && (row.providerId === null || text(row.providerId)) && text(row.shortDomain) && text(row.shortCode) && text(row.shortUrl) && text(row.destination, 4096) && integer(row.observedAt) && row.observedAt >= 0 && validShortlinkIdentity(row.providerOrigin, row.shortDomain, row.shortCode, row.shortUrl)
+      if (valid && kind === "shortlink") valid = validShortlinkSourceText(row) && text(row.mappingId) && text(row.providerOrigin) && (row.providerId === null || text(row.providerId)) && text(row.shortDomain) && text(row.shortCode) && text(row.shortUrl) && text(row.destination, 4096) && integer(row.observedAt) && row.observedAt >= 0 && validShortlinkIdentity(row.providerOrigin, row.shortDomain, row.shortCode, row.shortUrl)
       if (valid && kind === "preview") valid = logicalPath(row.path) && one(row.kind, ["original", "derived_only"]) && entries.has(row.path)
       const identity = valid ? kind === "owner" ? stable([kind, row.ownerSourcePageId, row.path]) : stable([kind, row]) : null
       if (identity && relationshipKeys.has(identity)) valid = false
@@ -512,7 +521,7 @@ export async function preflightSelection(input, ledgerInput = null) {
       try { if (stable(page.metadata).length > 8192) code = "metadata_too_large" } catch { code = "metadata_too_large" }
     }
     if (!code) {
-      const route = documentRoute(page.documentPath)
+      const route = primaryRoutes.get(page)
       const parsed = route && parseRequest(new Request(`https://${input.reader.canonicalHost}${canonicalUrl(route)}`), input.reader).parsed
       if (!route || !parsed || !((route.kind === "tree_page" && parsed.kind === "tree" && parsed.pageRef === route.pageRef) || (route.kind === "subtree" && parsed.kind === "subtree" && parsed.slug === route.slug)) || parsed.candidates[0] !== page.documentPath) code = "primary_route_unavailable"
     }
@@ -863,7 +872,7 @@ export async function preflightSelection(input, ledgerInput = null) {
     const disposition = excluded ? "excluded" : !entry.placement || blockedUnits.has(unitId) || protectedPath ? "rejected" : "represented"
     const sourcePage = pageByPath.get(entry.path)
     const publicOrSharedDocument = !!sourcePage && entry.graphClass === "page_document" && sourcePage.membership.sourceArtifactId === unitId && sourcePage.visibility.state === "present" && ["public", "shared"].includes(sourcePage.visibility.value)
-    rowFact("entry", ordinal, [unitId, sourcePage?.membership.sourceArtifactId], disposition, { path: entry.path, locator: { root: text(entry.locator.root) && isUnicodeScalarString(entry.locator.root) ? entry.locator.root : null, relative: safeRelative(entry.locator.relative) ? entry.locator.relative : null }, unitId, sourcePageId: sourcePage?.sourcePageId ?? null, publicOrSharedDocument, readCohort: protectedPath ? "protected" : disposition === "represented" ? "candidate" : "omitted", reason: excluded ? exclusions.get(entry.path).reason : disposition === "represented" ? "representable" : !entry.placement ? entry.graphClass === "unresolved" ? "unresolved_path" : "exclusion_evidence_required" : "preflight_blocked" })
+    rowFact("entry", ordinal, [unitId, sourcePage?.membership.sourceArtifactId], disposition, { path: entry.path, locator: { root: validCaptureRootAlias(entry.locator.root) ? entry.locator.root : null, relative: safeRelative(entry.locator.relative) ? entry.locator.relative : null }, unitId, sourcePageId: sourcePage?.sourcePageId ?? null, publicOrSharedDocument, readCohort: protectedPath ? "protected" : disposition === "represented" ? "candidate" : "omitted", reason: excluded ? exclusions.get(entry.path).reason : disposition === "represented" ? "representable" : !entry.placement ? entry.graphClass === "unresolved" ? "unresolved_path" : "exclusion_evidence_required" : "preflight_blocked" })
     if (protectedPath) protectedLocators.push({ ordinal, locator: entry.locator })
     else if (disposition === "represented") reads.push({ ordinal, path: entry.path, locator: entry.locator, expected: entry.expected, sourceKey: `capture/v1/${namespaces.get(unitId)}/${ordinal}`, unitId, sourcePageId: sourcePage?.sourcePageId ?? null, publicDocument: publicOrSharedDocument })
     if (!entry.placement && !excluded) compatibility.unsupported.push(note(entry.graphClass === "unresolved" ? "unresolved_path" : "exclusion_evidence_required", { path: entry.path }))
