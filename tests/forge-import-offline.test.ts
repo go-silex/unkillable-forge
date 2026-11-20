@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { spawn } from 'node:child_process'
-import { webcrypto } from 'node:crypto'
+import { createHmac, webcrypto } from 'node:crypto'
 import { link, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 import { makeSelectedFixture, type SyntheticInput } from './engine/fixtures/import-selected.mjs'
-import { preflightSelection, type Observation } from '../scripts/forge-import-selected.mjs'
+import { preflightSelection, stable, type Observation } from '../scripts/forge-import-selected.mjs'
 import { createAssertionSigner } from '../scripts/forge-import-physical.mjs'
 
 const cli = fileURLToPath(new URL('../scripts/forge-import-offline.mjs', import.meta.url))
@@ -100,6 +100,56 @@ function allExcluded(input: SyntheticInput) {
 }
 
 describe('offline selected import CLI', () => {
+  it('signs and replays the persisted JSON-safe census for a raw nonfinite placement identity', async () => {
+    const box = await sandbox()
+    try {
+      const fixture = await makeSelectedFixture()
+      const ordinal = fixture.input.entries.findIndex(entry => entry.path === '/tree/asset0.css')
+      expect(ordinal).toBeGreaterThanOrEqual(0)
+      const placement = fixture.input.entries[ordinal].placement
+      if (!placement) throw new Error('expected synthetic placement')
+      const marker = 'synthetic-invalid-placement-token'
+      placement.sourceArtifactId = marker
+      fixture.input.exclusions.push({ path: '/tree/asset1.css', evidenceRef: 'synthetic-exclusion', reason: 'non_content' })
+      fixture.input.consumerUrls.push({ url: 'https://forge.example.test/missing.html', purpose: 'document', targetSourcePageId: 'missing.html', mappingRef: null })
+      await box.save(fixture)
+      const original = await readFile(box.selection, 'utf8')
+      expect(original.split(JSON.stringify(marker))).toHaveLength(2)
+      const raw = original.replace(JSON.stringify(marker), '1e400')
+      expect(raw.includes('\"sourceArtifactId\":1e400')).toBe(true)
+      await writeFile(box.selection, Buffer.from(raw, 'utf8'), { mode: 0o600 })
+      await rm(box.capture, { recursive: true })
+      const prepared = receipt(await box.prepare(), 1)
+      expect(prepared.error).toBeUndefined()
+      expect(prepared.fatal).toBe('contradictory_input')
+      expect(prepared.units).toBe(0); expect(prepared.pinned).toBe(0)
+      expect(prepared.compatibility!.unsupported.contradictory_entry).toBe(1)
+      expect(prepared.census!.counts.entry.rejected).toBe(fixture.input.entries.length)
+      const before = await readFile(join(box.workspace, 'state.json'))
+      const state = z.object({
+        preparation: z.literal('fatal'), fatal: z.literal('contradictory_input'), receiptKey: z.string(),
+        approvals: z.array(z.unknown()).optional(),
+        census: z.array(z.object({ kind: z.string(), ordinal: z.number(), unitId: z.string().nullable(), affectedUnitIds: z.array(z.string()), disposition: z.string() }).passthrough()),
+      }).parse(JSON.parse(before.toString('utf8')))
+      expect(state.approvals ?? []).toHaveLength(0)
+      const row = state.census.find(item => item.kind === 'entry' && item.ordinal === ordinal)
+      expect(row).toMatchObject({ unitId: null, affectedUnitIds: [], disposition: 'rejected' })
+      const exclusion = state.census.find(item => item.kind === 'exclusion' && item.ordinal === 0)
+      expect(exclusion).toMatchObject({ unitId: 'tree:synthetic', affectedUnitIds: ['tree:synthetic'], disposition: 'rejected' })
+      const expectedDigest = createHmac('sha256', Buffer.from(state.receiptKey, 'base64url')).update(stable(state.census)).digest('hex')
+      expect(prepared.census!.digest === expectedDigest).toBe(true)
+      const planned = receipt(await box.plan(), 1)
+      expect(planned.error).toBeUndefined(); expect(planned.fatal).toBe('contradictory_input')
+      expect(planned.results).toEqual([]); expect(planned.census).toEqual(prepared.census)
+      expect(planned.stores).toMatchObject({ status: 'not_prepared', equal: null })
+      expect((await readFile(join(box.workspace, 'state.json'))).equals(before)).toBe(true)
+      await expect(stat(join(box.workspace, 'persist'))).rejects.toMatchObject({ code: 'ENOENT' })
+      const observed = receipt(await run(process.execPath, [physicalRunner, 'observe', box.selection, join(box.root, 'observed-workspace'), box.capture], box.home), 1)
+      expect(observed.fatal).toBe('contradictory_input')
+      expect(observed.metadataPaths).toEqual([]); expect(observed.bodyReads).toEqual([])
+    } finally { await box.cleanup() }
+  }, 600_000)
+
   it('checkpoints and replays a specific fatal receipt for a provider declaration missing its path', async () => {
     const box = await sandbox()
     try {
@@ -571,9 +621,10 @@ describe('offline selected import CLI', () => {
       expect(preflight.kind).toBe('prepared')
       if (preflight.kind !== 'prepared') throw new Error('expected prepared selection')
       const translation = await preflight.finish(fixture.observations)
-      const tree = translation.units.find(unit => unit.unitId === 'tree:synthetic')!
-      const slug = translation.units.find(unit => unit.unitId === 'slug:sample')!
-      expect(tree.status).toBe('representable'); expect(slug.status).toBe('representable')
+      const tree = translation.units.find(unit => unit.unitId === 'tree:synthetic')
+      const slug = translation.units.find(unit => unit.unitId === 'slug:sample')
+      expect(tree?.status).toBe('representable'); expect(slug?.status).toBe('representable')
+      if (!tree || tree.status !== 'representable' || !slug || slug.status !== 'representable') throw new Error('expected representable units')
       expect(tree.budget.inventoryBytes).toBeGreaterThan(slug.budget.inventoryBytes)
       fixture.input.limits.maxInventoryBytes = tree.budget.inventoryBytes + 1
       await box.save(fixture)

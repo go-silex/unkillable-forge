@@ -87,20 +87,27 @@ read; identities are checked again when bytes are read. The authorized read and
 protected-locator sets are not complements: omission of ordinary content from a
 blocked unit does not make its inode a protected exclusion.
 
-Before body reads the selector receives a whole-record preflight and indexed
-census, including malformed relationships. It compiles one complete proposal;
-finishing observations checks that snapshot rather than recompiling a smaller
-selection. An unassignable contradiction is a fatal selector failure, distinct
-from a valid exclusions-only selection; projection preserves a fatal receipt
-without inventing projectable facts. Resolved consumer-to-unit attribution,
-including mapping-only references, survives an unrelated fatal record. Missing
-optional evidence fields are represented as JSON-safe nulls so private checkpoint
-serialization and receipt authentication agree. Each attributed missing or
-unreadable member blocks its complete source artifact, not just the missing file;
-independent units may still proceed. The ID ledger scopes identity by canonical
-serialized source tuples, including source instance and original artifact;
-noncanonical or malformed supplied ledger keys, including non-scalar paths, are
-rejected rather than reminted. Private member facts retain ordinal, stage and
+Before body reads the selector groups declarations by artifact, assesses each
+complete candidate, and builds each eligible native draft once. Only those
+drafts contribute routes, resource placements and aliases to one frozen proposed
+read view. Required consumers are assessed against that view; a failed consumer
+or later pin failure does not recompute a different winner. A subdocument requires
+an evidenced subtree in its own artifact, not merely an owner edge or another
+artifact's subtree. This static view is neither a live route nor access proof.
+
+The preflight keeps an indexed census, including malformed relationships.
+An unassignable contradiction is a fatal selector failure, distinct from a
+valid exclusions-only selection; projection preserves a fatal receipt without
+inventing projectable facts. Each ordinal's affected units come from its
+kind-specific semantic relation and remain the same on normal and fatal exits.
+Mapping-only attribution survives an unrelated fatal record. Raw invalid identities
+do not become unit IDs; JSON-safe evidence is the same census checkpointed and
+authenticated in the receipt. Each attributed missing or unreadable member
+blocks its complete source artifact; independent units may still proceed. The ID
+ledger scopes identity by canonical serialized source tuples, including source
+instance and original artifact. Emission and replay use the same tuple validation;
+noncanonical or malformed keys, including non-scalar paths, are rejected rather
+than reminted. Private member facts retain ordinal, stage and
 reason, including distinct diagnostics for the same member. A projected source
 failure must name an ordinal authorized for source observation.
 The per-unit dependency list retains each required provider's path and kind.
@@ -110,6 +117,15 @@ An invalid provider ID is rejected while identifiable dependent units retain the
 rejected provider ordinal and a `missing` dependency. An empty list means no
 identified dependency, not an inference from a blocked unit.
 
+Private unit budgets retain known declared file, page and edge counts, largest
+file size and all known breached dimensions even if a unit cannot compile.
+The `commandBytes`, `envelopeBytes` and `inventoryBytes` measurements are null
+until a draft is serialized; afterward they are actual measured bytes, not
+fabricated zeros. The envelope measurement uses the maximum-cursor convention.
+Draft inventory bytes do not predict the later pinned inventory size, which is
+checked separately after native source versions are assigned. These diagnostics
+are not a historical capacity benchmark.
+
 Unknown or unreadable policy capture blocks its unit, whereas an observed
 unrecognized visibility value is retained for the native warning. Static
 recognition, representation by an eligible unit, native `ready`, and actual
@@ -117,7 +133,9 @@ consumer HTTP authorization are separate outcomes. Literal shortlink destination
 preservation does not prove the target, key or grant association; a dry-run
 does not prove an actual consumer HTTP response.
 A valid team-only alias to `/` can be stored without proving that its destination
-is a selected document. Required consumer claims must resolve to the actual
+is a selected document. Alias keys and destinations containing literal `%25`
+are rejected before readiness because Catalogue route storage forbids them.
+Required consumer claims must resolve to the actual
 winning selected resource and purpose; a share or card destination additionally
 requires the exact captured key and observed shared visibility. A team alias
 does not authenticate its destination. Excluded census names are not primary

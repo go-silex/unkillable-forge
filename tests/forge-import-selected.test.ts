@@ -801,4 +801,122 @@ describe('selected import translation', () => {
     ledger.operationIds[key('/valid\uFFFD.png')] = 'opsynthetic'
     expect((await preflightSelection(input, ledger)).kind).toBe('prepared')
   })
+  it('excludes impossible publication mounts from the frozen alias view', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    input.aliases[0].path = '/brand.css'
+    input.consumerUrls.push({ url: 'https://forge.example.test/brand.css', purpose: 'alias', targetSourcePageId: 'sample', mappingRef: null })
+    expect(unitFor(await translateSelection(input, null, observations), 'slug:').status).toBe('representable')
+    const template = input.entries.find(entry => entry.path === '/tree/asset0.css')!
+    const asset = { ...template, path: '/brand.css', locator: { root: 'capture', relative: 'brand.css' }, placement: { sourceArtifactId: 'tree:no-members', evidenceRef: 'synthetic-placement' } }
+    input.entries.push(asset)
+    observations[asset.path] = observations[template.path]
+    const placementOnly = await translateSelection(input, null, observations)
+    expect(unitFor(placementOnly, 'tree:no-members').status).toBe('blocked')
+    expect(unitFor(placementOnly, 'slug:').status).toBe('representable')
+    asset.placement.sourceArtifactId = 'tree:synthetic'
+    expect(unitFor(await translateSelection(input, null, observations), 'slug:').status).toBe('blocked')
+    input.pages.find(page => page.sourcePageId === 'tree/one.html')!.visibility = { state: 'unknown' }
+    expect(unitFor(await translateSelection(input, null, observations), 'slug:').status).toBe('representable')
+  })
+
+  it('requires same-unit subtree governance for every subdocument', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const template = input.entries.find(entry => entry.path === '/tree/one.html')!
+    const entry = { ...template, graphClass: 'subdocument', path: '/tree/appendix.html', locator: { root: 'capture', relative: 'tree/appendix.html' } }
+    input.entries.push(entry)
+    observations[entry.path] = observations[template.path]
+    input.owners.push({ path: entry.path, ownerSourcePageId: 'tree/one.html', evidenceRef: 'synthetic', basis: 'declared' })
+    const tree = await preflightSelection(input)
+    if (tree.kind !== 'prepared') throw new Error('expected prepared')
+    expect(tree.reads.some(read => read.path === entry.path)).toBe(false)
+    expect(unitFor(await tree.finish(observations), 'tree:').status).toBe('blocked')
+    input.owners.pop()
+    entry.path = '/a/sample/other/index.html'
+    entry.locator.relative = 'a/sample/other/index.html'
+    entry.placement = { sourceArtifactId: 'slug:sample', evidenceRef: 'synthetic' }
+    observations[entry.path] = observations[template.path]
+    expect(unitFor(await translateSelection(input, null, observations), 'slug:').status).toBe('representable')
+    entry.placement.sourceArtifactId = 'tree:synthetic'
+    expect(unitFor(await translateSelection(input, null, observations), 'tree:').status).toBe('blocked')
+  })
+
+  it('replays a ledger after rejecting an invalid preview source identity', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const bad = 'tree/\uD800.html'
+    input.pages.find(page => page.sourcePageId === 'tree/one.html')!.sourcePageId = bad
+    for (const owner of input.owners) if (owner.ownerSourcePageId === 'tree/one.html') owner.ownerSourcePageId = bad
+    for (const preview of input.previews) if (preview.sourcePageId === 'tree/one.html') preview.sourcePageId = bad
+    const first = await translateSelection(input, null, observations)
+    expect(unitFor(first, 'tree:').status).toBe('blocked')
+    expect(unitFor(first, 'slug:').status).toBe('representable')
+    const second = await translateSelection(input, first.ledger, observations)
+    expect(second.fatal).toBeNull()
+    expect(second.ledger).toEqual(first.ledger)
+  })
+
+  it('retains ordinal attribution across normal and fatal results', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    input.exclusions.push({ path: '/tree/asset0.css', evidenceRef: 'synthetic', reason: 'non_content' })
+    Object.assign(input.aliases[0], { ownerSourcePageId: 'tree/one.html' })
+    const normal = await translateSelection(input, null, observations)
+    input.consumerUrls.push({ url: 'https://forge.example.test/no', purpose: 'alias', targetSourcePageId: 'missing', mappingRef: null })
+    const fatal = await preflightSelection(input)
+    if (fatal.kind !== 'fatal') throw new Error('expected fatal')
+    for (const [kind, ids] of [['exclusion', ['tree:synthetic']], ['alias', ['slug:sample']]] as const) {
+      expect(normal.census.find(row => row.kind === kind)?.affectedUnitIds).toEqual(ids)
+      expect(fatal.result.census.find(row => row.kind === kind)?.affectedUnitIds).toEqual(ids)
+    }
+  })
+
+  it('retains known budget evidence and never assigns a numeric unit identity', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const entry = input.entries.find(item => item.path === '/tree/asset0.css')
+    if (!entry?.expected || !entry.placement) throw new Error('expected placed content fixture')
+    const expected = entry.expected, placement = entry.placement
+    expected.size = input.limits.maxUploadBytes + 1
+    const blocked = await translateSelection(input, null, observations)
+    expect(unitFor(blocked, 'tree:').budget).toEqual(expect.objectContaining({ largestFile: expected.size, commandBytes: null, envelopeBytes: null, inventoryBytes: null, failed: expect.arrayContaining(['file_bytes']) }))
+    Object.assign(placement, { sourceArtifactId: 42 })
+    const fatal = await preflightSelection(input)
+    if (fatal.kind !== 'fatal') throw new Error('expected fatal')
+    expect(fatal.result.census.every(row => row.affectedUnitIds.every(id => typeof id === 'string'))).toBe(true)
+  })
+
+  it('does not accept a non-scalar non-content path as an exclusion', async () => {
+    const { input } = await makeSelectedFixture()
+    const path = '/bad\uD800'
+    input.entries.push({ path, graphClass: 'excluded', contentType: null, locator: { root: 'capture', relative: 'safe' }, provenance: 'synthetic', expected: null, placement: null })
+    input.exclusions.push({ path, evidenceRef: 'synthetic', reason: 'non_content' })
+    expect((await preflightSelection(input)).kind).toBe('fatal')
+    input.entries[input.entries.length - 1].path = '/valid\uFFFD'
+    input.exclusions[input.exclusions.length - 1].path = '/valid\uFFFD'
+    expect((await preflightSelection(input)).kind).toBe('prepared')
+  })
+  it('reports every ambiguous mapping ordinal with the distinct affected units', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const mapping = input.shortlinks[0]
+    input.shortlinks = Array.from({ length: 128 }, () => ({ ...mapping }))
+    input.consumerUrls = Array.from({ length: 128 }, () => ({ url: mapping.shortUrl, purpose: 'shortlink', targetSourcePageId: null, mappingRef: mapping.mappingId }))
+    const result = await translateSelection(input, null, observations)
+    const consumers = result.census.filter(row => row.kind === 'consumerUrl')
+    expect(consumers).toHaveLength(128)
+    expect(consumers.every(row => row.disposition === 'rejected' && row.affectedUnitIds.length === 1 && row.affectedUnitIds[0] === 'slug:sample')).toBe(true)
+    input.shortlinks.push({ ...mapping, targetSourcePageId: 'tree/one.html' })
+    input.consumerUrls[0].targetSourcePageId = 'tree/one.html'
+    const union = await translateSelection(input, null, observations)
+    expect(union.census.find(row => row.kind === 'consumerUrl' && row.ordinal === 0)?.affectedUnitIds).toEqual(expect.arrayContaining(['slug:sample', 'tree:synthetic']))
+  })
+
+  it('reports all known dimensions for a large blocked artifact', async () => {
+    const { input, observations } = await makeSelectedFixture()
+    const page = input.pages.find(item => item.sourcePageId === 'tree/one.html')!
+    for (let i = 0; i < 999; i++) {
+      input.pages.push({ ...page, sourcePageId: `missing-${i}.html`, documentPath: `/missing-${i}.html` })
+    }
+    const result = await translateSelection(input, null, observations)
+    const budget = unitFor(result, 'tree:').budget
+    expect(budget.pages).toBe(1001)
+    expect(budget.failed).toContain('pages')
+    expect(budget.commandBytes).toBeNull()
+  })
 })

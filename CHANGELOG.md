@@ -15,18 +15,24 @@ Versioning follows [Semantic Versioning](https://semver.org/) for the plugin sur
   local storage and the authenticated manage Worker. A single selector snapshot
   and complete physical metadata authorization precede content reads; per-unit
   failures preserve independent sealed outcomes in one private checkpoint.
-  Record census and artifact membership remain distinct from native readiness.
-  Member failures retain indexed private stage-specific evidence and exact
-  original locators; source-failure projection requires an authorized ordinal.
-  Fatal receipts preserve resolved consumer attribution and JSON-safe evidence.
+  Static native drafts establish one frozen proposed read view before consumer
+  evaluation; impossible publications cannot shadow an independent alias, and
+  subdocuments require a subtree in the same artifact. Member failures retain
+  indexed private stage-specific evidence and exact original locators;
+  source-failure projection requires an authorized ordinal. Fatal receipts
+  preserve kind-specific attribution and JSON-safe checkpoint evidence.
   Contradictory provider declarations retain valid private identities while
   blocking affected units; no declaration activates a mount. Selection and
-  checkpoint JSON reject invalid UTF-8 and leading BOMs; ledger identities use
-  validated canonical scalar-path source tuples. Native planning validates
+  checkpoint JSON reject invalid UTF-8 and leading BOMs; ledger emission and
+  replay share canonical scalar-path tuple validation. Private budgets preserve
+  known counts, maxima and breached dimensions; serialized byte measurements
+  are null until measured, and pinned inventory is checked separately. Native planning validates
   non-null grant IDs and checks referents against the full admitted inventory or
   existing same-page rows, independent of cursor windows; existence is not active
-  authorization. Placed assets can shadow aliases without owner edges.
-  Literal links and evidenced associations do not prove consumer HTTP access.
+  authorization. Placed assets can shadow aliases without owner edges. Native
+  admission rejects alias keys and destinations containing literal `%25`, which
+  route storage forbids. Literal links and evidenced associations do not prove
+  consumer HTTP access.
   This does not authorize historical execution, publication, provider access or
   cutover, and is not a historical capacity benchmark.
 

@@ -81,7 +81,7 @@ async function fixture(includeMissing = false, mutate?: (selected: { input: Synt
     }
     throw new Error("dry run did not terminate")
   }
-  return { selected, translated, units, plan }
+  return { selected, translated, units, plan, reads: preflight.reads }
 }
 
 describe("selected fixture through native import admission", () => {
@@ -266,6 +266,52 @@ describe("selected fixture through native import admission", () => {
       if (placement !== "excluded") expect(unit.command.files.some(file => file.path === "/brand.css")).toBe(true)
       const before = await snapshot()
       expect((await plan(unit)).result.state).toBe("ready")
+      expect(await snapshot()).toEqual(before)
+    }
+  })
+
+  it("does not let a statically impossible publication shadow an independent alias", async () => {
+    for (const failure of ["no-membership", "invalid-policy"] as const) {
+      const { translated, units, plan } = await fixture(false, selected => {
+        const path = "/brand.css"
+        const original = selected.input.entries.find(entry => entry.path === "/tree/asset0.css")
+        if (!original) throw new Error("asset missing")
+        const sourceArtifactId = failure === "no-membership" ? "tree:orphan" : "tree:synthetic"
+        selected.input.entries.push({ ...original, path, locator: { root: "capture", relative: "brand.css" }, placement: { sourceArtifactId, evidenceRef: "synthetic-placement" } })
+        selected.observations[path] = selected.observations[original.path]
+        selected.files[path] = selected.files[original.path]
+        if (failure === "invalid-policy") selected.input.pages[0].visibility = { state: "unknown" }
+        selected.input.aliases[0].path = path
+        selected.input.consumerUrls.push({ url: `https://forge.example.test${path}`, purpose: "alias", targetSourcePageId: "sample", mappingRef: null })
+      })
+      expect(translated.units.find(unit => unit.sourceArtifactId === (failure === "no-membership" ? "tree:orphan" : "tree:synthetic"))?.status).toBe("blocked")
+      expect(translated.census).toContainEqual(expect.objectContaining({ kind: "consumerUrl", ordinal: 0, disposition: "represented" }))
+      const slug = units.find(unit => unit.sourceArtifactId === "slug:sample")
+      if (!slug) throw new Error("independent slug unit missing")
+      const before = await snapshot()
+      expect((await plan(slug)).result.state).toBe("ready")
+      expect(await snapshot()).toEqual(before)
+    }
+  })
+
+  it("requires subdocuments to belong to a subtree in the same artifact", async () => {
+    for (const variant of ["tree", "tree-owned", "other-artifact"] as const) {
+      const path = variant === "other-artifact" ? "/a/sample/appendix.html" : "/tree/appendix.html"
+      const { translated, units, plan, reads } = await fixture(false, selected => {
+        const original = selected.input.entries.find(entry => entry.path === "/a/sample/nested/index.html")
+        if (!original) throw new Error("subdocument missing")
+        selected.input.entries.push({ ...original, path, locator: { root: "capture", relative: path.slice(1) }, placement: { sourceArtifactId: "tree:synthetic", evidenceRef: "synthetic-placement" } })
+        selected.observations[path] = selected.observations[original.path]
+        selected.files[path] = selected.files[original.path]
+        if (variant === "tree-owned") selected.input.owners.push({ path, ownerSourcePageId: "tree/one.html", evidenceRef: "synthetic-edge-evidence", basis: "declared" })
+      })
+      expect(translated.units.find(unit => unit.sourceArtifactId === "tree:synthetic")?.status).toBe("blocked")
+      expect(reads.some(read => read.path === path)).toBe(false)
+      const slug = units.find(unit => unit.sourceArtifactId === "slug:sample")
+      if (!slug) throw new Error("independent slug unit missing")
+      expect(slug.command.files).toContainEqual(expect.objectContaining({ path: "/a/sample/nested/index.html", kind: "subdocument" }))
+      const before = await snapshot()
+      expect((await plan(slug)).result.state).toBe("ready")
       expect(await snapshot()).toEqual(before)
     }
   })

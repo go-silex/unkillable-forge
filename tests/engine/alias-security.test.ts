@@ -7,11 +7,25 @@ import { actor, artifactId, bootstrap, configs, jwks, pageFixture, pageId } from
 beforeEach(async () => { await bootstrap(); await pageFixture() })
 
 describe("alias destination and mutation boundaries", () => {
-  it.each(["https://evil.example/", "//evil.example/", "/\\evil.example/", "/\t/evil.example/", "/%5cevil.example/", "/%2fevil.example/", "/%00evil.example/", "?", "#", "/a/sample?view=1", "/a/sample#fragment"])("rejects unsafe destination %s", async (to) => {
+  it.each(["https://evil.example/", "//evil.example/", "/\\evil.example/", "/\t/evil.example/", "/%5cevil.example/", "/%2fevil.example/", "/%00evil.example/", "/archive/%2541", "?", "#", "/a/sample?view=1", "/a/sample#fragment"])("rejects unsafe destination %s", async (to) => {
     const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
     await expect(setAlias(deps, actor, { op: "put", kind: "redirect_exact", key: "/old", to, status: 302, targetPageId: pageId })).rejects.toMatchObject({ code: "invalid_state" })
     expect(await env.DB.prepare("SELECT count(*) AS n FROM routes WHERE route_key = '/old'").first()).toEqual({ n: 0 })
     await expect(env.DB.prepare("INSERT INTO routes (kind,route_key,redirect_to,redirect_status,created_at) VALUES ('redirect_exact','/old',?,302,1)").bind(to).run()).rejects.toThrow()
+  })
+  it("rejects an encoded percent in the alias key at both command and schema boundaries", async () => {
+    const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
+    const key = "/old/%2541"
+    await expect(setAlias(deps, actor, { op: "put", kind: "redirect_exact", key, to: "/archive", status: 302, targetPageId: pageId })).rejects.toMatchObject({ code: "invalid_state" })
+    expect(await env.DB.prepare("SELECT count(*) AS n FROM routes WHERE route_key = ?").bind(key).first()).toEqual({ n: 0 })
+    await expect(env.DB.prepare("INSERT INTO routes (kind,route_key,redirect_to,redirect_status,created_at) VALUES ('redirect_exact',?,'/archive',302,1)").bind(key).run()).rejects.toThrow()
+  })
+  it("stores safe single escapes without rewriting key or destination", async () => {
+    const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }
+    const key = "/old/%41"
+    const to = "/archive/%41"
+    await setAlias(deps, actor, { op: "put", kind: "redirect_exact", key, to, status: 302, targetPageId: pageId })
+    expect(await env.DB.prepare("SELECT route_key, redirect_to FROM routes WHERE kind = 'redirect_exact' AND route_key = ?").bind(key).first()).toEqual({ route_key: key, redirect_to: to })
   })
   it("preserves a safe local destination and rejects a forged primary-route removal", async () => {
     const deps = { db: env.DB, config: (await configs()).manage, jwks, now: () => 10 }

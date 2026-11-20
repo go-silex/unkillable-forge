@@ -2,7 +2,7 @@
 // Check decoded forms too: encoded or repeatedly encoded separators and controls
 // must not become meaningful when another layer interprets the location.
 function safePath(value: unknown): value is string {
-  if (typeof value !== 'string' || !/^[!-~]+$/.test(value) || !value.startsWith('/') || value.startsWith('//')) return false
+  if (typeof value !== 'string' || !/^[!-~]+$/.test(value) || !value.startsWith('/') || value.startsWith('//') || /%25/i.test(value)) return false
   let path = value
   for (;;) {
     if (/[\\\u0000-\u001f\u007f?#]/.test(path) || path.includes('//') || /%(?:2f|2e|5c)/i.test(path)) return false

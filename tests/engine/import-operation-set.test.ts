@@ -111,6 +111,17 @@ function existingPolicyEpoch(operations: ImportOperation[], page: string): Impor
 }
 
 describe("native import operation set", () => {
+  it("refuses aliases whose literal source or destination cannot be stored", async () => {
+    const f = await fixture()
+    const alias = { kind: "alias" as const, operationId: "storage-alias", aliasKind: "redirect_exact" as const, path: "/old", to: "/archive", status: 301 as const, targetPageId: f.seed.pageId }
+    for (const invalid of [{ ...alias, path: "/archive/%2541" }, { ...alias, to: "/archive/%2541" }]) {
+      const result = await checkedPlan(f, [...f.inventory.operations, invalid])
+      expect(result).toEqual({ status: 422, code: "invalid_state", state: null, issues: [] })
+    }
+    const safe = { ...alias, path: "/old/%41", to: "/archive/%41" }
+    expect((await checkedPlan(f, [...f.inventory.operations, safe])).state).toBe("ready")
+  })
+
   it("requires a shortlink grant to resolve to its own page across the complete proposed set", async () => {
     const f = await fixture()
     const proposed = newId("gr")

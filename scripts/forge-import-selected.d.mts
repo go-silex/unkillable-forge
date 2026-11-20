@@ -16,8 +16,9 @@ export interface Ledger {
 export interface Issue { code: string; path?: string; sourcePageId?: string | null; unitId?: string; basis?: string; budget?: Budget; entryOrdinal?: number; stage?: 'inspect' | 'pin_reread'; reason?: SourceFailureFact['reason'] }
 export interface Budget {
   files: number; pages: number; edges: number; largestFile: number
-  commandBytes: number; envelopeBytes: number; inventoryBytes: number; failed: string[]
+  commandBytes: number | null; envelopeBytes: number | null; inventoryBytes: number | null; failed: string[]
 }
+export interface MeasuredBudget extends Budget { commandBytes: number; envelopeBytes: number; inventoryBytes: number }
 export interface InventoryDraft extends Omit<ApprovedImportInventory, 'files'> {
   files: readonly (Omit<ImportFile, 'sourceVersion'> & { sourceVersion: string | null })[]
 }
@@ -29,6 +30,7 @@ interface UnitCommon {
 }
 export interface RepresentableUnit extends UnitCommon {
   status: 'representable'
+  budget: MeasuredBudget
   pinState: 'awaiting_source' | 'awaiting_inventory' | 'pinned'
   inventoryKey: string
   command: BeginCommand
