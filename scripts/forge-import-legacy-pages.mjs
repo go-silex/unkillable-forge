@@ -143,17 +143,16 @@ function loadKvMaps(entries) {
   return { vis, share }
 }
 
+// Legacy `/a/<slug>/` reads consult only the flat `vis:<slug>` / `share:<slug>`
+// keys. Tree-layout keys such as `vis:<slug>/index.html` govern a different
+// route and must not widen a subtree page (verified against the live reader).
 function resolveVisibility(vis, slug) {
   if (vis.has(slug)) return { state: 'present', value: vis.get(slug), key: slug }
-  const nested = `${slug}/index.html`
-  if (vis.has(nested)) return { state: 'present', value: vis.get(nested), key: nested }
   return { state: 'absent', value: null, key: null }
 }
 
 function resolveShare(share, slug) {
   if (share.has(slug)) return { state: 'present', key: share.get(slug), mapKey: slug }
-  const nested = `${slug}/index.html`
-  if (share.has(nested)) return { state: 'present', key: share.get(nested), mapKey: nested }
   return { state: 'absent', key: null, mapKey: null }
 }
 
@@ -531,40 +530,26 @@ function parseArgs(argv) {
   return { command, flags }
 }
 
-async function runWranglerPut({ accountId, bucket, key, bytes, wranglerBin = 'wrangler' }) {
+// The manage Worker compares the R2 binding's native `object.version`; only
+// `cf r2 objects put` reports it (wrangler and the S3 API expose etags only).
+async function runR2Put({ accountId, bucket, key, bytes, cfBin = 'cf' }) {
   const dir = await mkdtemp(join(tmpdir(), 'forge-import-pin-'))
   const file = join(dir, 'blob')
   try {
     await writeFile(file, bytes, { mode: 0o600 })
-    const objectPath = `${bucket}/${key}`
-    await exec(wranglerBin, ['r2', 'object', 'put', objectPath, '--file', file, '--remote', '--account-id', accountId], { secrets: [accountId] })
-    // R2 always assigns an object version; prefer API head when token present, else stable content digest marker for operator follow-up.
-    const version = await headR2Version({ accountId, bucket, key }) ?? `sha256:${sha256(bytes)}`
-    return { key, version }
+    const { stdout } = await exec(cfBin, ['r2', 'objects', 'put', key, '--bucket-name', bucket, '--file', file], { env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: accountId } })
+    let reply
+    try { reply = JSON.parse(stdout) } catch { fail('invalid_put_response', key) }
+    if (reply?.key !== key || Number(reply.size) !== bytes.length || !/^[0-9a-f]{32}$/.test(reply.version ?? '')) fail('invalid_put_response', key)
+    return { key, version: reply.version }
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
 }
 
-async function headR2Version({ accountId, bucket, key }) {
-  const token = process.env.CLOUDFLARE_API_TOKEN || process.env.CF_API_TOKEN
-  if (!token) return null
-  // Prefer API metadata when a token is present; never log the token.
-  try {
-    const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/r2/buckets/${encodeURIComponent(bucket)}/objects/${key.split('/').map(encodeURIComponent).join('/')}`, {
-      method: 'HEAD',
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    if (!res.ok) return null
-    return res.headers.get('etag')?.replaceAll('"', '') ?? null
-  } catch {
-    return null
-  }
-}
-
-function exec(bin, args, { secrets = [] } = {}) {
+function exec(bin, args, { secrets = [], env = process.env } = {}) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], env: process.env })
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], env })
     let stdout = '', stderr = ''
     child.stdout.on('data', c => { stdout += c })
     child.stderr.on('data', c => { stderr += c })
@@ -647,21 +632,13 @@ export async function pinWorkspace(options) {
 }
 
 function accessHeaders() {
-  const headers = { 'content-type': 'application/json' }
+  // CF_ACCESS_TOKEN is the operator's CF_Authorization JWT for the manage app.
+  // The Access edge admits it as the CF_Authorization cookie and forwards the
+  // verified Cf-Access-Jwt-Assertion; the Worker then requires an active
+  // installation admin. Service tokens never act as a Catalogue identity.
   const jwt = process.env.CF_ACCESS_TOKEN
-  const clientId = process.env.CF_ACCESS_CLIENT_ID
-  const clientSecret = process.env.CF_ACCESS_CLIENT_SECRET
-  // Manage Worker admits Cf-Access-Jwt-Assertion (or CF_Authorization cookie) with manage audience + nonempty sub,
-  // then requires an active installation admin in D1. Raw Client-Id/Secret are for the Access edge only.
-  if (jwt) {
-    headers['cf-access-jwt-assertion'] = jwt
-  } else if (clientId && clientSecret) {
-    headers['CF-Access-Client-Id'] = clientId
-    headers['CF-Access-Client-Secret'] = clientSecret
-  } else {
-    fail('unauthenticated', 'set CF_ACCESS_TOKEN (preferred) or CF_ACCESS_CLIENT_ID+CF_ACCESS_CLIENT_SECRET')
-  }
-  return headers
+  if (!jwt) fail('unauthenticated', 'set CF_ACCESS_TOKEN to the operator CF_Authorization JWT for the manage host')
+  return { 'content-type': 'application/json', cookie: `CF_Authorization=${jwt}` }
 }
 
 /** Drive dry_run then apply with cursor continuation against a manage host (injectable fetch). */
@@ -759,6 +736,21 @@ export async function selectionsFromWorkspace(workspace) {
   return units.map(u => u.selection)
 }
 
+const WORKER_VAR_MAX_BYTES = 5000
+
+/** Workers plain-text vars are capped at 5 KB: split pinned approvals into deployable batches. */
+export function batchApprovals(approvals, maxBytes = WORKER_VAR_MAX_BYTES) {
+  const batches = []
+  let current = []
+  for (const approval of approvals) {
+    if (JSON.stringify([approval]).length > maxBytes) fail('invalid_arguments', 'single approval exceeds the Worker var limit')
+    if (current.length && JSON.stringify([...current, approval]).length > maxBytes) { batches.push(current); current = [] }
+    current.push(approval)
+  }
+  if (current.length) batches.push(current)
+  return batches
+}
+
 async function main(argv = process.argv.slice(2)) {
   const { command, flags } = parseArgs(argv)
   if (command === 'prepare-selection') {
@@ -803,7 +795,7 @@ async function main(argv = process.argv.slice(2)) {
     const sep = captureRoot.indexOf('=')
     if (sep <= 0) fail('invalid_arguments', 'capture-root must be alias=/absolute/path')
     roots[captureRoot.slice(0, sep)] = resolve(captureRoot.slice(sep + 1))
-    const putObject = async (key, bytes) => runWranglerPut({ accountId, bucket, key, bytes })
+    const putObject = async (key, bytes) => runR2Put({ accountId, bucket, key, bytes })
     const result = await pinWorkspace({
       workspace: resolve(workspace),
       roots,
@@ -820,11 +812,30 @@ async function main(argv = process.argv.slice(2)) {
     }))
     return
   }
+  if (command === 'split-inventories') {
+    const inventories = flags['--inventories']
+    const outDir = flags['--out-dir']
+    if (!inventories || !outDir) fail('invalid_arguments', 'split-inventories requires --inventories --out-dir')
+    const batches = batchApprovals(await json(resolve(inventories)))
+    await mkdir(resolve(outDir), { recursive: true, mode: 0o700 })
+    const files = []
+    for (const [index, batch] of batches.entries()) {
+      const file = join(resolve(outDir), `batch-${String(index + 1).padStart(3, '0')}.json`)
+      await writeFile(file, JSON.stringify(batch), { mode: 0o600 })
+      files.push({ file, approvals: batch.length })
+    }
+    console.log(JSON.stringify({ command, batches: files }))
+    return
+  }
   if (command === 'apply') {
     const workspace = flags['--workspace']
     const manageHost = flags['--manage-host']
     if (!workspace || !manageHost) fail('invalid_arguments', 'apply requires --workspace --manage-host')
-    const selections = await selectionsFromWorkspace(resolve(workspace))
+    let selections = await selectionsFromWorkspace(resolve(workspace))
+    if (flags['--inventories']) {
+      const deployed = new Set((await json(resolve(flags['--inventories']))).map(a => a.selectionId))
+      selections = selections.filter(s => deployed.has(s.selectionId))
+    }
     const result = await applyImport({
       manageHost,
       selections,
@@ -834,7 +845,7 @@ async function main(argv = process.argv.slice(2)) {
     console.log(JSON.stringify(result))
     return
   }
-  fail('invalid_arguments', 'command must be prepare-selection|pin|apply')
+  fail('invalid_arguments', 'command must be prepare-selection|pin|split-inventories|apply')
 }
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)

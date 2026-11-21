@@ -50,3 +50,5 @@ export function applyImport(options: {
 }): Promise<{ command: 'apply'; manageHost: string; results: Array<Record<string, unknown>> }>
 
 export function selectionsFromWorkspace(workspace: string): Promise<Array<{ version: 1; inventoryId: string; selectionId: string; planId: string; command: unknown }>>
+
+export function batchApprovals<T>(approvals: T[], maxBytes?: number): T[][]

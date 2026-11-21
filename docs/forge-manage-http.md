@@ -246,17 +246,22 @@ node scripts/forge-import-offline.mjs plan --workspace /private/workspace
 
 Production sequence (no discovery; credentials from env, never printed):
 
-1. `pin --workspace … --capture-root capture=/private/capture-root --bucket unkillable-forge-import --account-id f8026cffc9463a03e1a6a76af5301861`
-   uploads source objects and inventory JSON with `wrangler r2 object put --remote`
-   and prints `FORGE_IMPORT_INVENTORIES`.
-2. Configure the manage Worker with binding `FORGE_IMPORT_SOURCE` → that bucket and
-   var `FORGE_IMPORT_INVENTORIES` → the printed JSON array.
-3. `apply --workspace … --manage-host forge-manage.unkillablecompanies.com` runs
-   `dry_run` then `apply` with cursor continuation. Prefer `CF_ACCESS_TOKEN` as
-   `Cf-Access-Jwt-Assertion` for a Catalogue installation admin (manage audience,
-   nonempty `sub`, active admin grant in D1). `CF_ACCESS_CLIENT_ID` /
-   `CF_ACCESS_CLIENT_SECRET` are only for the Access edge; the Worker itself does
-   not treat those headers as manage identity. Optional `--dry-run-only true`.
+1. `pin --workspace … --capture-root capture=/private/capture-root --bucket unkillable-forge-import --account-id f8026cffc9463a03e1a6a76af5301861 --inventories-out /private/inventories.json`
+   uploads source objects and inventory JSON with `cf r2 objects put` (the
+   approval pins the native R2 `version`, which wrangler and the S3 API do not
+   expose; they report only etags) and writes the approvals.
+2. Workers plain-text vars are capped at 5 KB, about ten approvals.
+   `split-inventories --inventories /private/inventories.json --out-dir /private/batches`
+   writes deployable `batch-NNN.json` files.
+3. For each batch: deploy the manage Worker with binding `FORGE_IMPORT_SOURCE` →
+   that bucket and var `FORGE_IMPORT_INVENTORIES` → the batch JSON, then run
+   `apply --workspace … --manage-host forge-manage.unkillablecompanies.com --inventories /private/batches/batch-NNN.json`.
+   It runs `dry_run` then `apply` with cursor continuation for that batch's
+   selections only. Identity is `CF_ACCESS_TOKEN`, sent as the
+   `CF_Authorization` cookie: a manage-audience Access token for a Catalogue
+   installation admin (nonempty `sub`, active admin grant in D1). Access
+   service tokens are not a manage identity. Optional `--dry-run-only true`,
+   `--continue-on-block true`.
 
 Unmappable capture rows are refused with counts (never silently dropped). Share
 keys are preserved literally. Shell paths outside `/a/` are not imported.

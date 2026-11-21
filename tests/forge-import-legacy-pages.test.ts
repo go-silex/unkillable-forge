@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyImport, pinWorkspace, prepareSelection } from '../scripts/forge-import-legacy-pages.mjs'
+import { applyImport, batchApprovals, pinWorkspace, prepareSelection } from '../scripts/forge-import-legacy-pages.mjs'
 
 const secretMarkers = ['supersecretsharekey', 'PRIVATE KEY', 'CF_ACCESS_CLIENT_SECRET']
 
@@ -22,6 +22,8 @@ async function writeCapture(root: string, opts: {
   shareKey?: string
   shortlinks?: Array<Record<string, unknown>>
   aliasHost?: boolean
+  /** Write KV under Roxabi tree-layout names (`vis:<slug>/index.html`) instead of `vis:<slug>`. */
+  treeKeys?: boolean
 }) {
   const capture = join(root, 'capture-src')
   const rebuiltDir = join(root, 'instance', 'rebuilt', 'a', opts.slug)
@@ -50,10 +52,11 @@ async function writeCapture(root: string, opts: {
       [assetPath]: join('instance', 'rebuilt', 'a', opts.slug, 'build-id.txt'),
     },
   }
+  const kvName = opts.treeKeys ? `${opts.slug}/index.html` : opts.slug
   const kv: Array<{ name: string; metadata: null; expiration: null; value: string }> = [
-    { name: `vis:${opts.slug}`, metadata: null, expiration: null, value: opts.visibility },
+    { name: `vis:${kvName}`, metadata: null, expiration: null, value: opts.visibility },
   ]
-  if (opts.shareKey) kv.push({ name: `share:${opts.slug}`, metadata: null, expiration: null, value: opts.shareKey })
+  if (opts.shareKey) kv.push({ name: `share:${kvName}`, metadata: null, expiration: null, value: opts.shareKey })
   const host = opts.aliasHost ? 'forge.gosilex.com' : 'forge.unkillablecompanies.com'
   const shortlinks = opts.shortlinks ?? (opts.visibility === 'shared' && opts.shareKey
     ? [{
@@ -123,6 +126,28 @@ describe('forge-import-legacy-pages', () => {
     } finally {
       await cleanup()
     }
+  })
+
+  it('keeps a subtree page private when only tree-layout share keys exist', async () => {
+    const { root, cleanup } = await sandbox()
+    try {
+      const { instance } = await writeCapture(root, { slug: 'tree-slug', visibility: 'shared', shareKey: 'supersecretsharekey', treeKeys: true, shortlinks: [] })
+      const selectionOut = join(root, 'selection.json')
+      await prepareSelection({ captureDir: instance, selectionOut, captureRootOut: join(root, 'capture-root'), instance: 'roxabi' })
+      const selection = JSON.parse(await readFile(selectionOut, 'utf8'))
+      expect(selection.pages[0].visibility.value).toBe('private')
+      expect(selection.pages[0].share.state).toBe('absent')
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('batchApprovals keeps every Worker var under the limit without losing approvals', () => {
+    const approvals = Array.from({ length: 30 }, (_, i) => ({ selectionId: `sel_${i}`, padding: 'x'.repeat(450) }))
+    const batches = batchApprovals(approvals)
+    expect(batches.length).toBeGreaterThan(1)
+    for (const batch of batches) expect(JSON.stringify(batch).length).toBeLessThanOrEqual(5000)
+    expect(batches.flat()).toEqual(approvals)
   })
 
   it('prepare-selection refuses unresolved bytes and unmappable shortlinks', async () => {
@@ -254,7 +279,7 @@ describe('forge-import-legacy-pages', () => {
       const applied = await applyImport({
         manageHost: 'manage.example.test',
         selections: [{ ...unit.selection, version: 1 as const }],
-        headers: { 'content-type': 'application/json', 'cf-access-jwt-assertion': 'fixture-jwt' },
+        headers: { 'content-type': 'application/json', cookie: 'CF_Authorization=fixture-jwt' },
         fetch: fakeFetch,
       })
       expect(applied.results[0].ok).toBe(true)
