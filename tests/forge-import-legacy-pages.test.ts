@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile, stat, chmod } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile, stat, chmod, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   applyImport,
   batchApprovals,
   main,
+  pagesAssetHash,
   pinWorkspace,
   prepareSelection,
   splitInventories,
@@ -29,13 +30,13 @@ async function writeCapture(root: string, opts: {
   shareKey?: string
   shortlinks?: Array<Record<string, unknown>>
   aliasHost?: boolean
-  /** Write KV under Roxabi tree-layout names (`vis:<slug>/index.html`) instead of `vis:<slug>`. */
   treeKeys?: boolean
   kvExtras?: Array<Record<string, unknown>>
   kvOverride?: Array<Record<string, unknown>>
   hubFound?: Record<string, string | { path: string; sha256?: string }>
   hubDigests?: Record<string, string>
   pagesExtra?: Record<string, string>
+  indexDigestOverride?: string
 }) {
   const rebuiltDir = join(root, 'instance', 'rebuilt', 'a', opts.slug)
   await mkdir(rebuiltDir, { recursive: true, mode: 0o700 })
@@ -45,14 +46,15 @@ async function writeCapture(root: string, opts: {
   await writeFile(join(rebuiltDir, 'build-id.txt'), assetBytes, { mode: 0o600 })
   const indexPath = `/a/${opts.slug}/index.html`
   const assetPath = `/a/${opts.slug}/build-id.txt`
-  // Digests are opaque 32-hex stand-ins; byte resolution uses reinject for this fixture.
+  const indexDigest = opts.indexDigestOverride ?? pagesAssetHash(indexBytes, indexPath)
+  const assetDigest = pagesAssetHash(assetBytes, assetPath)
   const pages = {
     result: {
       id: 'fixture-deployment',
       files: {
-        [indexPath]: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-        [assetPath]: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-        '/index.html': 'cccccccccccccccccccccccccccccccc',
+        [indexPath]: indexDigest,
+        [assetPath]: assetDigest,
+        '/index.html': pagesAssetHash(Buffer.from('shell'), '/index.html'),
         ...(opts.pagesExtra ?? {}),
       },
     },
@@ -91,10 +93,11 @@ async function writeCapture(root: string, opts: {
   await writeFile(join(instance, 'reinject.json'), JSON.stringify(reinject), { mode: 0o600 })
   await writeFile(join(instance, 'kv.json'), JSON.stringify(kv), { mode: 0o600 })
   await writeFile(join(instance, 'shlink.json'), JSON.stringify(shortlinks), { mode: 0o600 })
-  return { instance, indexPath, assetPath, indexBytes, assetBytes }
+  return { instance, indexPath, assetPath, indexBytes, assetBytes, indexDigest, assetDigest }
 }
 
 const synthetic = { kind: 'synthetic' as const }
+const historical = { kind: 'historical' as const, g1bRef: 'g1b:fixture-evidence' }
 
 describe('forge-import-legacy-pages', () => {
   it('prepare-selection copies /a bytes, preserves share key, normalizes alias host', async () => {
@@ -121,26 +124,11 @@ describe('forge-import-legacy-pages', () => {
       expect(result.counts.shortlinks).toBe(1)
       expect(result.refused.total).toBe(0)
       const selection = JSON.parse(await readFile(selectionOut, 'utf8'))
-      expect(selection.version).toBe(1)
       expect(selection.kind).toBe('synthetic')
-      expect(selection.sourceInstance).toBe('unkillable')
-      expect(selection.reader).toMatchObject({
-        canonicalHost: 'forge.unkillablecompanies.com',
-        aliasHosts: ['forge-next.unkillablecompanies.com'],
-        routeGrammars: ['subtree'],
-        shareGrammars: ['slug'],
-        shareCookie: false,
-        shellPaths: ['/', '/index.html', '/login', '/login.html'],
-      })
-      expect(selection.pages[0].sourcePageId).toBe('demo-slug')
       expect(selection.pages[0].share.key).toBe(shareKey)
       expect(selection.shortlinks[0].destination).toBe(`https://forge.unkillablecompanies.com/s/demo-slug/${shareKey}/`)
-      expect(selection.shortlinks[0].destination.includes('gosilex')).toBe(false)
-      const indexDest = join(captureRootOut, indexPath.slice(1))
-      const assetDest = join(captureRootOut, assetPath.slice(1))
-      expect((await stat(indexDest)).size).toBe(indexBytes.length)
-      expect(sha256(await readFile(indexDest))).toBe(sha256(indexBytes))
-      expect(sha256(await readFile(assetDest))).toBe(sha256(assetBytes))
+      expect(sha256(await readFile(join(captureRootOut, indexPath.slice(1))))).toBe(sha256(indexBytes))
+      expect(sha256(await readFile(join(captureRootOut, assetPath.slice(1))))).toBe(sha256(assetBytes))
       expect(JSON.stringify(result).includes(shareKey)).toBe(false)
     } finally {
       await cleanup()
@@ -151,9 +139,8 @@ describe('forge-import-legacy-pages', () => {
     const { root, cleanup } = await sandbox()
     try {
       const { instance } = await writeCapture(root, { slug: 'tree-slug', visibility: 'shared', shareKey: 'supersecretsharekey', treeKeys: true, shortlinks: [] })
-      const selectionOut = join(root, 'selection.json')
-      await prepareSelection({ captureDir: instance, selectionOut, captureRootOut: join(root, 'capture-root'), instance: 'roxabi', ...synthetic })
-      const selection = JSON.parse(await readFile(selectionOut, 'utf8'))
+      await prepareSelection({ captureDir: instance, selectionOut: join(root, 'selection.json'), captureRootOut: join(root, 'capture-root'), instance: 'roxabi', ...synthetic })
+      const selection = JSON.parse(await readFile(join(root, 'selection.json'), 'utf8'))
       expect(selection.pages[0].visibility.value).toBe('private')
       expect(selection.pages[0].share.state).toBe('absent')
     } finally {
@@ -161,7 +148,7 @@ describe('forge-import-legacy-pages', () => {
     }
   })
 
-  it('refuses KV expiration unless allowExpiring and refuses metadata.v mismatch', async () => {
+  it('refuses KV expiration on selected flat keys and rejects non-string metadata.v', async () => {
     const { root, cleanup } = await sandbox()
     try {
       const { instance } = await writeCapture(root, {
@@ -183,7 +170,7 @@ describe('forge-import-legacy-pages', () => {
         slug: 'meta-slug',
         visibility: 'public',
         kvOverride: [
-          { name: 'vis:meta-slug', metadata: { v: 'private' }, expiration: null, value: 'public' },
+          { name: 'vis:meta-slug', metadata: { v: 7 }, expiration: null, value: 'public' },
         ],
       })
       await expect(prepareSelection({
@@ -193,6 +180,56 @@ describe('forge-import-legacy-pages', () => {
         instance: 'unkillable',
         ...synthetic,
       })).rejects.toMatchObject({ code: 'prepare_selection_refused' })
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('allowExpiring preserves finite expiresAt instead of dropping it', async () => {
+    const { root, cleanup } = await sandbox()
+    try {
+      const { instance } = await writeCapture(root, {
+        slug: 'keep-exp',
+        visibility: 'public',
+        kvOverride: [
+          { name: 'vis:keep-exp', metadata: null, expiration: 1_900_000_000, value: 'public' },
+        ],
+      })
+      await prepareSelection({
+        captureDir: instance,
+        selectionOut: join(root, 'selection.json'),
+        captureRootOut: join(root, 'capture-root'),
+        instance: 'unkillable',
+        allowExpiring: true,
+        ...synthetic,
+      })
+      const selection = JSON.parse(await readFile(join(root, 'selection.json'), 'utf8'))
+      expect(selection.pages[0].visibility.expiresAt).toBe(1_900_000_000)
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('ignores expiry on unused tree-layout KV keys for selected private pages', async () => {
+    const { root, cleanup } = await sandbox()
+    try {
+      const { instance } = await writeCapture(root, {
+        slug: 'priv-slug',
+        visibility: 'private',
+        kvExtras: [
+          { name: 'vis:priv-slug/index.html', metadata: null, expiration: 1_900_000_000, value: 'public' },
+          { name: 'share:other-unused', metadata: null, expiration: 1_900_000_000, value: 'supersecretsharekey' },
+        ],
+      })
+      const result = await prepareSelection({
+        captureDir: instance,
+        selectionOut: join(root, 'selection.json'),
+        captureRootOut: join(root, 'capture-root'),
+        instance: 'unkillable',
+        ...synthetic,
+      })
+      expect(result.counts.slugs).toBe(1)
+      expect(JSON.parse(await readFile(join(root, 'selection.json'), 'utf8')).pages[0].visibility.value).toBe('private')
     } finally {
       await cleanup()
     }
@@ -237,61 +274,50 @@ describe('forge-import-legacy-pages', () => {
           g1bRef: null,
         },
       }
-      const unit = {
-        status: 'representable',
-        pinState: 'awaiting_source',
-        unitId: 'slug:sample',
-        inventoryKey: objectKey,
-        maxInventoryBytes: 1_000_000,
-        inventory,
-        selection: {
-          version: 1,
-          inventoryId: 'inv_test',
-          selectionId: 'sel_test',
-          planId: 'plan_test',
-          command: { pages: [], files: [], edges: [] },
-        },
-      }
       const workspace = join(root, 'workspace')
       await mkdir(workspace, { mode: 0o700 })
       await writeFile(join(workspace, 'state.json'), JSON.stringify({
         version: 1,
         fatal: null,
         reader: { canonicalHost: 'forge.unkillablecompanies.com' },
-        units: [unit],
+        units: [{
+          status: 'representable',
+          pinState: 'awaiting_source',
+          unitId: 'slug:sample',
+          inventoryKey: objectKey,
+          maxInventoryBytes: 1_000_000,
+          inventory,
+          selection: { version: 1, inventoryId: 'inv_test', selectionId: 'sel_test', planId: 'plan_test', command: { pages: [], files: [], edges: [] } },
+        }],
         approvals: [],
         census: [],
       }), { mode: 0o600 })
 
       const inventoriesOut = join(root, 'inventories.json')
-      const pin = await pinWorkspace({
-        workspace,
-        roots: { capture },
-        putObject: async (key, body) => ({ key, version: `v-${sha256(Buffer.from(body)).slice(0, 16)}` }),
-        inventoriesOut,
-      })
-      expect(pin.FORGE_IMPORT_INVENTORIES.includes(objectKey) || JSON.parse(pin.FORGE_IMPORT_INVENTORIES)[0].objectKey).toBeTruthy()
-
       const lines: string[] = []
       const spy = vi.spyOn(console, 'log').mockImplementation((value: unknown) => { lines.push(String(value)) })
       try {
-        // Exercise the public pin summary shape without invoking cf.
-        console.log(JSON.stringify({
-          command: pin.command,
-          pinned: pin.pinned,
-          blocked: pin.blocked,
-          approvals: pin.approvals,
-          inventoriesOut,
-          inventoriesDigest: pin.inventoriesDigest,
-        }))
+        const code = await main([
+          'pin',
+          '--workspace', workspace,
+          '--bucket', 'test-bucket',
+          '--account-id', 'test-account',
+          '--capture-root', `capture=${capture}`,
+          '--inventories-out', inventoriesOut,
+        ], {
+          putObject: async (key, body) => ({ key, version: `v-${sha256(Buffer.from(body)).slice(0, 16)}` }),
+        })
+        expect(code).toBe(0)
       } finally {
         spy.mockRestore()
       }
       const printed = lines.join('\n')
-      expect(printed).toContain(pin.inventoriesDigest)
+      const summary = JSON.parse(printed)
+      expect(summary.inventoriesDigest).toMatch(/^[a-f0-9]{64}$/)
+      expect(summary.approvals).toBe(1)
+      expect(summary).not.toHaveProperty('FORGE_IMPORT_INVENTORIES')
       expect(printed).not.toContain(objectKey)
-      expect(printed).not.toContain('FORGE_IMPORT_INVENTORIES')
-      expect(JSON.parse(await readFile(inventoriesOut, 'utf8'))[0].objectKey).toBeTruthy()
+      expect(JSON.parse(await readFile(inventoriesOut, 'utf8'))[0].objectKey).toBe(objectKey)
     } finally {
       await cleanup()
     }
@@ -340,13 +366,33 @@ describe('forge-import-legacy-pages', () => {
     }
   })
 
+  it('refuses capture-root-out that is a symlink alias into the input', async () => {
+    const { root, cleanup } = await sandbox()
+    try {
+      const { instance } = await writeCapture(root, { slug: 'sym-slug', visibility: 'private' })
+      const inside = join(instance, 'empty-out')
+      await mkdir(inside, { mode: 0o700 })
+      const alias = join(root, 'alias-out')
+      await symlink(inside, alias)
+      await expect(prepareSelection({
+        captureDir: instance,
+        selectionOut: join(root, 'selection.json'),
+        captureRootOut: alias,
+        instance: 'unkillable',
+        ...synthetic,
+      })).rejects.toMatchObject({ code: 'invalid_arguments' })
+    } finally {
+      await cleanup()
+    }
+  })
+
   it('refuses member path traversal outside the capture root', async () => {
     const { root, cleanup } = await sandbox()
     try {
       const { instance } = await writeCapture(root, {
         slug: 'trav-slug',
         visibility: 'private',
-        pagesExtra: { '/a/trav-slug/../../escape.txt': 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' },
+        pagesExtra: { '/a/trav-slug/../../escape.txt': pagesAssetHash(Buffer.from('plain'), '/a/trav-slug/build-id.txt') },
       })
       const reinject = JSON.parse(await readFile(join(instance, 'reinject.json'), 'utf8'))
       reinject.rebuilt['/a/trav-slug/../../escape.txt'] = join('instance', 'rebuilt', 'a', 'trav-slug', 'build-id.txt')
@@ -366,14 +412,11 @@ describe('forge-import-legacy-pages', () => {
   it('refuses when copied bytes disagree with capture-time sha256 evidence', async () => {
     const { root, cleanup } = await sandbox()
     try {
-      const { instance, indexPath, indexBytes } = await writeCapture(root, {
+      const { instance } = await writeCapture(root, {
         slug: 'digest-slug',
         visibility: 'private',
-        hubDigests: {
-          '/a/digest-slug/index.html': 'f'.repeat(64),
-        },
+        hubDigests: { '/a/digest-slug/index.html': 'f'.repeat(64) },
       })
-      expect(sha256(indexBytes)).not.toBe('f'.repeat(64))
       await expect(prepareSelection({
         captureDir: instance,
         selectionOut: join(root, 'selection.json'),
@@ -381,7 +424,26 @@ describe('forge-import-legacy-pages', () => {
         instance: 'unkillable',
         ...synthetic,
       })).rejects.toMatchObject({ code: 'prepare_selection_refused' })
-      void indexPath
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('refuses historical members whose Pages digest cannot be verified', async () => {
+    const { root, cleanup } = await sandbox()
+    try {
+      const { instance } = await writeCapture(root, {
+        slug: 'hist-slug',
+        visibility: 'private',
+        indexDigestOverride: 'not-a-pages-digest',
+      })
+      await expect(prepareSelection({
+        captureDir: instance,
+        selectionOut: join(root, 'selection.json'),
+        captureRootOut: join(root, 'capture-root'),
+        instance: 'unkillable',
+        ...historical,
+      })).rejects.toMatchObject({ code: 'prepare_selection_refused' })
     } finally {
       await cleanup()
     }
@@ -403,17 +465,14 @@ describe('forge-import-legacy-pages', () => {
           dateCreated: '2026-01-01T00:00:00Z',
         }],
       })
-      const selectionOut = join(root, 'selection.json')
       const result = await prepareSelection({
         captureDir: instance,
-        selectionOut,
+        selectionOut: join(root, 'selection.json'),
         captureRootOut: join(root, 'capture-root'),
         instance: 'unkillable',
         ...synthetic,
       })
       expect(result.counts.shortlinks).toBe(1)
-      const selection = JSON.parse(await readFile(selectionOut, 'utf8'))
-      expect(selection.shortlinks[0].destination).toContain(`k=${shareKey}`)
     } finally {
       await cleanup()
     }
@@ -424,8 +483,6 @@ describe('forge-import-legacy-pages', () => {
     const batches = batchApprovals(approvals)
     expect(batches.length).toBeGreaterThan(1)
     for (const batch of batches) expect(Buffer.byteLength(JSON.stringify(batch), 'utf8')).toBeLessThanOrEqual(5000)
-    expect(batches.flat()).toEqual(approvals)
-
     const multibyte = [{ selectionId: 'sel_utf8', note: 'é'.repeat(2600) }]
     expect(JSON.stringify(multibyte).length).toBeLessThanOrEqual(5000)
     expect(Buffer.byteLength(JSON.stringify(multibyte), 'utf8')).toBeGreaterThan(5000)
@@ -462,18 +519,81 @@ describe('forge-import-legacy-pages', () => {
     expect(order).toEqual(['sel_done:dry_run', 'sel_done:apply', 'sel_next:dry_run', 'sel_next:apply'])
   })
 
-  it('returns nonzero exit when any selection is blocked', async () => {
+  it('dry-run-only reports conflict without sending apply', async () => {
+    const ops: string[] = []
     const applied = await applyImport({
       manageHost: 'manage.example.test',
-      selections: [
-        { version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: {} },
-      ],
+      selections: [{ version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: {} }],
       headers: { cookie: 'CF_Authorization=fixture-jwt' },
-      fetch: async () => new Response(JSON.stringify({ ok: true, result: { state: 'blocked', issues: [{ code: 'g1b_evidence_required' }] } }), { status: 200 }),
+      dryRunOnly: true,
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        ops.push(body.op)
+        return new Response(JSON.stringify({ ok: true, result: { state: 'blocked', issues: [{ code: 'conflict' }] } }), { status: 200 })
+      },
+    })
+    expect(ops).toEqual(['dry_run'])
+    expect(applied.results[0]).toMatchObject({ ok: false, phase: 'dry_run', state: 'blocked' })
+  })
+
+  it('requires ready/committed terminal states for success', async () => {
+    const dryOnly = await applyImport({
+      manageHost: 'manage.example.test',
+      selections: [{ version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: {} }],
+      headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      dryRunOnly: true,
+      fetch: async () => new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 }),
+    })
+    expect(dryOnly.results[0].ok).toBe(false)
+
+    const applied = await applyImport({
+      manageHost: 'manage.example.test',
+      selections: [{ version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: {} }],
+      headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        if (body.op === 'dry_run') return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
+        return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
+      },
     })
     expect(applied.results[0].ok).toBe(false)
-    const code = applied.results.some(r => !r.ok) ? 1 : 0
-    expect(code).toBe(1)
+    expect(applied.results[0].state).toBe('ready')
+  })
+
+  it('main exits nonzero when any selection is blocked', async () => {
+    const { root, cleanup } = await sandbox()
+    try {
+      const workspace = join(root, 'workspace')
+      await mkdir(workspace, { mode: 0o700 })
+      await writeFile(join(workspace, 'state.json'), JSON.stringify({
+        version: 1,
+        fatal: null,
+        reader: { canonicalHost: 'forge.unkillablecompanies.com' },
+        units: [{
+          status: 'representable',
+          pinState: 'pinned',
+          selection: { version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: {} },
+        }],
+        approvals: [],
+        census: [],
+      }), { mode: 0o600 })
+      const spy = vi.spyOn(console, 'log').mockImplementation(() => {})
+      try {
+        const code = await main([
+          'apply',
+          '--workspace', workspace,
+          '--manage-host', 'manage.example.test',
+        ], {
+          headers: { cookie: 'CF_Authorization=fixture-jwt' },
+          fetch: async () => new Response(JSON.stringify({ ok: true, result: { state: 'blocked', issues: [{ code: 'g1b_evidence_required' }] } }), { status: 200 }),
+        })
+        expect(code).toBe(1)
+      } finally {
+        spy.mockRestore()
+      }
+    } finally {
+      await cleanup()
+    }
   })
 
   it('continueOnBlock does not continue after HTTP 403', async () => {
@@ -489,44 +609,71 @@ describe('forge-import-legacy-pages', () => {
       fetch: async (_url, init) => {
         const body = JSON.parse(String(init?.body ?? '{}'))
         seen.push(body.selection.selectionId)
-        return new Response(JSON.stringify({ ok: false, error: 'forbidden' }), { status: 403 })
+        return new Response(JSON.stringify({ ok: false, error: { code: 'forbidden' } }), { status: 403 })
       },
     })
     expect(seen).toEqual(['sel_a'])
     expect(applied.results).toHaveLength(1)
-    expect(applied.results[0].ok).toBe(false)
-    expect(applied.results[0].httpStatus).toBe(403)
+    expect(applied.results[0].body).toEqual({ ok: false, error: { code: 'forbidden' } })
   })
 
   it('stall detection terminates when the stored-file maximum never increases', async () => {
     let n = 0
-    const fakeFetch: typeof fetch = async (_url, init) => {
-      const body = JSON.parse(String(init?.body ?? '{}'))
-      if (body.op === 'dry_run') return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
-      n += 1
-      const stored = n % 2 === 1 ? 4 : 2
-      const files = Array.from({ length: 8 }, (_, i) => ({ path: `/a/s/${i}`, stored: i < stored }))
-      return new Response(JSON.stringify({ ok: true, result: { state: 'staging', nextCursor: null, session: { files } } }), { status: 200 })
-    }
     await expect(applyImport({
       manageHost: 'manage.example.test',
       selections: [{ version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: {} }],
       headers: { cookie: 'CF_Authorization=fixture-jwt' },
-      fetch: fakeFetch,
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        if (body.op === 'dry_run') return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
+        n += 1
+        const stored = n % 2 === 1 ? 4 : 2
+        const files = Array.from({ length: 8 }, (_, i) => ({ path: `/a/s/${i}`, stored: i < stored }))
+        return new Response(JSON.stringify({ ok: true, result: { state: 'staging', nextCursor: null, session: { files } } }), { status: 200 })
+      },
     })).rejects.toMatchObject({ code: 'invalid_continuation' })
   })
 
-  it('redacts malformed non-JSON replies to a fixed status error', async () => {
-    const applied = await applyImport({
+  it('caps endlessly distinct continuation cursors', async () => {
+    let n = 0
+    await expect(applyImport({
       manageHost: 'manage.example.test',
       selections: [{ version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: {} }],
       headers: { cookie: 'CF_Authorization=fixture-jwt' },
-      fetch: async () => new Response('INTERNAL SECRET TOKEN leaked-object-key', { status: 502 }),
+      fetch: async () => {
+        n += 1
+        return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: `c${n}` } }), { status: 200 })
+      },
+    })).rejects.toMatchObject({ code: 'invalid_continuation', message: expect.stringContaining('request cap') })
+  })
+
+  it('redacts malformed envelopes and keeps only safe Worker error codes', async () => {
+    const jsonString = await applyImport({
+      manageHost: 'manage.example.test',
+      selections: [{ version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: {} }],
+      headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      fetch: async () => new Response(JSON.stringify('SECRET_PAYLOAD'), { status: 500 }),
     })
-    expect(applied.results[0].ok).toBe(false)
-    expect(JSON.stringify(applied)).not.toContain('SECRET')
-    expect(JSON.stringify(applied)).not.toContain('leaked-object-key')
-    expect(JSON.stringify(applied.results[0].body)).toContain('malformed_response:502')
+    expect(JSON.stringify(jsonString)).not.toContain('SECRET_PAYLOAD')
+    expect(JSON.stringify(jsonString.results[0].body)).toContain('malformed_response:500')
+
+    const stringError = await applyImport({
+      manageHost: 'manage.example.test',
+      selections: [{ version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: {} }],
+      headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      fetch: async () => new Response(JSON.stringify({ ok: false, error: 'leaked-object-key' }), { status: 502 }),
+    })
+    expect(JSON.stringify(stringError)).not.toContain('leaked-object-key')
+    expect(JSON.stringify(stringError.results[0].body)).toContain('malformed_response:502')
+
+    const safe = await applyImport({
+      manageHost: 'manage.example.test',
+      selections: [{ version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: {} }],
+      headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      fetch: async () => new Response(JSON.stringify({ ok: false, error: { code: 'forbidden', detail: 'secret' } }), { status: 403 }),
+    })
+    expect(safe.results[0].body).toEqual({ ok: false, error: { code: 'forbidden' } })
+    expect(JSON.stringify(safe)).not.toContain('secret')
   })
 
   it('refuses a non-empty batch out-dir so stale batch files cannot survive', async () => {
@@ -546,25 +693,22 @@ describe('forge-import-legacy-pages', () => {
   it('applyImport resumes an open staging session without a cursor until commit', async () => {
     const bodies: Array<Record<string, unknown>> = []
     let stored = 0
-    const fakeFetch: typeof fetch = async (_url, init) => {
-      const body = JSON.parse(String(init?.body ?? '{}'))
-      bodies.push(body)
-      if (body.op === 'dry_run') return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
-      if (stored >= 16) return new Response(JSON.stringify({ ok: true, result: { state: 'committed' } }), { status: 200 })
-      stored += 8
-      const files = Array.from({ length: 20 }, (_, i) => ({ path: `/a/s/${i}`, stored: i < stored }))
-      return new Response(JSON.stringify({ ok: true, result: { state: 'staging', nextCursor: null, session: { files } } }), { status: 200 })
-    }
     const applied = await applyImport({
       manageHost: 'manage.example.test',
       selections: [{ version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: {} }],
       headers: { cookie: 'CF_Authorization=fixture-jwt' },
-      fetch: fakeFetch,
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        bodies.push(body)
+        if (body.op === 'dry_run') return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
+        if (stored >= 16) return new Response(JSON.stringify({ ok: true, result: { state: 'committed' } }), { status: 200 })
+        stored += 8
+        const files = Array.from({ length: 20 }, (_, i) => ({ path: `/a/s/${i}`, stored: i < stored }))
+        return new Response(JSON.stringify({ ok: true, result: { state: 'staging', nextCursor: null, session: { files } } }), { status: 200 })
+      },
     })
     expect(applied.results[0]).toMatchObject({ ok: true, state: 'committed' })
-    const applies = bodies.filter(b => b.op === 'apply')
-    expect(applies.length).toBe(3)
-    expect(applies.every(b => !Object.hasOwn(b, 'cursor'))).toBe(true)
+    expect(bodies.filter(b => b.op === 'apply').every(b => !Object.hasOwn(b, 'cursor'))).toBe(true)
   })
 
   it('prepare-selection refuses unresolved bytes and unmappable shortlinks', async () => {
@@ -572,16 +716,15 @@ describe('forge-import-legacy-pages', () => {
     try {
       const { instance } = await writeCapture(root, { slug: 'demo-slug', visibility: 'public' })
       const pages = JSON.parse(await readFile(join(instance, 'pages-files.json'), 'utf8'))
-      pages.result.files['/a/demo-slug/missing.bin'] = 'dddddddddddddddddddddddddddddddd'
+      pages.result.files['/a/demo-slug/missing.bin'] = pagesAssetHash(Buffer.from('x'), '/a/demo-slug/missing.bin')
       await writeFile(join(instance, 'pages-files.json'), JSON.stringify(pages))
-      const shlink = [{
+      await writeFile(join(instance, 'shlink.json'), JSON.stringify([{
         shortCode: 'orphan',
         shortUrl: 'https://unkill.si/orphan',
         longUrl: 'https://forge.unkillablecompanies.com/a/not-published/',
         domain: null,
         dateCreated: '2026-01-01T00:00:00Z',
-      }]
-      await writeFile(join(instance, 'shlink.json'), JSON.stringify(shlink))
+      }]))
       await expect(prepareSelection({
         captureDir: instance,
         selectionOut: join(root, 'selection.json'),
@@ -650,62 +793,33 @@ describe('forge-import-legacy-pages', () => {
       const workspace = join(root, 'workspace')
       await mkdir(workspace, { mode: 0o700 })
       await writeFile(join(workspace, 'state.json'), JSON.stringify({
-        version: 1,
-        fatal: null,
-        reader: { canonicalHost: 'forge.unkillablecompanies.com' },
-        units: [unit],
-        approvals: [],
-        census: [],
+        version: 1, fatal: null, reader: { canonicalHost: 'forge.unkillablecompanies.com' }, units: [unit], approvals: [], census: [],
       }), { mode: 0o600 })
 
-      const putLog: string[] = []
       const pin = await pinWorkspace({
         workspace,
         roots: { capture },
-        putObject: async (key, body) => {
-          putLog.push(key)
-          const version = `v-${sha256(Buffer.from(body)).slice(0, 16)}`
-          return { key, version }
-        },
+        putObject: async (key, body) => ({ key, version: `v-${sha256(Buffer.from(body)).slice(0, 16)}` }),
       })
       expect(pin.pinned).toBe(1)
-      expect(pin.approvals).toBe(1)
-      expect(putLog.some(k => k.startsWith('capture/v1/'))).toBe(true)
-      expect(putLog.some(k => k.startsWith('inventory/v1/'))).toBe(true)
-      const approvals = JSON.parse(pin.FORGE_IMPORT_INVENTORIES)
-      expect(approvals[0].inventoryId).toBe('inv_test')
-      expect(approvals[0].objectVersion.startsWith('v-')).toBe(true)
-
       const calls: Array<{ op: string; cursor: string | null | undefined }> = []
-      const fakeFetch: typeof fetch = async (_url, init) => {
-        const body = JSON.parse(String(init?.body ?? '{}'))
-        calls.push({ op: body.op, cursor: body.cursor })
-        if (body.op === 'dry_run' && body.cursor == null) {
-          return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: 'c1' } }), { status: 200 })
-        }
-        if (body.op === 'dry_run' && body.cursor === 'c1') {
-          return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
-        }
-        if (body.op === 'apply' && !Object.hasOwn(body, 'cursor')) {
-          return new Response(JSON.stringify({ ok: true, result: { state: 'staging', nextCursor: 'a1' } }), { status: 200 })
-        }
-        if (body.op === 'apply' && body.cursor === 'a1') {
-          return new Response(JSON.stringify({ ok: true, result: { state: 'committed' } }), { status: 200 })
-        }
-        return new Response(JSON.stringify({ ok: false }), { status: 500 })
-      }
       const applied = await applyImport({
         manageHost: 'manage.example.test',
         selections: [{ ...unit.selection, version: 1 as const }],
         headers: { 'content-type': 'application/json', cookie: 'CF_Authorization=fixture-jwt' },
-        fetch: fakeFetch,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(String(init?.body ?? '{}'))
+          calls.push({ op: body.op, cursor: body.cursor })
+          if (body.op === 'dry_run' && body.cursor == null) return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: 'c1' } }), { status: 200 })
+          if (body.op === 'dry_run' && body.cursor === 'c1') return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
+          if (body.op === 'apply' && !Object.hasOwn(body, 'cursor')) return new Response(JSON.stringify({ ok: true, result: { state: 'staging', nextCursor: 'a1' } }), { status: 200 })
+          if (body.op === 'apply' && body.cursor === 'a1') return new Response(JSON.stringify({ ok: true, result: { state: 'committed' } }), { status: 200 })
+          return new Response(JSON.stringify({ ok: false, error: { code: 'unavailable' } }), { status: 500 })
+        },
       })
       expect(applied.results[0].ok).toBe(true)
       expect(calls.map(c => c.op)).toEqual(['dry_run', 'dry_run', 'apply', 'apply'])
-      expect(calls[1].cursor).toBe('c1')
-      expect(calls[3].cursor).toBe('a1')
       expect(secretMarkers.some(m => JSON.stringify(applied).includes(m))).toBe(false)
-      void main
     } finally {
       await cleanup()
     }

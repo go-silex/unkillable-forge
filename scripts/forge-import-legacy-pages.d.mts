@@ -1,3 +1,5 @@
+export function pagesAssetHash(bytes: Buffer | Uint8Array | string, publishedPath: string): string
+
 export function prepareSelection(options: {
   captureDir: string
   selectionOut: string
@@ -57,4 +59,11 @@ export function batchApprovals<T>(approvals: T[], maxBytes?: number): T[][]
 
 export function splitInventories(inventoriesPath: string, outDir: string): Promise<{ command: 'split-inventories'; batches: Array<{ file: string; approvals: number }> }>
 
-export function main(argv?: string[]): Promise<number>
+export function main(
+  argv?: string[],
+  deps?: {
+    putObject?: (key: string, bytes: Uint8Array | Buffer) => Promise<{ key?: string; version: string }>
+    fetch?: typeof fetch
+    headers?: Record<string, string>
+  },
+): Promise<number>

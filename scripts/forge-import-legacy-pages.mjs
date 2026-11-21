@@ -1,12 +1,13 @@
 // Capture → selection v1 + capture-root layout; production pin/apply drivers.
 // Does not modify engine domain code. Never prints share keys or Shlink secrets.
 import { createHash, randomBytes } from 'node:crypto'
-import { copyFile, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join, relative as pathRelative, resolve, sep } from 'node:path'
+import { dirname, extname, isAbsolute, join, relative as pathRelative, resolve, sep } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
+import blake3 from 'blake3-wasm'
 
 const fail = (code, detail) => {
   const err = new Error(detail ? `${code}: ${detail}` : code)
@@ -130,6 +131,21 @@ const DEFAULT_LIMITS = {
 const SHARE_KEY = /^[A-Za-z0-9_-]{8,128}$/
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const SHA256_RE = /^[a-f0-9]{64}$/
+const PAGES_DIGEST_RE = /^[a-f0-9]{32}$/
+const MAX_CONTINUATION_REQUESTS = 256
+// Worker public error codes (adapters/http/manage-edge.ts PublicErrorCode).
+const SAFE_ERROR_CODES = new Set([
+  'invalid_request', 'payload_too_large', 'request_timeout', 'unsupported_media_type',
+  'unauthenticated', 'forbidden', 'not_found', 'method_not_allowed', 'conflict', 'last_admin',
+  'upload_incomplete', 'not_sealed', 'session_closed', 'session_expired',
+  'invalid_state', 'integrity_error', 'internal_error', 'configuration_error', 'unavailable',
+])
+
+/** Pages Direct Upload asset hash: BLAKE3(base64(bytes) + extWithoutDot).hex[:32]. */
+export function pagesAssetHash(bytes, publishedPath) {
+  const ext = extname(publishedPath).replace(/^\./, '')
+  return blake3.hash(Buffer.from(bytes).toString('base64') + ext).toString('hex').slice(0, 32)
+}
 
 function contentTypeFor(path) {
   const i = path.lastIndexOf('.')
@@ -150,34 +166,35 @@ function pagesFilesMap(raw) {
   fail('invalid_capture', 'pages-files.json missing result.files')
 }
 
-function metadataVOf(item) {
+function readMetadataV(item) {
   const meta = item?.metadata
-  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return null
-  return typeof meta.v === 'string' ? meta.v : null
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return { ok: true, value: null }
+  if (!Object.prototype.hasOwnProperty.call(meta, 'v')) return { ok: true, value: null }
+  if (typeof meta.v !== 'string') return { ok: false, reason: 'invalid_metadata_v' }
+  return { ok: true, value: meta.v }
 }
 
-function loadKvMaps(entries, { allowExpiring = false } = {}) {
+function loadKvMaps(entries) {
   if (!Array.isArray(entries)) fail('invalid_capture', 'kv.json must be an array')
   const vis = new Map()
   const share = new Map()
   for (const item of entries) {
     if (!item || typeof item.name !== 'string') continue
-    const hasExpiration = item.expiration != null
-    if ((item.name.startsWith('vis:') || item.name.startsWith('share:')) && hasExpiration && !allowExpiring) {
-      fail('expiring_policy_unsupported', item.name)
-    }
+    const expiresAt = typeof item.expiration === 'number' ? item.expiration : null
     if (item.name.startsWith('vis:')) {
+      const meta = readMetadataV(item)
       vis.set(item.name.slice(4), {
         value: item.value,
-        metadataV: metadataVOf(item),
-        // Operator flag accepts permanence: strip expiration rather than import it.
-        expiresAt: hasExpiration && allowExpiring ? null : (typeof item.expiration === 'number' ? item.expiration : null),
+        metadataV: meta.ok ? meta.value : null,
+        metadataOk: meta.ok,
+        metadataReason: meta.ok ? null : meta.reason,
+        expiresAt,
         keyName: item.name,
       })
     } else if (item.name.startsWith('share:')) {
       share.set(item.name.slice(6), {
         key: item.value,
-        expiresAt: hasExpiration && allowExpiring ? null : (typeof item.expiration === 'number' ? item.expiration : null),
+        expiresAt,
         keyName: item.name,
       })
     }
@@ -191,17 +208,26 @@ function loadKvMaps(entries, { allowExpiring = false } = {}) {
 function resolveVisibility(vis, slug) {
   if (vis.has(slug)) {
     const hit = vis.get(slug)
-    return { state: 'present', value: hit.value, metadataV: hit.metadataV, expiresAt: hit.expiresAt, key: slug }
+    return {
+      state: 'present',
+      value: hit.value,
+      metadataV: hit.metadataV,
+      metadataOk: hit.metadataOk !== false,
+      metadataReason: hit.metadataReason ?? null,
+      expiresAt: hit.expiresAt,
+      key: slug,
+      keyName: hit.keyName,
+    }
   }
-  return { state: 'absent', value: null, metadataV: null, expiresAt: null, key: null }
+  return { state: 'absent', value: null, metadataV: null, metadataOk: true, metadataReason: null, expiresAt: null, key: null, keyName: null }
 }
 
 function resolveShare(share, slug) {
   if (share.has(slug)) {
     const hit = share.get(slug)
-    return { state: 'present', key: hit.key, expiresAt: hit.expiresAt, mapKey: slug }
+    return { state: 'present', key: hit.key, expiresAt: hit.expiresAt, mapKey: slug, keyName: hit.keyName }
   }
-  return { state: 'absent', key: null, expiresAt: null, mapKey: null }
+  return { state: 'absent', key: null, expiresAt: null, mapKey: null, keyName: null }
 }
 
 function hubEntry(hit) {
@@ -292,17 +318,37 @@ function validateMemberRelative(publishedPath) {
   return { ok: true, relative }
 }
 
+async function realExisting(path) {
+  const abs = resolve(path)
+  try {
+    return await realpath(abs)
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+  let cur = abs
+  for (;;) {
+    const parent = dirname(cur)
+    if (parent === cur) return cur
+    try {
+      return join(await realpath(parent), pathRelative(parent, abs))
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+      cur = parent
+    }
+  }
+}
+
 async function assertFreshCaptureRootOut(captureDir, captureRootOut) {
-  const input = resolve(captureDir)
-  const output = resolve(captureRootOut)
+  const input = await realpath(resolve(captureDir))
+  const output = await realExisting(captureRootOut)
   if (output === input) fail('invalid_arguments', 'capture-root-out must not equal capture')
   if (isInsideRoot(input, output) || isInsideRoot(output, input)) {
     fail('invalid_arguments', 'capture-root-out must not nest with capture')
   }
   try {
-    const st = await stat(output)
+    const st = await stat(resolve(captureRootOut))
     if (!st.isDirectory()) fail('invalid_arguments', 'capture-root-out must be a directory or absent')
-    const entries = await readdir(output)
+    const entries = await readdir(resolve(captureRootOut))
     if (entries.length) fail('invalid_arguments', 'capture-root-out must be empty')
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error
@@ -337,7 +383,8 @@ export async function prepareSelection(options) {
   const hubFound = hubRaw?.found && typeof hubRaw.found === 'object' ? hubRaw.found : fail('invalid_capture', 'hub-match.json.found')
   const hubDigests = hubRaw?.digests && typeof hubRaw.digests === 'object' ? hubRaw.digests : null
   const rebuilt = reinjectRaw?.rebuilt && typeof reinjectRaw.rebuilt === 'object' ? reinjectRaw.rebuilt : fail('invalid_capture', 'reinject.json.rebuilt')
-  const { vis, share } = loadKvMaps(kvRaw, { allowExpiring: options.allowExpiring === true })
+  const allowExpiring = options.allowExpiring === true
+  const { vis, share } = loadKvMaps(kvRaw)
   const shlinks = Array.isArray(shlinkRaw) ? shlinkRaw : fail('invalid_capture', 'shlink.json must be an array')
 
   const refused = []
@@ -377,6 +424,11 @@ export async function prepareSelection(options) {
     const visHit = resolveVisibility(vis, slug)
     let visibilityValue = 'private'
     if (visHit.state === 'present') {
+      if (visHit.expiresAt != null && !allowExpiring) fail('expiring_policy_unsupported', visHit.keyName)
+      if (!visHit.metadataOk) {
+        refused.push({ kind: 'visibility', slug, reason: visHit.metadataReason ?? 'invalid_metadata_v' })
+        continue
+      }
       if (!['private', 'public', 'shared'].includes(visHit.value)) {
         refused.push({ kind: 'visibility', slug, reason: 'unknown_visibility_value', valueType: typeof visHit.value })
         continue
@@ -394,6 +446,7 @@ export async function prepareSelection(options) {
         refused.push({ kind: 'share', slug, reason: 'share_key_absent' })
         continue
       }
+      if (shareHit.expiresAt != null && !allowExpiring) fail('expiring_policy_unsupported', shareHit.keyName)
       if (!SHARE_KEY.test(shareHit.key)) {
         refused.push({ kind: 'share', slug, reason: 'invalid_share_key', length: shareHit.key.length })
         continue
@@ -445,9 +498,22 @@ export async function prepareSelection(options) {
       }
       await mkdir(dirname(dest), { recursive: true, mode: 0o700 })
       await copyFile(source.path, dest)
-      const digest = await sha256File(dest)
-      if (source.expectedSha256 && digest !== source.expectedSha256) {
-        refused.push({ kind: 'entry', path: member.path, reason: 'digest_mismatch' })
+      const copiedBytes = await readFile(dest)
+      const digest = sha256(copiedBytes)
+      if (source.expectedSha256) {
+        if (digest !== source.expectedSha256) {
+          refused.push({ kind: 'entry', path: member.path, reason: 'digest_mismatch' })
+          artifactFailed = true
+          break
+        }
+      } else if (PAGES_DIGEST_RE.test(member.digest)) {
+        if (pagesAssetHash(copiedBytes, member.path) !== member.digest) {
+          refused.push({ kind: 'entry', path: member.path, reason: 'digest_mismatch' })
+          artifactFailed = true
+          break
+        }
+      } else {
+        refused.push({ kind: 'entry', path: member.path, reason: 'digest_unverified' })
         artifactFailed = true
         break
       }
@@ -797,7 +863,10 @@ export async function applyImport(options) {
     let cursor = null
     let dry
     const seenDry = new Set()
+    let dryRequests = 0
     for (;;) {
+      dryRequests += 1
+      if (dryRequests > MAX_CONTINUATION_REQUESTS) fail('invalid_continuation', 'dry_run request cap')
       dry = await postJson(fetchImpl, endpoint, headers, { op: 'dry_run', selection, cursor })
       const result = dry.body?.result
       if (dry.status === 200 && dry.body?.ok && result?.state === 'checking') {
@@ -813,19 +882,19 @@ export async function applyImport(options) {
       results.push({ selectionId: selection.selectionId, phase: 'dry_run', ok: false, httpStatus: dry.status, state: dryState ?? null, body: publicBody(dry.body) })
       break
     }
-    let skipToApply = false
     if (dryState === 'blocked') {
-      if (isAlreadyCommittedConflict(dry.body)) {
-        // Interrupted-batch reconciliation: route to apply/replay instead of stopping.
-        skipToApply = true
-      } else {
+      const replay = !options.dryRunOnly && isAlreadyCommittedConflict(dry.body)
+      if (!replay) {
         results.push({ selectionId: selection.selectionId, phase: 'dry_run', ok: false, httpStatus: dry.status, state: dryState, body: publicBody(dry.body) })
         if (!options.continueOnBlock) break
         continue
       }
-    }
-    if (!skipToApply && options.dryRunOnly) {
-      results.push({ selectionId: selection.selectionId, phase: 'dry_run', ok: true, httpStatus: dry.status, state: dryState ?? null, body: publicBody(dry.body) })
+      // Apply-mode reconciliation: route conflict to apply/replay without a dry_run failure row.
+    } else if (dryState !== 'ready') {
+      results.push({ selectionId: selection.selectionId, phase: 'dry_run', ok: false, httpStatus: dry.status, state: dryState ?? null, body: publicBody(dry.body) })
+      break
+    } else if (options.dryRunOnly) {
+      results.push({ selectionId: selection.selectionId, phase: 'dry_run', ok: true, httpStatus: dry.status, state: dryState, body: publicBody(dry.body) })
       continue
     }
     cursor = undefined
@@ -833,7 +902,10 @@ export async function applyImport(options) {
     const seenApply = new Set()
     let maxStored = -1
     let stalled = 0
+    let applyRequests = 0
     for (;;) {
+      applyRequests += 1
+      if (applyRequests > MAX_CONTINUATION_REQUESTS) fail('invalid_continuation', 'apply request cap')
       const payload = cursor === undefined ? { op: 'apply', selection } : { op: 'apply', selection, cursor }
       applyRes = await postJson(fetchImpl, endpoint, headers, payload)
       const result = applyRes.body?.result
@@ -859,7 +931,7 @@ export async function applyImport(options) {
       break
     }
     const applyState = applyRes.body?.result?.state
-    const applyOk = applyRes.status < 400 && !!applyRes.body?.ok && applyState !== 'blocked'
+    const applyOk = applyRes.status < 400 && !!applyRes.body?.ok && applyState === 'committed'
     results.push({
       selectionId: selection.selectionId,
       phase: 'apply',
@@ -870,11 +942,27 @@ export async function applyImport(options) {
     })
     if (!applyOk) {
       if (applyRes.status >= 400) break
-      if (applyRes.status < 400 && applyRes.body?.ok !== false && applyState === 'blocked' && options.continueOnBlock) continue
+      if (applyState === 'blocked' && options.continueOnBlock) continue
       break
     }
   }
   return { command: 'apply', manageHost, results }
+}
+
+function malformedBody(status) {
+  return { ok: false, error: `malformed_response:${status}` }
+}
+
+function decodeWorkerEnvelope(parsed, status) {
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return malformedBody(status)
+  if (parsed.ok === false) {
+    const err = parsed.error
+    if (err && typeof err === 'object' && !Array.isArray(err) && typeof err.code === 'string' && SAFE_ERROR_CODES.has(err.code)) {
+      return { ok: false, error: { code: err.code } }
+    }
+    return malformedBody(status)
+  }
+  return publicBody(parsed)
 }
 
 async function postJson(fetchImpl, url, headers, body) {
@@ -887,21 +975,24 @@ async function postJson(fetchImpl, url, headers, body) {
     },
     body: JSON.stringify(body),
   })
-  let parsed = null
   const textBody = await res.text()
+  let parsed
   try {
     parsed = JSON.parse(textBody)
   } catch {
-    parsed = { ok: false, error: `malformed_response:${res.status}` }
+    return { status: res.status, body: malformedBody(res.status) }
   }
-  return { status: res.status, body: parsed }
+  return { status: res.status, body: decodeWorkerEnvelope(parsed, res.status) }
 }
 
 function publicBody(body) {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return body
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return malformedBody(0)
   const out = {}
   if (typeof body.ok === 'boolean') out.ok = body.ok
-  if (typeof body.error === 'string') out.error = body.error
+  if (typeof body.error === 'string' && /^malformed_response:\d+$/.test(body.error)) out.error = body.error
+  else if (body.error && typeof body.error === 'object' && !Array.isArray(body.error) && typeof body.error.code === 'string' && SAFE_ERROR_CODES.has(body.error.code)) {
+    out.error = { code: body.error.code }
+  }
   if (body.result && typeof body.result === 'object' && !Array.isArray(body.result)) {
     const src = body.result
     const result = {}
@@ -985,7 +1076,7 @@ export async function splitInventories(inventoriesPath, outDir) {
   return { command: 'split-inventories', batches: files }
 }
 
-export async function main(argv = process.argv.slice(2)) {
+export async function main(argv = process.argv.slice(2), deps = {}) {
   const { command, flags } = parseArgs(argv)
   if (command === 'prepare-selection') {
     const captureDir = flags['--capture']
@@ -1032,7 +1123,7 @@ export async function main(argv = process.argv.slice(2)) {
     const sepIdx = captureRoot.indexOf('=')
     if (sepIdx <= 0) fail('invalid_arguments', 'capture-root must be alias=/absolute/path')
     roots[captureRoot.slice(0, sepIdx)] = resolve(captureRoot.slice(sepIdx + 1))
-    const putObject = async (key, bytes) => runR2Put({ accountId, bucket, key, bytes })
+    const putObject = deps.putObject ?? (async (key, bytes) => runR2Put({ accountId, bucket, key, bytes }))
     const result = await pinWorkspace({
       workspace: resolve(workspace),
       roots,
@@ -1073,6 +1164,8 @@ export async function main(argv = process.argv.slice(2)) {
       selections,
       dryRunOnly: flags['--dry-run-only'] === 'true',
       continueOnBlock: flags['--continue-on-block'] === 'true',
+      fetch: deps.fetch,
+      headers: deps.headers,
     })
     console.log(JSON.stringify(result))
     if (result.results.some(row => !row.ok)) return 1
