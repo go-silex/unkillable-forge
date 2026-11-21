@@ -1,7 +1,7 @@
 import { parseReadConfig } from '../../domains/catalogue/instance-config'
 import { authenticate, accessJwksSource, type JwksSource } from '../../domains/catalogue/identity'
 import { resolveRead } from '../../domains/catalogue/resolve'
-import { accessLoginLocation, parseRequest } from '../../domains/catalogue/routing/grammar'
+import { accessLoginLocation, normalizeRequestPath, parseRequest } from '../../domains/catalogue/routing/grammar'
 import { listCatalogue } from '../../domains/catalogue/catalogue-list'
 import type { ReadInstanceConfig } from '../../domains/catalogue/instance-config'
 import { RevisionStore } from '../../domains/store/revision-store'
@@ -49,8 +49,10 @@ function redirect(location: string, status: number, cookie?: string, unlisted = 
   if (unlisted) headers.set('x-robots-tag', UNLISTED_ROBOTS_TAG)
   return new Response(null, { status, headers })
 }
-function markUnlistedPath(pathname: string, response: Response, shellPaths: readonly string[]): Response {
-  if (pathname.startsWith('/_revisions/') || shellPaths.includes(pathname)) response.headers.set('x-robots-tag', UNLISTED_ROBOTS_TAG)
+function markUnlistedPath(rawPathname: string, response: Response, shellPaths: readonly string[]): Response {
+  const path = normalizeRequestPath(rawPathname)
+  const pinned = rawPathname.startsWith('/_revisions/') || !!path && (path === '/_revisions' || path.startsWith('/_revisions/'))
+  if (pinned || (!!path && shellPaths.includes(path))) response.headers.set('x-robots-tag', UNLISTED_ROBOTS_TAG)
   return response
 }
 function pinCookie(request: Request): string | null {
@@ -132,21 +134,23 @@ async function handleReadResponse(request: Request, deps: ReadRuntime): Promise<
   } catch { return textResponse(503, 'Unavailable', request.method) }
 }
 
-async function runtimeFor(env: Record<string, unknown>, shellAssets: FixedShellAssets): Promise<ReadRuntime | null> {
+type RuntimeSlot = { readonly deps: ReadRuntime | null; readonly shellPaths: readonly string[] }
+async function runtimeFor(env: Record<string, unknown>, shellAssets: FixedShellAssets): Promise<RuntimeSlot> {
   const config = await parseReadConfig(env)
+  if (!config.ok) return { deps: null, shellPaths: [] }
+  const shellPaths = config.config.shellPaths
   const bucket = env.REVISION_BYTES as R2Bucket | undefined
-  if (!config.ok || !validateShellAssets(config.config.shellPaths, shellAssets) || !bucket || typeof bucket.head !== 'function' || typeof bucket.get !== 'function') return null
-  return { db: env.DB as D1Database, config: config.config, jwks: accessJwksSource(), nowSeconds: () => Date.now() / 1000, store: new RevisionStore(bucket, config.config.instanceId), shellAssets }
+  if (!validateShellAssets(shellPaths, shellAssets) || !bucket || typeof bucket.head !== 'function' || typeof bucket.get !== 'function') return { deps: null, shellPaths }
+  return { deps: { db: env.DB as D1Database, config: config.config, jwks: accessJwksSource(), nowSeconds: () => Date.now() / 1000, store: new RevisionStore(bucket, config.config.instanceId), shellAssets }, shellPaths }
 }
 export function createReadWorker(shellAssets: FixedShellAssets = EMPTY_SHELL_ASSETS) {
-  const runtimes = new WeakMap<object, Promise<ReadRuntime | null>>()
+  const runtimes = new WeakMap<object, Promise<RuntimeSlot>>()
   return { async fetch(request: Request, env: Record<string, unknown>): Promise<Response> {
     let runtime = runtimes.get(env)
-    if (!runtime) { runtime = runtimeFor(env, shellAssets).catch(() => null); runtimes.set(env, runtime) }
-    const deps = await runtime
-    if (deps) return handleRead(request, deps)
-    const pathname = new URL(request.url).pathname
-    return markUnlistedPath(pathname, textResponse(503, 'Unavailable', request.method), [])
+    if (!runtime) { runtime = runtimeFor(env, shellAssets).catch(() => ({ deps: null, shellPaths: [] as const })); runtimes.set(env, runtime) }
+    const slot = await runtime
+    if (slot.deps) return handleRead(request, slot.deps)
+    return markUnlistedPath(new URL(request.url).pathname, textResponse(503, 'Unavailable', request.method), slot.shellPaths)
   } }
 }
 export default createReadWorker()

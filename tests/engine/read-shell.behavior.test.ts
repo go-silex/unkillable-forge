@@ -125,8 +125,26 @@ describe('fixed shell through the read worker', () => {
   it('rejects missing, extra and dynamic entries at composition rather than returning a shell 404', async () => {
     const { '/favicon.ico': _missing, ...incomplete } = fixed
     for (const bundle of [incomplete, { ...fixed, '/unconfigured': { body: 'x', contentType: 'text/plain' } }, { ...fixed, '/': { body: 'override', contentType: 'text/html' } }, { ...fixed, '/index.html': { body: 'override', contentType: 'text/html' } }, { ...fixed, '/login': { body: 'override', contentType: 'text/html' } }, { ...fixed, '/login.html': { body: 'override', contentType: 'text/html' } }]) {
-      expect((await request(createReadWorker(bundle), '/robots.txt')).status).toBe(503)
+      const unavailable = await request(createReadWorker(bundle), '/robots.txt')
+      expect(unavailable.status).toBe(503)
+      expect(unavailable.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
     }
+  })
+
+  it('marks percent-encoded login and revision-prefix paths with the shared robots tag', async () => {
+    const worker = createReadWorker(fixed)
+    const encodedLogin = await request(worker, '/%6Cogin')
+    expect(encodedLogin.status).toBe(200)
+    expect(await encodedLogin.text()).toContain('Sign in')
+    expect(encodedLogin.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
+    const accessLocation = 'https://team.cloudflareaccess.com/cdn-cgi/access/login/forge.example.test?redirect_url=' + encodeURIComponent('https://forge.example.test/a/private/')
+    const encodedRedirect = await request(worker, '/%6Cogin?next=/a/private/', { bindings: bindings({ login: 'redirect-access-login' }) })
+    expect(encodedRedirect.status).toBe(302)
+    expect(encodedRedirect.headers.get('location')).toBe(accessLocation)
+    expect(encodedRedirect.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
+    const encodedPin = await request(worker, '/%5Frevisions/not-a-page/not-a-rev/index.html')
+    expect(encodedPin.status).toBe(404)
+    expect(encodedPin.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
   })
 
   it('rejects a public bundle for the larger private instance contract', async () => {
