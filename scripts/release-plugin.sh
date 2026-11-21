@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Tag silex-forge/vX.Y.Z + GitHub Release when plugins/silex-forge/plugin.json is a new SemVer.
-# Format <component>/vX.Y.Z (Convention A). Prior naked tags from before 2026-07-20
-# remain in place and are not renamed.
+# Tag unkillable-forge/vX.Y.Z + GitHub Release when plugins/unkillable-forge/plugin.json is a new SemVer.
+# Format <component>/vX.Y.Z (Convention A). Prior silex-forge/* tags remain in place and are not renamed.
 # No-op if the tag already points at this commit or an ancestor. Never moves a tag.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+COMPONENT="unkillable-forge"
 CHECK="$ROOT/scripts/check_plugin_versions.py"
-VERSION="$(python3 "$CHECK" --print-version)"
-TAG="silex-forge/v${VERSION}"
-TITLE="silex-forge ${TAG#silex-forge/}"
+VERSION="$(python3 "$CHECK" --component "$COMPONENT" --print-version)"
+TAG="${COMPONENT}/v${VERSION}"
+TITLE="${COMPONENT} ${TAG#"${COMPONENT}"/}"
 
 git fetch --tags --force origin
 
@@ -33,7 +33,7 @@ fi
 
 NOTES="$(mktemp)"
 trap 'rm -f "$NOTES"' EXIT
-python3 "$CHECK" --print-notes >"$NOTES"
+python3 "$CHECK" --component "$COMPONENT" --print-notes >"$NOTES"
 
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

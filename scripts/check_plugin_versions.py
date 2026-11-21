@@ -11,6 +11,8 @@ from pathlib import Path
 SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 HEADING = re.compile(r"^## \[([^\]]+)\]")
 LEGACY = "silex-forge"
+ENGINE_MANIFEST = "engine.json"
+ENGINE_CHANGELOG = "docs/engine-changelog.md"
 COMPONENTS = {
     LEGACY: "CHANGELOG.md",
     "unkillable-forge": "plugins/unkillable-forge/CHANGELOG.md",
@@ -150,6 +152,50 @@ def changelog_notes(text: str, version: str) -> str | None:
     return body + "\n"
 
 
+def check_engine(root: Path) -> tuple[str, list[str]]:
+    """Validate engine.json shape and a matching docs/engine-changelog.md entry."""
+    errors: list[str] = []
+    path = root / ENGINE_MANIFEST
+    if not path.is_file():
+        return "", [f"{ENGINE_MANIFEST}: missing file"]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return "", [f"{ENGINE_MANIFEST}: invalid JSON ({exc})"]
+    if not isinstance(data, dict):
+        return "", [f"{ENGINE_MANIFEST}: expected object"]
+    allowed = {"version", "rollbackCompatibleFrom"}
+    extra = sorted(set(data) - allowed)
+    if extra:
+        errors.append(f"{ENGINE_MANIFEST}: unexpected keys {extra}")
+    version = data.get("version")
+    rollback = data.get("rollbackCompatibleFrom")
+    if not isinstance(version, str) or not SEMVER.fullmatch(version):
+        errors.append(f"{ENGINE_MANIFEST} version={version!r} (need X.Y.Z)")
+        version = ""
+    if not isinstance(rollback, str) or not SEMVER.fullmatch(rollback):
+        errors.append(f"{ENGINE_MANIFEST} rollbackCompatibleFrom={rollback!r} (need X.Y.Z)")
+    elif version and _semver_tuple(rollback) > _semver_tuple(version):
+        errors.append(
+            f"{ENGINE_MANIFEST}: rollbackCompatibleFrom {rollback} > version {version}"
+        )
+    cl = root / ENGINE_CHANGELOG
+    if not cl.is_file():
+        errors.append(f"{ENGINE_CHANGELOG}: missing file")
+    elif version:
+        text = cl.read_text(encoding="utf-8")
+        if not changelog_has_version(text, version):
+            errors.append(f"{ENGINE_CHANGELOG}: missing ## [{version}]")
+        elif not changelog_notes(text, version):
+            errors.append(f"{ENGINE_CHANGELOG}: empty ## [{version}] section")
+    return version, errors
+
+
+def _semver_tuple(value: str) -> tuple[int, int, int]:
+    major, minor, patch = value.split(".")
+    return int(major), int(minor), int(patch)
+
+
 def check(root: Path, component: str = LEGACY) -> tuple[str, list[str]]:
     versions, errors = _collect(root)
     if component not in COMPONENTS:
@@ -167,6 +213,8 @@ def check(root: Path, component: str = LEGACY) -> tuple[str, list[str]]:
             errors.append(f"{rel}: missing ## [{version}]")
         elif not changelog_notes(text, version):
             errors.append(f"{rel}: empty ## [{version}] section")
+    _, engine_errors = check_engine(root)
+    errors.extend(engine_errors)
     return versions.get(component, ""), errors
 
 
@@ -180,9 +228,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--print-version", action="store_true")
     parser.add_argument("--print-notes", action="store_true")
+    parser.add_argument("--print-engine-version", action="store_true")
     parser.add_argument("--component", choices=COMPONENTS, default=LEGACY)
     args = parser.parse_args(argv)
     root = args.root.resolve()
+    if args.print_engine_version:
+        engine_version, engine_errors = check_engine(root)
+        if engine_errors:
+            print("engine version check failed:", file=sys.stderr)
+            for e in engine_errors:
+                print(f"  {e}", file=sys.stderr)
+            return 1
+        print(engine_version)
+        return 0
     version, errors = check(root, args.component)
     if errors:
         print("plugin version check failed:", file=sys.stderr)
@@ -197,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_version:
         print(version)
         return 0
-    print(f"plugin version {version} consistent (Claude/Grok/OMP/Codex + CHANGELOG)")
+    print(f"plugin version {version} consistent (Claude/Grok/OMP/Codex + CHANGELOG); engine.json ok")
     return 0
 
 

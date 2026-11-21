@@ -22,5 +22,8 @@ cd "$ROOT"
 npm test
 bash tests/shell/run-os-script-tests.sh
 bash tests/shell/test_release_plugin.sh
+bash tests/shell/test_build_engine_release.sh
+bash tests/shell/test_forge_deploy.sh
+bash tests/shell/test_forge_bootstrap.sh
 
 echo "test-all: clean"
