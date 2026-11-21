@@ -139,19 +139,24 @@ const SAFE_ERROR_CODES = new Set([
   'upload_incomplete', 'not_sealed', 'session_closed', 'session_expired',
   'invalid_state', 'integrity_error', 'internal_error', 'configuration_error', 'unavailable',
 ])
+// Issue codes the import producers can put on blocked/ready results
+// (domains/catalogue/import.ts, domains/publication/import.ts, adapters/http/import.ts).
 const IMPORT_ISSUE_CODES = new Set([
-  ...SAFE_ERROR_CODES,
+  'source_mapping_conflict', 'policy_conflict', 'grant_conflict', 'alias_conflict',
+  'shortlink_conflict', 'preview_not_owned', 'conflict',
+  'resource_removal_undeclared', 'edge_removal_undeclared',
+  'kept_derived_preview_unsupported', 'kept_preview_not_preserved', 'kept_preview_unsupported',
+  'unknown_visibility_private', 'import_file_too_large', 'source_integrity',
   'g1b_evidence_required', 'selection_graph_mismatch', 'expiring_policy_unsupported',
   'missing_policy_evidence', 'import_metadata_limit', 'inventory_size_exceeds_approved_limit',
-  'source_integrity', 'import_file_too_large', 'unknown_visibility_private',
+  'invalid_removal', 'invalid_state', 'not_found',
 ])
 const RESULT_STATES = new Set(['checking', 'blocked', 'ready', 'staging', 'committed'])
 
-/** Finite request budget from selection size (Worker stores/checks <= 8 files per step). */
+/** Finite request budget: one request per file (32 MiB step cap) + phase/metadata overhead. */
 function continuationBudget(selection) {
   const files = Array.isArray(selection?.command?.files) ? selection.command.files.length : 0
-  const steps = Math.ceil(Math.max(files, 1) / 8)
-  return steps * 6 + 64
+  return Math.max(files, 1) + 64
 }
 
 /** Pages Direct Upload asset hash: BLAKE3(base64(bytes) + extWithoutDot).hex[:32]. */
@@ -984,8 +989,8 @@ function decodeIssues(value) {
   if (!Array.isArray(value)) return null
   const issues = []
   for (const issue of value) {
-    if (!record(issue) || typeof issue.code !== 'string' || !IMPORT_ISSUE_CODES.has(issue.code)) return null
-    issues.push({ code: issue.code })
+    if (!record(issue) || typeof issue.code !== 'string') return null
+    issues.push({ code: IMPORT_ISSUE_CODES.has(issue.code) ? issue.code : 'other' })
   }
   return issues
 }

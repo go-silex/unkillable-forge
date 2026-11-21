@@ -814,19 +814,56 @@ describe('forge-import-legacy-pages', () => {
     expect(pagesAssetHash(bytes, '/a/demo/note.txt')).toBe(known)
   })
 
-  it('sizes the continuation budget from selection file count', async () => {
+  it('continues past the old ceil(n/8) budget for large single-file steps', async () => {
     let n = 0
-    const files = Array.from({ length: 2049 }, (_, i) => ({ path: `/a/f/${i}` }))
-    await expect(applyImport({
+    // Old formula ceil(320/8)*6+64 = 304; one-file-per-request needs >304 dry_run steps.
+    const files = Array.from({ length: 320 }, (_, i) => ({ path: `/a/f/${i}`, size: 17 * 1024 * 1024 }))
+    const applied = await applyImport({
       manageHost: 'manage.example.test',
       selections: [{ version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: { files } }],
       headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      dryRunOnly: true,
       fetch: async () => {
         n += 1
-        return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: `c${n}` } }), { status: 200 })
+        if (n <= 320) {
+          return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: `c${n}` } }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
       },
-    })).rejects.toMatchObject({ code: 'invalid_continuation', message: expect.stringContaining('request cap') })
-    expect(n).toBeGreaterThan(256)
+    })
+    expect(n).toBeGreaterThan(304)
+    expect(applied.results).toHaveLength(1)
+    expect(applied.results[0]).toMatchObject({ ok: true, state: 'ready' })
+  })
+
+  it('continueOnBlock keeps going after a native shortlink_conflict block', async () => {
+    const seen: string[] = []
+    const applied = await applyImport({
+      manageHost: 'manage.example.test',
+      selections: [
+        { version: 1, inventoryId: 'inv1', selectionId: 'sel_a', planId: 'plan_a', command: {} },
+        { version: 1, inventoryId: 'inv2', selectionId: 'sel_b', planId: 'plan_b', command: {} },
+      ],
+      headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      continueOnBlock: true,
+      dryRunOnly: true,
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        seen.push(body.selection.selectionId)
+        if (body.selection.selectionId === 'sel_a') {
+          return new Response(JSON.stringify({
+            ok: true,
+            result: { state: 'blocked', issues: [{ code: 'shortlink_conflict', pageId: 'pg_x' }] },
+          }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
+      },
+    })
+    expect(seen).toEqual(['sel_a', 'sel_b'])
+    expect(applied.results).toHaveLength(2)
+    expect(applied.results[0]).toMatchObject({ selectionId: 'sel_a', ok: false, state: 'blocked', issueCount: 1 })
+    expect(applied.results[1]).toMatchObject({ selectionId: 'sel_b', ok: true, state: 'ready' })
+    expect(JSON.stringify(applied)).not.toContain('shortlink_conflict')
   })
 
   it('prepare-selection refuses unresolved bytes and unmappable shortlinks', async () => {
