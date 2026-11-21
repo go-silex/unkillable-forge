@@ -31,7 +31,7 @@ export function toOutcome(parsed: ParsedRequest, decision: ReadDecision, identit
     return { kind: "deny", status: 404, reason: "not_found" }
   }
   const plan = decision.plan
-  const unlisted = plan.authority.grantId !== null || plan.authority.basis === "share_key" || plan.authority.basis === "share_cookie"
+  const unlisted = parsed.kind === "pinned" || plan.authority.grantId !== null || plan.authority.basis === "share_key" || plan.authority.basis === "share_cookie"
   if (parsed.kind === "share") {
     if (parsed.grammar === "slug" && parsed.route.kind === "subtree") return {
       kind: "serve", plan, unlisted,

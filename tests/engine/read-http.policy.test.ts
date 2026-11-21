@@ -64,6 +64,21 @@ describe("read HTTP policy and representation semantics", () => {
     expect(anonymous.status).toBe(302)
   })
 
+  it("sets robots restrictions on anonymous public pin-namespace reads without marking the canonical URL", async () => {
+    const s = await setup()
+    const page = await documentCommand("policy-pin-robots", "/a/pin-robots/index.html", "<p>pinned public</p>")
+    const published = await publishDocument(s.publication, actor, page.command, page.bytes)
+    await setVisibility(s.management, actor, { pageId: page.pageId, artifactId: published.receipt.artifactId, expectedPolicyEpoch: 0, visibility: "public" })
+    const pinPath = `/_revisions/${page.pageId}/${published.receipt.revisionId}/a/pin-robots/index.html`
+    const pinned = await s.request(pinPath)
+    expect(pinned.status).toBe(200)
+    expect(await pinned.text()).toContain("pinned public")
+    expect(pinned.headers.get("x-robots-tag")).toBe("noindex, nofollow, noarchive")
+    const canonical = await s.request("/a/pin-robots/")
+    expect(canonical.status).toBe(200)
+    expect(canonical.headers.get("x-robots-tag")).toBeNull()
+  })
+
   it("applies ranges to GET but ignores them for HEAD, including unsatisfiable ranges", async () => {
     const s = await setup()
     const path = "/a/ranges/data.bin"

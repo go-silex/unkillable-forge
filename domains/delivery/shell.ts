@@ -20,5 +20,6 @@ export function validateShellAssets(shellPaths: readonly string[], files: FixedS
 export function serveShellAsset(request: Request, file: ShellAsset): Response {
   const headers = securityHeaders()
   headers.set('content-type', file.contentType)
+  headers.set('x-robots-tag', 'noindex, nofollow, noarchive')
   return new Response(request.method === 'HEAD' ? null : file.body, { headers })
 }

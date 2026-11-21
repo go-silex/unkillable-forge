@@ -40,7 +40,7 @@ export interface ReadRuntime { db: D1Database; config: ReadInstanceConfig; jwks:
 const EMPTY_SHELL_ASSETS: FixedShellAssets = Object.freeze({})
 const escape = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
 function html(body: string, method: string): Response {
-  const headers = securityHeaders(); headers.set('content-type', 'text/html; charset=utf-8')
+  const headers = securityHeaders(); headers.set('content-type', 'text/html; charset=utf-8'); headers.set('x-robots-tag', 'noindex, nofollow, noarchive')
   return new Response(method === 'HEAD' ? null : `<!doctype html><html lang="en"><meta charset="utf-8"><title>Forge</title><body>${body}</body></html>`, { headers })
 }
 function redirect(location: string, status: number, cookie?: string, unlisted = false): Response {

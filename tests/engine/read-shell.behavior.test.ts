@@ -51,12 +51,23 @@ describe('fixed shell through the read worker', () => {
     expect(root.status).toBe(200)
     expect(index.status).toBe(200)
     expect(await index.text()).toBe(await root.text())
+    expect(root.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
     for (const path of ['/login', '/login.html']) {
-      expect((await request(worker, path)).status).toBe(200)
+      const get = await request(worker, path)
+      expect(get.status).toBe(200)
+      expect(get.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
       const head = await request(worker, path, { method: 'HEAD' })
       expect(head.status).toBe(200)
+      expect(head.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
       expect(await head.text()).toBe('')
     }
+  })
+
+  it('marks fixed shell assets unlisted with the shared robots tag', async () => {
+    const worker = createReadWorker(fixed)
+    const robots = await request(worker, '/robots.txt')
+    expect(robots.status).toBe(200)
+    expect(robots.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
   })
 
   it('keeps host, method, malformed path and instance gates ahead of shell bytes', async () => {
