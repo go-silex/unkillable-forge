@@ -59,20 +59,46 @@ const CONTENT_TYPES = {
   '.zip': 'application/zip',
 }
 
+// Reader projection mirrors production FORGE_INSTANCE (minus manage/access fields,
+// which selection v1 does not carry). Legacy capture longUrl hosts are rewritten
+// via destinationHosts and are not necessarily live aliasHosts.
 const INSTANCES = {
   unkillable: {
-    sourceInstance: 'legacy-pages-unkillable',
+    sourceInstance: 'unkillable',
+    instanceId: 'unkillable',
     canonicalHost: 'forge.unkillablecompanies.com',
-    aliasHosts: ['forge.gosilex.com'],
+    aliasHosts: ['forge-next.unkillablecompanies.com'],
+    manageHost: 'forge-manage.unkillablecompanies.com',
+    accessTeamDomain: 'gosilex.cloudflareaccess.com',
+    login: 'serve-shell',
+    routeGrammars: ['subtree'],
+    shareGrammars: ['slug'],
+    shareCookie: false,
+    shellPaths: ['/', '/index.html', '/login', '/login.html'],
     shortDomain: 'unkill.si',
     providerOrigin: 'https://unkill.si',
+    importBucket: 'unkillable-forge-import',
+    importAccountId: 'f8026cffc9463a03e1a6a76af5301861',
+    // Captured Shlink longUrls may still name the old alias host.
+    destinationHosts: ['forge.unkillablecompanies.com', 'forge-next.unkillablecompanies.com', 'forge.gosilex.com'],
   },
   roxabi: {
-    sourceInstance: 'legacy-pages-roxabi',
+    sourceInstance: 'roxabi',
+    instanceId: 'roxabi',
     canonicalHost: 'forge.roxabi.dev',
     aliasHosts: [],
+    manageHost: null,
+    accessTeamDomain: null,
+    login: 'serve-shell',
+    routeGrammars: ['subtree'],
+    shareGrammars: ['slug'],
+    shareCookie: false,
+    shellPaths: ['/', '/index.html', '/login', '/login.html'],
     shortDomain: null,
     providerOrigin: null,
+    importBucket: null,
+    importAccountId: null,
+    destinationHosts: ['forge.roxabi.dev'],
   },
 }
 
@@ -81,13 +107,6 @@ const DEFAULT_LIMITS = {
   maxJsonDepth: 16,
   maxUploadBytes: 32 * 1024 * 1024,
   maxInventoryBytes: 8_000_000,
-}
-
-const DEFAULT_READER = {
-  routeGrammars: ['subtree'],
-  shareGrammars: ['slug'],
-  shareCookie: false,
-  shellPaths: ['/login'],
 }
 
 const SHARE_KEY = /^[A-Za-z0-9_-]{8,128}$/
@@ -147,11 +166,12 @@ function resolveByteSource(publishedPath, digest, hubFound, rebuilt, captureDir)
   return null
 }
 
-function normalizeDestination(longUrl, canonicalHost, aliasHosts) {
+function normalizeDestination(longUrl, canonicalHost, destinationHosts) {
   let url
   try { url = new URL(longUrl) } catch { return null }
   const host = url.hostname.toLowerCase()
-  if (host === canonicalHost || aliasHosts.includes(host)) {
+  const allowed = new Set([canonicalHost, ...(destinationHosts ?? [])])
+  if (allowed.has(host)) {
     url.protocol = 'https:'
     url.hostname = canonicalHost
     url.port = ''
@@ -353,7 +373,7 @@ export async function prepareSelection(options) {
       softRefused.push({ kind: 'shortlink', reason: 'short_domain_unconfigured', shortCode })
       continue
     }
-    const destination = normalizeDestination(longUrl, profile.canonicalHost, profile.aliasHosts)
+    const destination = normalizeDestination(longUrl, profile.canonicalHost, profile.destinationHosts ?? profile.aliasHosts)
     if (!destination) {
       softRefused.push({ kind: 'shortlink', reason: 'destination_host_unmappable', shortCode, host: safeHost(longUrl) })
       continue
@@ -416,8 +436,11 @@ export async function prepareSelection(options) {
   const corpusDigest = sha256(Buffer.from(stable(evidence.map(e => [e.path, e.size, e.sha256]).sort((a, b) => a[0].localeCompare(b[0])))))
   const reader = {
     canonicalHost: profile.canonicalHost,
-    aliasHosts: profile.aliasHosts,
-    ...DEFAULT_READER,
+    aliasHosts: profile.aliasHosts ?? [],
+    routeGrammars: profile.routeGrammars ?? ['subtree'],
+    shareGrammars: profile.shareGrammars ?? ['slug'],
+    shareCookie: profile.shareCookie ?? false,
+    shellPaths: profile.shellPaths ?? ['/', '/index.html', '/login', '/login.html'],
     ...(options.reader ?? {}),
   }
   const draft = {
@@ -756,7 +779,18 @@ async function main(argv = process.argv.slice(2)) {
     })
     // Omit refusedRecords detail that might echo secrets; keep counts only on stdout.
     const { refusedRecords, ...publicResult } = result
-    console.log(JSON.stringify({ ...publicResult, refusedRecords: refusedRecords.map(r => ({ kind: r.kind, reason: r.reason, slug: r.slug ?? null, path: r.path ?? null, shortCode: r.shortCode ?? null })) }))
+    const profile = INSTANCES[result.instance] ?? {}
+    console.log(JSON.stringify({
+      ...publicResult,
+      production: {
+        instanceId: profile.instanceId ?? null,
+        manageHost: profile.manageHost ?? null,
+        importBucket: profile.importBucket ?? null,
+        importAccountId: profile.importAccountId ?? null,
+        shortDomain: profile.shortDomain ?? null,
+      },
+      refusedRecords: refusedRecords.map(r => ({ kind: r.kind, reason: r.reason, slug: r.slug ?? null, path: r.path ?? null, shortCode: r.shortCode ?? null })),
+    }))
     return
   }
   if (command === 'pin') {

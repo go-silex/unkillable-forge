@@ -101,6 +101,15 @@ describe('forge-import-legacy-pages', () => {
       const selection = JSON.parse(await readFile(selectionOut, 'utf8'))
       expect(selection.version).toBe(1)
       expect(selection.kind).toBe('synthetic')
+      expect(selection.sourceInstance).toBe('unkillable')
+      expect(selection.reader).toMatchObject({
+        canonicalHost: 'forge.unkillablecompanies.com',
+        aliasHosts: ['forge-next.unkillablecompanies.com'],
+        routeGrammars: ['subtree'],
+        shareGrammars: ['slug'],
+        shareCookie: false,
+        shellPaths: ['/', '/index.html', '/login', '/login.html'],
+      })
       expect(selection.pages[0].sourcePageId).toBe('demo-slug')
       expect(selection.pages[0].share.key).toBe(shareKey)
       expect(selection.shortlinks[0].destination).toBe(`https://forge.unkillablecompanies.com/s/demo-slug/${shareKey}/`)

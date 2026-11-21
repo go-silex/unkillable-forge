@@ -217,6 +217,18 @@ is active. Historical execution requires separate current authority and evidence
 published `/a/` bytes, then drives production pin/apply. It does not call
 Cloudflare unless the operator runs `pin` / `apply`.
 
+Unkillable production reader projection (selection `reader` + `sourceInstance`):
+`instanceId`/`sourceInstance` `unkillable`, `canonicalHost`
+`forge.unkillablecompanies.com`, `aliasHosts` `[forge-next.unkillablecompanies.com]`,
+`routeGrammars` `[subtree]`, `shareGrammars` `[slug]`, `shareCookie` false,
+`shellPaths` `[/, /index.html, /login, /login.html]`. Manage host
+`forge-manage.unkillablecompanies.com`, Access team `gosilex.cloudflareaccess.com`,
+import R2 bucket `unkillable-forge-import` on account `f8026cffc9463a03e1a6a76af5301861`
+(binding `FORGE_IMPORT_SOURCE`), Shlink domain `unkill.si`. Roxabi uses
+`sourceInstance`/`instanceId` `roxabi` and `canonicalHost` `forge.roxabi.dev` with the
+same subtree/slug reader shape. Captured `forge.gosilex.com` longUrls are rewritten
+to the canonical host and are not live aliasHosts.
+
 ```sh
 node scripts/forge-import-legacy-pages.mjs prepare-selection \
   --capture /private/cutover/<instance> \
@@ -234,21 +246,20 @@ node scripts/forge-import-offline.mjs plan --workspace /private/workspace
 
 Production sequence (no discovery; credentials from env, never printed):
 
-1. `pin --workspace … --capture-root capture=/private/capture-root --bucket <r2> --account-id <id>`
+1. `pin --workspace … --capture-root capture=/private/capture-root --bucket unkillable-forge-import --account-id f8026cffc9463a03e1a6a76af5301861`
    uploads source objects and inventory JSON with `wrangler r2 object put --remote`
    and prints `FORGE_IMPORT_INVENTORIES`.
 2. Configure the manage Worker with binding `FORGE_IMPORT_SOURCE` → that bucket and
    var `FORGE_IMPORT_INVENTORIES` → the printed JSON array.
-3. `apply --workspace … --manage-host <manageHost>` runs `dry_run` then `apply`
-   with cursor continuation. Prefer `CF_ACCESS_TOKEN` as
+3. `apply --workspace … --manage-host forge-manage.unkillablecompanies.com` runs
+   `dry_run` then `apply` with cursor continuation. Prefer `CF_ACCESS_TOKEN` as
    `Cf-Access-Jwt-Assertion` for a Catalogue installation admin (manage audience,
    nonempty `sub`, active admin grant in D1). `CF_ACCESS_CLIENT_ID` /
    `CF_ACCESS_CLIENT_SECRET` are only for the Access edge; the Worker itself does
    not treat those headers as manage identity. Optional `--dry-run-only true`.
 
 Unmappable capture rows are refused with counts (never silently dropped). Share
-keys are preserved literally; `forge.gosilex.com` destinations are normalized to
-the canonical host. Shell paths outside `/a/` are not imported.
+keys are preserved literally. Shell paths outside `/a/` are not imported.
 
 `POST /api/maintenance/import` is a separate, administrator-only interface for
 an operator-approved selection, not an arbitrary source or SQL API. It accepts
