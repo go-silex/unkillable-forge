@@ -150,6 +150,30 @@ describe('forge-import-legacy-pages', () => {
     expect(batches.flat()).toEqual(approvals)
   })
 
+  it('applyImport resumes an open staging session without a cursor until commit', async () => {
+    const bodies: Array<Record<string, unknown>> = []
+    let stored = 0
+    const fakeFetch: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}'))
+      bodies.push(body)
+      if (body.op === 'dry_run') return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
+      if (stored >= 16) return new Response(JSON.stringify({ ok: true, result: { state: 'committed' } }), { status: 200 })
+      stored += 8
+      const files = Array.from({ length: 20 }, (_, i) => ({ path: `/a/s/${i}`, stored: i < stored }))
+      return new Response(JSON.stringify({ ok: true, result: { state: 'staging', nextCursor: null, session: { files } } }), { status: 200 })
+    }
+    const applied = await applyImport({
+      manageHost: 'manage.example.test',
+      selections: [{ version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: {} }],
+      headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      fetch: fakeFetch,
+    })
+    expect(applied.results[0]).toMatchObject({ ok: true, state: 'committed' })
+    const applies = bodies.filter(b => b.op === 'apply')
+    expect(applies.length).toBe(3)
+    expect(applies.every(b => !Object.hasOwn(b, 'cursor'))).toBe(true)
+  })
+
   it('prepare-selection refuses unresolved bytes and unmappable shortlinks', async () => {
     const { root, cleanup } = await sandbox()
     try {

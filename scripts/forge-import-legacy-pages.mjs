@@ -680,10 +680,21 @@ export async function applyImport(options) {
     cursor = undefined
     let applyRes
     const seenApply = new Set()
+    let lastStored = -1
+    let stalled = 0
     for (;;) {
       const payload = cursor === undefined ? { op: 'apply', selection } : { op: 'apply', selection, cursor }
       applyRes = await postJson(fetchImpl, endpoint, headers, payload)
       const result = applyRes.body?.result
+      if (applyRes.status === 200 && applyRes.body?.ok && result?.state === 'staging' && result.nextCursor == null) {
+        // An open session is resumed without a cursor; each step stores up to eight files.
+        const stored = (result.session?.files ?? []).filter(f => f?.stored).length
+        stalled = stored > lastStored ? 0 : stalled + 1
+        if (stalled >= 3) fail('invalid_continuation', 'apply staging made no progress')
+        lastStored = stored
+        cursor = undefined
+        continue
+      }
       if (applyRes.status === 200 && applyRes.body?.ok && (result?.state === 'checking' || result?.state === 'staging')) {
         if (typeof result.nextCursor !== 'string' || seenApply.has(result.nextCursor)) fail('invalid_continuation', 'apply')
         seenApply.add(result.nextCursor)
