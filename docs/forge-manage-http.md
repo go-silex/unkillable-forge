@@ -234,7 +234,9 @@ node scripts/forge-import-legacy-pages.mjs prepare-selection \
   --capture /private/cutover/<instance> \
   --selection /private/selection.json \
   --capture-root-out /private/capture-root \
-  --instance unkillable   # or roxabi
+  --instance unkillable \
+  --kind historical \
+  --g1b-ref g1b:<evidence-ref>
 
 node scripts/forge-import-offline.mjs prepare \
   --selection /private/selection.json \

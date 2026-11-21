@@ -8,6 +8,7 @@ export function prepareSelection(options: {
   shortDomain?: string
   providerOrigin?: string
   allowPartial?: boolean
+  allowExpiring?: boolean
   capturedAt?: number
   selectionRef?: string
   approvalRef?: string
@@ -37,6 +38,7 @@ export function pinWorkspace(options: {
   pinned: number
   blocked: number
   approvals: number
+  inventoriesDigest: string
   FORGE_IMPORT_INVENTORIES: string
 }>
 
@@ -52,3 +54,7 @@ export function applyImport(options: {
 export function selectionsFromWorkspace(workspace: string): Promise<Array<{ version: 1; inventoryId: string; selectionId: string; planId: string; command: unknown }>>
 
 export function batchApprovals<T>(approvals: T[], maxBytes?: number): T[][]
+
+export function splitInventories(inventoriesPath: string, outDir: string): Promise<{ command: 'split-inventories'; batches: Array<{ file: string; approvals: number }> }>
+
+export function main(argv?: string[]): Promise<number>
