@@ -710,40 +710,93 @@ else
   pass "R2 jurisdiction mismatch rejected"
 fi
 
-# Contract migration refused while running Workers are below the new floor
-write_instance "$TMP/contract" generic
-cat >"$TMP/contract/deploys.jsonl" <<'EOF'
-{"tag":"engine/v1.0.0","engineVersion":"1.0.0","sourceCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","rollbackCompatibleFrom":"1.0.0","schemaFloor":"1.0.0","workerVersionIds":{"manage":"m","read":"r"},"workerNames":{"manage":"forge-manage-test","read":"forge-read-test"},"bindings":{"manage":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""},"read":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""}},"timestamp":"2026-01-01T00:00:00Z","mode":"deploy"}
-EOF
-python3 - "$STAGE/release.json" <<'PY'
+# Noncanonical R2 jurisdictions rejected (whitespace / case / unknown)
+for badj in " eu " "EU" "apac"; do
+  write_instance "$TMP/jurbad" generic
+  python3 - "$TMP/jurbad/manage.json" "$TMP/jurbad/read.json" "$badj" <<'PY'
 import json, sys
-p = sys.argv[1]
-d = json.load(open(p, encoding="utf-8"))
+j = sys.argv[3]
+for p in sys.argv[1:3]:
+    c = json.load(open(p, encoding="utf-8"))
+    c["r2_buckets"][0]["jurisdiction"] = j
+    json.dump(c, open(p, "w", encoding="utf-8"))
+PY
+  set +e
+  out="$($BASH_BIN "$DEPLOY" deploy --instance-dir "$TMP/jurbad" --tag engine/v1.0.0 --dry-run 2>&1)"
+  rc=$?
+  set -e
+  if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'jurisdiction'; then
+    bad "noncanonical jurisdiction $(printf '%q' "$badj") accepted (rc=$rc out=$out)"
+  else
+    pass "noncanonical jurisdiction $(printf '%q' "$badj") rejected"
+  fi
+done
+
+# Releasable contract target 1.2 (floor 1.1) refused while running roles are still on 1.0;
+# Wrangler must not apply migrations.
+REL12="$TMP/releases12"
+mkdir -p "$REL12/stage/manage" "$REL12/stage/read" "$REL12/stage/read-unkillable" "$REL12/stage/migrations"
+cp -R "$STAGE/manage/." "$REL12/stage/manage/"
+cp -R "$STAGE/read/." "$REL12/stage/read/"
+cp -R "$STAGE/read-unkillable/." "$REL12/stage/read-unkillable/"
+cp -R "$STAGE/migrations/." "$REL12/stage/migrations/"
+python3 - "$STAGE/release.json" "$REL12/stage/release.json" <<'PY'
+import json, sys
+src, dst = sys.argv[1:3]
+d = json.load(open(src, encoding="utf-8"))
+d["engineVersion"] = "1.2.0"
 d["rollbackCompatibleFrom"] = "1.1.0"
-json.dump(d, open(p, "w", encoding="utf-8"), indent=2)
+json.dump(d, open(dst, "w", encoding="utf-8"), indent=2)
 print()
 PY
-pack_release
+(
+  cd "$REL12/stage"
+  tar -czf "$REL12/forge-engine-1.2.0.tar.gz" manage read read-unkillable migrations release.json
+)
+cp -p "$REL12/stage/release.json" "$REL12/release.json"
+(
+  cd "$REL12"
+  sha256sum forge-engine-1.2.0.tar.gz release.json >SHA256SUMS
+)
+export FORGE_TEST_RELEASE_DIR="$REL12"
+
+write_instance "$TMP/contract" generic
+cat >"$TMP/contract/deploys.jsonl" <<'EOF'
+{"tag":"engine/v1.0.0","engineVersion":"1.0.0","sourceCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","rollbackCompatibleFrom":"1.0.0","schemaFloor":"1.0.0","workerVersionIds":{"manage":"m0","read":"r0"},"workerNames":{"manage":"forge-manage-test","read":"forge-read-test"},"bindings":{"manage":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""},"read":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""}},"timestamp":"2026-01-01T00:00:00Z","mode":"deploy"}
+EOF
 export FORGE_TEST_MIG_MODE=pending
 write_wrangler
+: >"$WRANGLER_LOG"
 set +e
-out="$($BASH_BIN "$DEPLOY" deploy --instance-dir "$TMP/contract" --tag engine/v1.0.0 --apply-migrations 2>&1)"
+out="$($BASH_BIN "$DEPLOY" deploy --instance-dir "$TMP/contract" --tag engine/v1.2.0 --apply-migrations 2>&1)"
 rc=$?
 set -e
-if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'intermediate release\|new schema floor'; then
+if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'new schema floor\|intermediate release'; then
   bad "contract migration below running floor accepted (rc=$rc out=$out)"
+elif grep -q 'migrations apply' "$WRANGLER_LOG"; then
+  bad "contract floor refusal still applied migrations: $(grep 'migrations apply' "$WRANGLER_LOG")"
 else
   pass "contract migration below running floor refused"
 fi
-python3 - "$STAGE/release.json" <<'PY'
-import json, sys
-p = sys.argv[1]
-d = json.load(open(p, encoding="utf-8"))
-d["rollbackCompatibleFrom"] = "1.0.0"
-json.dump(d, open(p, "w", encoding="utf-8"), indent=2)
-print()
-PY
-pack_release
+
+# Unresolved partial-manage (read still on 1.0) must refuse migrations for 1.2/floor 1.1
+cat >"$TMP/contract/deploys.jsonl" <<'EOF'
+{"tag":"engine/v1.0.0","engineVersion":"1.0.0","sourceCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","rollbackCompatibleFrom":"1.0.0","schemaFloor":"1.0.0","workerVersionIds":{"manage":"m0","read":"r0"},"workerNames":{"manage":"forge-manage-test","read":"forge-read-test"},"bindings":{"manage":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""},"read":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""}},"timestamp":"2026-01-01T00:00:00Z","mode":"deploy"}
+{"tag":"engine/v1.1.0","engineVersion":"1.1.0","sourceCommit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","rollbackCompatibleFrom":"1.0.0","schemaFloor":"1.0.0","workerVersionIds":{"manage":"m1","read":"pending"},"workerNames":{"manage":"forge-manage-test","read":"forge-read-test"},"bindings":{"manage":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""},"read":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""}},"timestamp":"2026-01-01T01:00:00Z","mode":"partial-manage"}
+EOF
+: >"$WRANGLER_LOG"
+set +e
+out="$($BASH_BIN "$DEPLOY" deploy --instance-dir "$TMP/contract" --tag engine/v1.2.0 --apply-migrations 2>&1)"
+rc=$?
+set -e
+if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'unresolved ledger\|partial-manage'; then
+  bad "migrations with unresolved partial ledger accepted (rc=$rc out=$out)"
+elif grep -q 'migrations apply' "$WRANGLER_LOG"; then
+  bad "partial ledger refusal still applied migrations: $(grep 'migrations apply' "$WRANGLER_LOG")"
+else
+  pass "migrations with unresolved partial ledger refused"
+fi
+export FORGE_TEST_RELEASE_DIR="$TMP/releases"
 
 if [ "$fail" -ne 0 ]; then
   echo

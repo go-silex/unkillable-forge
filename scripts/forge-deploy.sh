@@ -118,16 +118,22 @@ if not isinstance(db_id, str) or not db_id.strip():
     raise SystemExit("missing d1_databases[].database_id for binding DB")
 r2 = None
 r2_jurisdiction = ""
+allowed_jurisdictions = {"eu", "fedramp", "us"}
 for row in cfg.get("r2_buckets") or []:
     if isinstance(row, dict) and row.get("binding") == "REVISION_BYTES":
         r2 = row.get("bucket_name")
         j = row.get("jurisdiction")
-        if j is None:
+        if j is None or j == "":
             r2_jurisdiction = ""
-        elif isinstance(j, str):
-            r2_jurisdiction = j.strip()
-        else:
+        elif not isinstance(j, str):
             raise SystemExit("r2_buckets[].jurisdiction must be a string")
+        elif j not in allowed_jurisdictions:
+            raise SystemExit(
+                "r2_buckets[].jurisdiction must be exactly eu|fedramp|us "
+                f"(got {j!r}; no whitespace or aliases)"
+            )
+        else:
+            r2_jurisdiction = j
         break
 if not isinstance(r2, str) or not r2.strip():
     raise SystemExit("missing r2_buckets[].bucket_name for binding REVISION_BYTES")
@@ -442,6 +448,60 @@ assert_compatibility_floor() {
   fi
 }
 
+# Refuse migrations while a partial ledger is unresolved, and require every
+# running role's engineVersion (newest non-pending Worker) to meet new_floor.
+# Last ledger row is passed via FORGE_LAST_LEDGER_JSON (argv mangles large JSON).
+assert_roles_meet_migration_floor() {
+  local ledger_path="$1" floor="$2"
+  python3 - "$ledger_path" "$floor" <<'PY'
+import json, os, sys
+
+def semver(v):
+    a, b, c = v.split(".")
+    return int(a), int(b), int(c)
+
+path, floor = sys.argv[1:3]
+last = json.loads(os.environ.get("FORGE_LAST_LEDGER_JSON") or "{}")
+if not last or not floor:
+    raise SystemExit(0)
+mode = last.get("mode") or ""
+if mode in ("partial-manage", "partial-rollback-manage", "pending-migration"):
+    raise SystemExit(
+        f"unresolved ledger mode {mode} — refuse migrations until both Workers are reconciled"
+    )
+try:
+    lines = [ln for ln in open(path, encoding="utf-8").read().splitlines() if ln.strip()]
+except FileNotFoundError:
+    lines = []
+versions = {"manage": None, "read": None}
+for ln in reversed(lines):
+    row = json.loads(ln)
+    ver = row.get("engineVersion") or ""
+    vids = row.get("workerVersionIds") or {}
+    for role in versions:
+        if versions[role] is None:
+            vid = vids.get(role)
+            if isinstance(vid, str) and vid and vid != "pending":
+                versions[role] = ver
+    if all(versions.values()):
+        break
+missing = [role for role, ver in versions.items() if not ver]
+if missing:
+    raise SystemExit(
+        "cannot determine running version for "
+        + ",".join(missing)
+        + " — refuse migrations"
+    )
+weak_role = min(versions, key=lambda role: semver(versions[role]))
+if semver(versions[weak_role]) < semver(floor):
+    raise SystemExit(
+        f"running Workers manage={versions['manage']} read={versions['read']} "
+        f"< new schema floor {floor} — deploy a compatible intermediate release "
+        "before applying contract migrations"
+    )
+PY
+}
+
 ledger_schema_floor() {
   python3 - "$1" <<'PY'
 import json, sys
@@ -568,13 +628,11 @@ deploy_one_role() {
       if [ "$apply_migrations" != "1" ]; then
         die "unapplied migrations require --apply-migrations: $(tr '\n' ' ' <"$mig_list")"
       fi
-      # Contract migrations raise the floor; refuse while older Workers still serve.
-      local running_version=""
-      if [ -n "${prev:-}" ] && [ "${prev}" != "{}" ]; then
-        running_version="$(printf '%s' "$prev" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("engineVersion") or "")')"
-      fi
-      if [ -n "$running_version" ] && [ -n "${new_floor:-}" ] && ! semver_ge "$running_version" "$new_floor"; then
-        die "running Workers at $running_version < new schema floor $new_floor — deploy a compatible intermediate release before applying contract migrations"
+      # Contract migrations raise the floor; both running roles must already meet it.
+      if [ -n "${new_floor:-}" ]; then
+        if ! FORGE_LAST_LEDGER_JSON="${prev:-"{}"}" assert_roles_meet_migration_floor "${ledger:-}" "$new_floor" 2>"$WORK/mig-floor.err"; then
+          die "$(tr '\n' ' ' <"$WORK/mig-floor.err")"
+        fi
       fi
       if [ "$dry_run" = "1" ]; then
         info "dry-run: would apply migrations: $(tr '\n' ' ' <"$mig_list")"
