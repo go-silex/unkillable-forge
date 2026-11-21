@@ -122,17 +122,17 @@ allowed_jurisdictions = {"eu", "fedramp", "us"}
 for row in cfg.get("r2_buckets") or []:
     if isinstance(row, dict) and row.get("binding") == "REVISION_BYTES":
         r2 = row.get("bucket_name")
-        j = row.get("jurisdiction")
-        if j is None or j == "":
+        if "jurisdiction" not in row:
             r2_jurisdiction = ""
-        elif not isinstance(j, str):
-            raise SystemExit("r2_buckets[].jurisdiction must be a string")
-        elif j not in allowed_jurisdictions:
-            raise SystemExit(
-                "r2_buckets[].jurisdiction must be exactly eu|fedramp|us "
-                f"(got {j!r}; no whitespace or aliases)"
-            )
         else:
+            # Present means Wrangler sends it: only an exact known string is valid
+            # (null, "" and aliases would bind differently from an absent field).
+            j = row["jurisdiction"]
+            if not isinstance(j, str) or j not in allowed_jurisdictions:
+                raise SystemExit(
+                    "r2_buckets[].jurisdiction must be absent or exactly eu|fedramp|us "
+                    f"(got {j!r}; no null, empty, whitespace or aliases)"
+                )
             r2_jurisdiction = j
         break
 if not isinstance(r2, str) or not r2.strip():

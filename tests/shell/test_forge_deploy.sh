@@ -732,6 +732,28 @@ PY
   fi
 done
 
+# Explicit null jurisdiction on read while manage omits it: Wrangler would receive null
+# for read only, so preflight must refuse before either Worker deploys (non-dry-run).
+write_instance "$TMP/jurnull" generic
+python3 - "$TMP/jurnull/read.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1], encoding="utf-8"))
+c["r2_buckets"][0]["jurisdiction"] = None
+json.dump(c, open(sys.argv[1], "w", encoding="utf-8"))
+PY
+: >"$WRANGLER_LOG"
+set +e
+out="$($BASH_BIN "$DEPLOY" deploy --instance-dir "$TMP/jurnull" --tag engine/v1.0.0 2>&1)"
+rc=$?
+set -e
+if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'jurisdiction'; then
+  bad "null read jurisdiction accepted (rc=$rc out=$out)"
+elif grep -q '^WRANGLER deploy' "$WRANGLER_LOG"; then
+  bad "a Worker deployed before the null jurisdiction was refused"
+else
+  pass "null read jurisdiction refused before any Worker deploy"
+fi
+
 # Releasable contract target 1.2 (floor 1.1) refused while running roles are still on 1.0;
 # Wrangler must not apply migrations.
 REL12="$TMP/releases12"
