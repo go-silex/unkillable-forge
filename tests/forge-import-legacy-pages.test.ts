@@ -954,6 +954,47 @@ describe('forge-import-legacy-pages', () => {
     expect(applied.results[0]).toMatchObject({ ok: true, state: 'ready' })
   })
 
+  it('covers revise-with-base DB traversals that need 10800 dry-run steps', async () => {
+    // Kept subtree: 10_000 client files @ 17MiB, 9_999 edges, 1 policy — native dry-run 10_800
+    // (preflight 160 + target 320 + source 10_000 + recheck 320). Old fuse 10_748 was short.
+    const protocolDry = 160 + 320 + 10_000 + 320
+    expect(protocolDry).toBe(10_800)
+    const selection = {
+      version: 1 as const,
+      inventoryId: 'inv_base',
+      selectionId: 'sel_base',
+      planId: 'plan_base',
+      command: {
+        files: [{ path: '/a/keep/index.html', size: 17 * 1024 * 1024 }], // shape only; fuse is input-independent
+        pages: [{ pageId: 'pg_keep', disposition: 'keep', documentPath: '/a/keep/index.html', expectedPolicyEpoch: 1 }],
+        edges: [{ ownerPageId: 'pg_keep', path: '/a/keep/a.bin', providerArtifactId: null }],
+        artifactId: 'ar_keep',
+        expectedRevisionId: 'rv_keep',
+        expectedContentVersion: 2,
+        idempotencyKey: 'idem_keep',
+      },
+    }
+    let dryN = 0
+    const applied = await applyImport({
+      manageHost: 'manage.example.test',
+      selections: [selection],
+      headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      dryRunOnly: true,
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        expect(Object.keys(body).sort()).toEqual(['cursor', 'op', 'selection'])
+        expect(Object.keys(body.selection).sort()).toEqual(['command', 'inventoryId', 'planId', 'selectionId', 'version'])
+        dryN += 1
+        if (dryN < protocolDry) {
+          return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: `base-${dryN}` } }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
+      },
+    })
+    expect(dryN).toBe(protocolDry)
+    expect(applied.results[0]).toMatchObject({ ok: true, state: 'ready' })
+  })
+
   it('stops runaway distinct checking cursors via the admission safety fuse', async () => {
     let n = 0
     await expect(applyImport({
@@ -967,7 +1008,7 @@ describe('forge-import-legacy-pages', () => {
         return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: `runaway-${n}` } }), { status: 200 })
       },
     })).rejects.toMatchObject({ code: 'invalid_continuation', message: expect.stringContaining('request cap') })
-    expect(n).toBeGreaterThan(10_000)
+    expect(n).toBeGreaterThan(10_800) // above the revise counter-example; fuse is 2× protocol max
   })
 
   it('continueOnBlock keeps going after a native shortlink_conflict block', async () => {

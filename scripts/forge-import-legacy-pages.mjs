@@ -161,33 +161,38 @@ const RESULT_STATES = new Set(['checking', 'blocked', 'ready', 'staging', 'commi
  *   - domains/catalogue/import.ts:60 IMPORT_METADATA_LIMIT (target/recheck)
  * Count-admitted by validateBeginCommand (domains/publication/staging.ts:61):
  *   files ≤ 10_000, pages ≤ 1_000, edges ≤ 20_000.
- * Ops and old-revision resources/owners/previews/live_pages beyond the command
- * are NOT count-admitted (inventory byte cap / DB scan only) — those loops are
- * bounded by the progress fuse below, not by guessing inventory contents the
- * wire selection does not carry (selectionsFromWorkspace returns unit.selection
- * only; adapters/http/import.ts:49–52 rejects extra selection keys).
+ * Base-revision live_pages/resources/owners/previews are bounded by the same
+ * caps (the base revision was admitted under them). Ops are bounded by the
+ * default inventory byte cap (DEFAULT_LIMITS.maxInventoryBytes = 8_000_000 at
+ * :125–128) ÷ minimum encoded preview_selection JSON (70 UTF-8 bytes for
+ * {"kind":"preview_selection","operationId":"1","pageId":"p","path":"/"} —
+ * domains/catalogue/import.ts:41).
  *
- * Fuse = one request per admitted file (order-independent; packing varies by
- * inventory.files vs D1 ORDER BY path) + ceil(admit/128) for every paged
- * preflight loop (files, pages, edges, membership≤pages) + two target passes
- * over pages+files+edges + small slack for ready/seal/commit.
- *
- * Progress fuse (applyImport): abort on a repeated cursor, or when K consecutive
- * staging replies show no increase in session.files[].stored. Distinct checking
- * cursors without a terminal state are cut by this absolute fuse.
+ * Absolute ceiling = 2 × (
+ *   one transfer per admitted file
+ *   + ceil(max/128) for every preflight traversal (files, pages, edges, membership≤pages)
+ *   + 2× every target/recheck traversal (pages, files, edges, ops, live, resources, owners, previews)
+ * ). Safety factor 2 protects against unmodelled native loops; cycle + no-progress
+ * fuses remain the primary runaway guard (repeated cursor; K consecutive staging
+ * replies with no filesStored increase).
  */
 const ADMIT_FILES = 10_000 // domains/publication/staging.ts:61
 const ADMIT_PAGES = 1_000 // domains/publication/staging.ts:61
 const ADMIT_EDGES = 20_000 // domains/publication/staging.ts:61
+const MIN_ENCODED_OP_BYTES = 70 // catalogue/import.ts:41 preview_selection minimum JSON
+const ADMIT_OPS = Math.floor(8_000_000 / MIN_ENCODED_OP_BYTES) // DEFAULT_LIMITS.maxInventoryBytes :128
 const PAGE_WINDOW = 128 // staging.ts:189; catalogue/import.ts:60
-const BUDGET_SLACK = 8
+const SAFETY_FACTOR = 2 // protects against unmodelled native loops
 const STALL_LIMIT = 3
 const admitWindows = (n) => Math.ceil(n / PAGE_WINDOW)
-const CONTINUATION_SAFETY_FUSE =
-  ADMIT_FILES
-  + admitWindows(ADMIT_FILES) + admitWindows(ADMIT_PAGES) + admitWindows(ADMIT_EDGES) + admitWindows(ADMIT_PAGES)
-  + 2 * (admitWindows(ADMIT_PAGES) + admitWindows(ADMIT_FILES) + admitWindows(ADMIT_EDGES))
-  + BUDGET_SLACK
+const PREFLIGHT_WINDOWS =
+  admitWindows(ADMIT_FILES) + admitWindows(ADMIT_PAGES) + admitWindows(ADMIT_EDGES) + admitWindows(ADMIT_PAGES)
+const TARGET_PASS_WINDOWS =
+  admitWindows(ADMIT_PAGES) + admitWindows(ADMIT_FILES) + admitWindows(ADMIT_EDGES) + admitWindows(ADMIT_OPS)
+  + admitWindows(ADMIT_PAGES) + admitWindows(ADMIT_FILES) + admitWindows(ADMIT_EDGES) + admitWindows(ADMIT_PAGES)
+const CONTINUATION_SAFETY_FUSE = SAFETY_FACTOR * (
+  ADMIT_FILES + PREFLIGHT_WINDOWS + 2 * TARGET_PASS_WINDOWS
+)
 
 /** Pages Direct Upload asset hash: BLAKE3(base64(bytes) + extWithoutDot).hex[:32]. */
 export function pagesAssetHash(bytes, publishedPath) {
