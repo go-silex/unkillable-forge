@@ -126,7 +126,7 @@ if [ "$1" = "attestation" ] && [ "$2" = "verify" ]; then
     prev="$arg"
   done
   [ "$has" -eq 1 ] || { echo "missing --signer-workflow" >&2; exit 1; }
-  case " $* " in *" --source-digest sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "*) ;; *) exit 1 ;; esac
+  case " $* " in *" --source-digest aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "*) ;; *) exit 1 ;; esac
   case " $* " in *" --source-ref refs/heads/main "*) ;; *) exit 1 ;; esac
   exit 0
 fi
@@ -431,7 +431,8 @@ rm -f "$TMP/instance/.forge-migration-pending"
 export FORGE_TEST_MIG_MODE=empty
 write_wrangler
 cat >"$TMP/instance/deploys.jsonl" <<'EOF'
-{"tag":"engine/v1.1.0","engineVersion":"1.1.0","sourceCommit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","rollbackCompatibleFrom":"1.1.0","schemaFloor":"1.1.0","workerVersionIds":{"manage":"m","read":"r"},"workerNames":{"manage":"forge-manage-test","read":"forge-read-test"},"bindings":{"manage":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes"},"read":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes"}},"timestamp":"2026-01-01T00:00:00Z","mode":"deploy"}
+{"tag":"engine/v1.0.0","engineVersion":"1.0.0","sourceCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","rollbackCompatibleFrom":"1.0.0","schemaFloor":"1.0.0","workerVersionIds":{"manage":"m0","read":"r0"},"workerNames":{"manage":"forge-manage-test","read":"forge-read-test"},"bindings":{"manage":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""},"read":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""}},"timestamp":"2026-01-01T00:00:00Z","mode":"deploy"}
+{"tag":"engine/v1.1.0","engineVersion":"1.1.0","sourceCommit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","rollbackCompatibleFrom":"1.1.0","schemaFloor":"1.1.0","workerVersionIds":{"manage":"m","read":"r"},"workerNames":{"manage":"forge-manage-test","read":"forge-read-test"},"bindings":{"manage":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""},"read":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""}},"timestamp":"2026-01-01T01:00:00Z","mode":"deploy"}
 EOF
 set +e
 out="$($BASH_BIN "$DEPLOY" deploy --instance-dir "$TMP/instance" --tag engine/v1.0.0 --dry-run 2>&1)"
@@ -453,9 +454,10 @@ else
   pass "rollback schema floor refusal"
 fi
 
-# acceptance: floor allows target
+# acceptance: floor allows target that was previously completed on this instance
 cat >"$TMP/instance/deploys.jsonl" <<'EOF'
-{"tag":"engine/v1.1.0","engineVersion":"1.1.0","sourceCommit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","rollbackCompatibleFrom":"1.0.0","schemaFloor":"1.0.0","workerVersionIds":{"manage":"m","read":"r"},"workerNames":{"manage":"forge-manage-test","read":"forge-read-test"},"bindings":{"manage":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes"},"read":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes"}},"timestamp":"2026-01-01T00:00:00Z","mode":"deploy"}
+{"tag":"engine/v1.0.0","engineVersion":"1.0.0","sourceCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","rollbackCompatibleFrom":"1.0.0","schemaFloor":"1.0.0","workerVersionIds":{"manage":"m0","read":"r0"},"workerNames":{"manage":"forge-manage-test","read":"forge-read-test"},"bindings":{"manage":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""},"read":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""}},"timestamp":"2026-01-01T00:00:00Z","mode":"deploy"}
+{"tag":"engine/v1.1.0","engineVersion":"1.1.0","sourceCommit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","rollbackCompatibleFrom":"1.0.0","schemaFloor":"1.0.0","workerVersionIds":{"manage":"m","read":"r"},"workerNames":{"manage":"forge-manage-test","read":"forge-read-test"},"bindings":{"manage":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""},"read":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""}},"timestamp":"2026-01-01T01:00:00Z","mode":"deploy"}
 EOF
 set +e
 out="$($BASH_BIN "$DEPLOY" rollback --instance-dir "$TMP/instance" --to engine/v1.0.0 --dry-run 2>&1)"
@@ -465,6 +467,43 @@ if [ "$rc" -ne 0 ]; then
   bad "rollback schema floor acceptance (rc=$rc out=$out)"
 else
   pass "rollback schema floor acceptance"
+fi
+
+# refuse rollback to a tag never completed on this instance (floor alone is insufficient)
+cat >"$TMP/instance/deploys.jsonl" <<'EOF'
+{"tag":"engine/v1.1.0","engineVersion":"1.1.0","sourceCommit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","rollbackCompatibleFrom":"1.0.0","schemaFloor":"1.0.0","workerVersionIds":{"manage":"m","read":"r"},"workerNames":{"manage":"forge-manage-test","read":"forge-read-test"},"bindings":{"manage":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""},"read":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""}},"timestamp":"2026-01-01T00:00:00Z","mode":"deploy"}
+EOF
+set +e
+out="$($BASH_BIN "$DEPLOY" rollback --instance-dir "$TMP/instance" --to engine/v1.0.0 --dry-run 2>&1)"
+rc=$?
+set -e
+if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'completed deployment'; then
+  bad "rollback without completed target accepted (rc=$rc out=$out)"
+else
+  pass "rollback without completed target refused"
+fi
+
+# resume interrupted rollback (partial-rollback-manage matching tag+SHA)
+cat >"$TMP/instance/deploys.jsonl" <<'EOF'
+{"tag":"engine/v1.0.0","engineVersion":"1.0.0","sourceCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","rollbackCompatibleFrom":"1.0.0","schemaFloor":"1.0.0","workerVersionIds":{"manage":"m0","read":"r0"},"workerNames":{"manage":"forge-manage-test","read":"forge-read-test"},"bindings":{"manage":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""},"read":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""}},"timestamp":"2026-01-01T00:00:00Z","mode":"deploy"}
+{"tag":"engine/v1.1.0","engineVersion":"1.1.0","sourceCommit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","rollbackCompatibleFrom":"1.0.0","schemaFloor":"1.0.0","workerVersionIds":{"manage":"m1","read":"r1"},"workerNames":{"manage":"forge-manage-test","read":"forge-read-test"},"bindings":{"manage":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""},"read":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""}},"timestamp":"2026-01-01T01:00:00Z","mode":"deploy"}
+{"tag":"engine/v1.0.0","engineVersion":"1.0.0","sourceCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","rollbackCompatibleFrom":"1.0.0","schemaFloor":"1.0.0","workerVersionIds":{"manage":"m-partial","read":"pending"},"workerNames":{"manage":"forge-manage-test","read":"forge-read-test"},"bindings":{"manage":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""},"read":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""}},"timestamp":"2026-01-01T02:00:00Z","mode":"partial-rollback-manage"}
+EOF
+export FORGE_TEST_MIG_MODE=empty
+write_wrangler
+: >"$WRANGLER_LOG"
+set +e
+out="$($BASH_BIN "$DEPLOY" rollback --instance-dir "$TMP/instance" --to engine/v1.0.0 2>&1)"
+rc=$?
+set -e
+if [ "$rc" -ne 0 ]; then
+  bad "resume partial rollback (rc=$rc out=$out)"
+elif ! printf '%s\n' "$out" | grep -qi 'resuming partial rollback'; then
+  bad "resume partial rollback missing resume note (out=$out)"
+elif ! grep -q '"mode": "rollback"' "$TMP/instance/deploys.jsonl"; then
+  bad "resume partial rollback missing completed rollback row"
+else
+  pass "resume partial rollback"
 fi
 
 # 6. ledger append + schemaFloor + partial-manage then deploy; config ends with .json
@@ -486,6 +525,8 @@ elif ! grep -q '"mode": "partial-manage"' "$TMP/instance/deploys.jsonl"; then
   bad "partial-manage ledger missing"
 elif ! grep -q '"schemaFloor"' "$TMP/instance/deploys.jsonl"; then
   bad "schemaFloor missing from ledger"
+elif ! grep -q '"r2_jurisdiction"' "$TMP/instance/deploys.jsonl"; then
+  bad "r2_jurisdiction missing from ledger"
 else
   pass "ledger append (partial + deploy + schemaFloor)"
 fi
@@ -653,6 +694,56 @@ if "$BASH_BIN" "$DEPLOY" deploy --instance-dir "$TMP/guarded" --tag engine/v1.0.
 else
   pass "identical role names rejected"
 fi
+
+# R2 jurisdiction must match across manage/read
+write_instance "$TMP/jur" generic
+python3 - "$TMP/jur/read.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+c = json.load(open(p, encoding="utf-8"))
+c["r2_buckets"][0]["jurisdiction"] = "eu"
+json.dump(c, open(p, "w", encoding="utf-8"))
+PY
+if "$BASH_BIN" "$DEPLOY" deploy --instance-dir "$TMP/jur" --tag engine/v1.0.0 --dry-run >"$TMP/jur.log" 2>&1; then
+  bad "R2 jurisdiction mismatch accepted"
+else
+  pass "R2 jurisdiction mismatch rejected"
+fi
+
+# Contract migration refused while running Workers are below the new floor
+write_instance "$TMP/contract" generic
+cat >"$TMP/contract/deploys.jsonl" <<'EOF'
+{"tag":"engine/v1.0.0","engineVersion":"1.0.0","sourceCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","rollbackCompatibleFrom":"1.0.0","schemaFloor":"1.0.0","workerVersionIds":{"manage":"m","read":"r"},"workerNames":{"manage":"forge-manage-test","read":"forge-read-test"},"bindings":{"manage":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""},"read":{"account_id":"acct-test-manage","d1_database_id":"dddddddd-1111-1111-1111-111111111111","r2_bucket_name":"bytes","r2_jurisdiction":""}},"timestamp":"2026-01-01T00:00:00Z","mode":"deploy"}
+EOF
+python3 - "$STAGE/release.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+d["rollbackCompatibleFrom"] = "1.1.0"
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2)
+print()
+PY
+pack_release
+export FORGE_TEST_MIG_MODE=pending
+write_wrangler
+set +e
+out="$($BASH_BIN "$DEPLOY" deploy --instance-dir "$TMP/contract" --tag engine/v1.0.0 --apply-migrations 2>&1)"
+rc=$?
+set -e
+if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'intermediate release\|new schema floor'; then
+  bad "contract migration below running floor accepted (rc=$rc out=$out)"
+else
+  pass "contract migration below running floor refused"
+fi
+python3 - "$STAGE/release.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p, encoding="utf-8"))
+d["rollbackCompatibleFrom"] = "1.0.0"
+json.dump(d, open(p, "w", encoding="utf-8"), indent=2)
+print()
+PY
+pack_release
 
 if [ "$fail" -ne 0 ]; then
   echo

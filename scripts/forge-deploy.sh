@@ -92,7 +92,7 @@ for k in sys.argv[2].split("."):
 print(cur)' "$1" "$2"
 }
 
-# Validate manage/read JSON; print account_id, name, d1_database_id, r2_bucket_name
+# Validate manage/read JSON; print account_id, name, d1_database_id, r2_bucket_name, r2_jurisdiction
 validate_role_config() {
   python3 - "$1" <<'PY'
 import json, sys
@@ -117,9 +117,17 @@ for row in cfg.get("d1_databases") or []:
 if not isinstance(db_id, str) or not db_id.strip():
     raise SystemExit("missing d1_databases[].database_id for binding DB")
 r2 = None
+r2_jurisdiction = ""
 for row in cfg.get("r2_buckets") or []:
     if isinstance(row, dict) and row.get("binding") == "REVISION_BYTES":
         r2 = row.get("bucket_name")
+        j = row.get("jurisdiction")
+        if j is None:
+            r2_jurisdiction = ""
+        elif isinstance(j, str):
+            r2_jurisdiction = j.strip()
+        else:
+            raise SystemExit("r2_buckets[].jurisdiction must be a string")
         break
 if not isinstance(r2, str) or not r2.strip():
     raise SystemExit("missing r2_buckets[].bucket_name for binding REVISION_BYTES")
@@ -127,6 +135,7 @@ print(account)
 print(name)
 print(db_id)
 print(r2)
+print(r2_jurisdiction)
 PY
 }
 
@@ -142,6 +151,7 @@ load_role() {
   ROLE_NAME="$(printf '%s\n' "$out" | sed -n '2p')"
   ROLE_D1_ID="$(printf '%s\n' "$out" | sed -n '3p')"
   ROLE_R2="$(printf '%s\n' "$out" | sed -n '4p')"
+  ROLE_R2_JURISDICTION="$(printf '%s\n' "$out" | sed -n '5p')"
 }
 
 lock_instance() {
@@ -154,10 +164,11 @@ lock_instance() {
 }
 
 validate_instance_pair() {
-  if [ "$1" != "$5" ] || [ "$3" != "$7" ] || [ "$4" != "$8" ]; then
+  # args: m_acct m_name m_d1 m_r2 m_jur r_acct r_name r_d1 r_r2 r_jur
+  if [ "$1" != "$6" ] || [ "$3" != "$8" ] || [ "$4" != "$9" ] || [ "$5" != "${10}" ]; then
     die "manage and read must share account, D1 and R2"
   fi
-  [ "$2" != "$6" ] || die "manage and read Worker names must differ"
+  [ "$2" != "$7" ] || die "manage and read Worker names must differ"
 }
 
 load_instance_meta() {
@@ -239,7 +250,7 @@ verify_checksums() {
 attest_tarball() {
   local tarball="$1" repo="$2" sha="$3"
   gh attestation verify "$tarball" --repo "$repo" --signer-workflow "$SIGNER_WORKFLOW" \
-    --source-digest "sha1:$sha" --source-ref "refs/heads/main" >/dev/null
+    --source-digest "$sha" --source-ref "refs/heads/main" >/dev/null
 }
 
 resolve_tag_commit() {
@@ -440,10 +451,10 @@ PY
 }
 
 preflight_bindings() {
-  local ledger_json="$1" role="$2" account="$3" name="$4" d1="$5" r2="$6"
-  python3 - "$ledger_json" "$role" "$account" "$name" "$d1" "$r2" <<'PY'
+  local ledger_json="$1" role="$2" account="$3" name="$4" d1="$5" r2="$6" r2j="$7"
+  python3 - "$ledger_json" "$role" "$account" "$name" "$d1" "$r2" "$r2j" <<'PY'
 import json, sys
-row, role, account, name, d1, r2 = sys.argv[1:7]
+row, role, account, name, d1, r2, r2j = sys.argv[1:8]
 data = json.loads(row or "{}")
 if not data:
     raise SystemExit(0)
@@ -457,6 +468,25 @@ if binds.get("d1_database_id") and binds["d1_database_id"] != d1:
     raise SystemExit(f"{role} d1_database_id drift")
 if binds.get("r2_bucket_name") and binds["r2_bucket_name"] != r2:
     raise SystemExit(f"{role} r2_bucket_name drift")
+if "r2_jurisdiction" in binds and (binds.get("r2_jurisdiction") or "") != (r2j or ""):
+    raise SystemExit(f"{role} r2_jurisdiction drift")
+PY
+}
+
+ledger_has_completed() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+path, tag, sha = sys.argv[1:4]
+completed = {"deploy", "rollback"}
+try:
+    lines = [ln for ln in open(path, encoding="utf-8").read().splitlines() if ln.strip()]
+except FileNotFoundError:
+    raise SystemExit(1)
+for ln in lines:
+    row = json.loads(ln)
+    if row.get("mode") in completed and row.get("tag") == tag and row.get("sourceCommit") == sha:
+        raise SystemExit(0)
+raise SystemExit(1)
 PY
 }
 
@@ -478,11 +508,13 @@ print(json.dumps({
       "account_id": os.environ["L_MACCT"],
       "d1_database_id": os.environ["L_MD1"],
       "r2_bucket_name": os.environ["L_MR2"],
+      "r2_jurisdiction": os.environ.get("L_MR2J", ""),
     },
     "read": {
       "account_id": os.environ["L_RACCT"],
       "d1_database_id": os.environ["L_RD1"],
       "r2_bucket_name": os.environ["L_RR2"],
+      "r2_jurisdiction": os.environ.get("L_RR2J", ""),
     },
   },
   "readVariant": os.environ["L_VARIANT"],
@@ -536,6 +568,14 @@ deploy_one_role() {
       if [ "$apply_migrations" != "1" ]; then
         die "unapplied migrations require --apply-migrations: $(tr '\n' ' ' <"$mig_list")"
       fi
+      # Contract migrations raise the floor; refuse while older Workers still serve.
+      local running_version=""
+      if [ -n "${prev:-}" ] && [ "${prev}" != "{}" ]; then
+        running_version="$(printf '%s' "$prev" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("engineVersion") or "")')"
+      fi
+      if [ -n "$running_version" ] && [ -n "${new_floor:-}" ] && ! semver_ge "$running_version" "$new_floor"; then
+        die "running Workers at $running_version < new schema floor $new_floor — deploy a compatible intermediate release before applying contract migrations"
+      fi
       if [ "$dry_run" = "1" ]; then
         info "dry-run: would apply migrations: $(tr '\n' ' ' <"$mig_list")"
       else
@@ -544,7 +584,7 @@ deploy_one_role() {
         pending_ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
         export L_TAG="$tag" L_VERSION="$version" L_SOURCE="$source_sha" L_ROLLBACK="$rollback" L_FLOOR="$new_floor" \
           L_MVID="pending" L_RVID="pending" L_MNAME="$m_name" L_RNAME="$r_name" \
-          L_MACCT="$m_account" L_MD1="$m_d1" L_MR2="$m_r2" L_RACCT="$r_account" L_RD1="$r_d1" L_RR2="$r_r2" \
+          L_MACCT="$m_account" L_MD1="$m_d1" L_MR2="$m_r2" L_MR2J="$m_r2j" L_RACCT="$r_account" L_RD1="$r_d1" L_RR2="$r_r2" L_RR2J="$r_r2j" \
           L_VARIANT="$READ_VARIANT" L_TS="$pending_ts" L_MODE="pending-migration"
         (umask 077; printf '%s\n' "Reconcile D1 and deploys.jsonl before removing this marker." >"$instance_dir/.forge-migration-pending")
         append_ledger "$ledger" "$(make_ledger_payload)"
@@ -608,17 +648,17 @@ cmd_deploy() {
 
   # Preflight both roles before any mutation.
   load_role "$instance_dir" manage
-  local m_account="$ROLE_ACCOUNT" m_name="$ROLE_NAME" m_d1="$ROLE_D1_ID" m_r2="$ROLE_R2" m_cfg="$ROLE_CFG_PATH"
+  local m_account="$ROLE_ACCOUNT" m_name="$ROLE_NAME" m_d1="$ROLE_D1_ID" m_r2="$ROLE_R2" m_r2j="$ROLE_R2_JURISDICTION" m_cfg="$ROLE_CFG_PATH"
   load_role "$instance_dir" read
-  local r_account="$ROLE_ACCOUNT" r_name="$ROLE_NAME" r_d1="$ROLE_D1_ID" r_r2="$ROLE_R2" r_cfg="$ROLE_CFG_PATH"
-  validate_instance_pair "$m_account" "$m_name" "$m_d1" "$m_r2" "$r_account" "$r_name" "$r_d1" "$r_r2"
+  local r_account="$ROLE_ACCOUNT" r_name="$ROLE_NAME" r_d1="$ROLE_D1_ID" r_r2="$ROLE_R2" r_r2j="$ROLE_R2_JURISDICTION" r_cfg="$ROLE_CFG_PATH"
+  validate_instance_pair "$m_account" "$m_name" "$m_d1" "$m_r2" "$m_r2j" "$r_account" "$r_name" "$r_d1" "$r_r2" "$r_r2j"
   lock_instance "$instance_dir"
 
   local ledger="$instance_dir/deploys.jsonl"
   local prev
   prev="$(ledger_last_json "$ledger")"
-  preflight_bindings "$prev" manage "$m_account" "$m_name" "$m_d1" "$m_r2" || die "manage binding preflight failed"
-  preflight_bindings "$prev" read "$r_account" "$r_name" "$r_d1" "$r_r2" || die "read binding preflight failed"
+  preflight_bindings "$prev" manage "$m_account" "$m_name" "$m_d1" "$m_r2" "$m_r2j" || die "manage binding preflight failed"
+  preflight_bindings "$prev" read "$r_account" "$r_name" "$r_d1" "$r_r2" "$r_r2j" || die "read binding preflight failed"
 
   verify_release_bundle "$tag" "$repo" "$WORK/dl" "$WORK/release"
 
@@ -643,7 +683,7 @@ cmd_deploy() {
     partial_ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     export L_TAG="$tag" L_VERSION="$version" L_SOURCE="$source_sha" L_ROLLBACK="$rollback" L_FLOOR="$new_floor" \
       L_MVID="$manage_vid" L_RVID="pending" L_MNAME="$m_name" L_RNAME="$r_name" \
-      L_MACCT="$m_account" L_MD1="$m_d1" L_MR2="$m_r2" L_RACCT="$r_account" L_RD1="$r_d1" L_RR2="$r_r2" \
+      L_MACCT="$m_account" L_MD1="$m_d1" L_MR2="$m_r2" L_MR2J="$m_r2j" L_RACCT="$r_account" L_RD1="$r_d1" L_RR2="$r_r2" L_RR2J="$r_r2j" \
       L_VARIANT="$READ_VARIANT" L_TS="$partial_ts" L_MODE="partial-manage"
     partial="$(make_ledger_payload)"
     append_ledger "$ledger" "$partial"
@@ -658,7 +698,7 @@ cmd_deploy() {
   if [ "$dry_run" = "1" ]; then mode="dry-run"; else mode="deploy"; fi
   export L_TAG="$tag" L_VERSION="$version" L_SOURCE="$source_sha" L_ROLLBACK="$rollback" L_FLOOR="$new_floor" \
     L_MVID="$manage_vid" L_RVID="$read_vid" L_MNAME="$m_name" L_RNAME="$r_name" \
-    L_MACCT="$m_account" L_MD1="$m_d1" L_MR2="$m_r2" L_RACCT="$r_account" L_RD1="$r_d1" L_RR2="$r_r2" \
+    L_MACCT="$m_account" L_MD1="$m_d1" L_MR2="$m_r2" L_MR2J="$m_r2j" L_RACCT="$r_account" L_RD1="$r_d1" L_RR2="$r_r2" L_RR2J="$r_r2j" \
     L_VARIANT="$READ_VARIANT" L_TS="$ts" L_MODE="$mode"
   payload="$(make_ledger_payload)"
   if [ "$dry_run" != "1" ]; then
@@ -694,10 +734,10 @@ cmd_rollback() {
   if [ "$READ_VARIANT" = "generic" ]; then read_entry_key="read"; else read_entry_key="read-unkillable"; fi
 
   load_role "$instance_dir" manage
-  local m_account="$ROLE_ACCOUNT" m_name="$ROLE_NAME" m_d1="$ROLE_D1_ID" m_r2="$ROLE_R2" m_cfg="$ROLE_CFG_PATH"
+  local m_account="$ROLE_ACCOUNT" m_name="$ROLE_NAME" m_d1="$ROLE_D1_ID" m_r2="$ROLE_R2" m_r2j="$ROLE_R2_JURISDICTION" m_cfg="$ROLE_CFG_PATH"
   load_role "$instance_dir" read
-  local r_account="$ROLE_ACCOUNT" r_name="$ROLE_NAME" r_d1="$ROLE_D1_ID" r_r2="$ROLE_R2" r_cfg="$ROLE_CFG_PATH"
-  validate_instance_pair "$m_account" "$m_name" "$m_d1" "$m_r2" "$r_account" "$r_name" "$r_d1" "$r_r2"
+  local r_account="$ROLE_ACCOUNT" r_name="$ROLE_NAME" r_d1="$ROLE_D1_ID" r_r2="$ROLE_R2" r_r2j="$ROLE_R2_JURISDICTION" r_cfg="$ROLE_CFG_PATH"
+  validate_instance_pair "$m_account" "$m_name" "$m_d1" "$m_r2" "$m_r2j" "$r_account" "$r_name" "$r_d1" "$r_r2" "$r_r2j"
   lock_instance "$instance_dir"
 
   local ledger="$instance_dir/deploys.jsonl"
@@ -705,18 +745,30 @@ cmd_rollback() {
   prev="$(ledger_last_json "$ledger")"
   [ "$prev" != "{}" ] || die "ledger empty — cannot determine schema floor"
   floor="$(ledger_schema_floor "$prev")"
-  preflight_bindings "$prev" manage "$m_account" "$m_name" "$m_d1" "$m_r2" || die "manage binding preflight failed"
-  preflight_bindings "$prev" read "$r_account" "$r_name" "$r_d1" "$r_r2" || die "read binding preflight failed"
+  preflight_bindings "$prev" manage "$m_account" "$m_name" "$m_d1" "$m_r2" "$m_r2j" || die "manage binding preflight failed"
+  preflight_bindings "$prev" read "$r_account" "$r_name" "$r_d1" "$r_r2" "$r_r2j" || die "read binding preflight failed"
 
   verify_release_bundle "$to" "$repo" "$WORK/dl" "$WORK/release"
   local target_version source_sha rollback
   target_version="$(json_field "$WORK/release/release.json" engineVersion)"
   source_sha="$(json_field "$WORK/release/release.json" sourceCommit)"
   rollback="$(json_field "$WORK/release/release.json" rollbackCompatibleFrom)"
-  local current_version
-  current_version="$(printf '%s' "$prev" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("engineVersion", ""))')"
-  if [ -z "$current_version" ] || ! semver_ge "$current_version" "$target_version" || [ "$current_version" = "$target_version" ]; then
-    die "rollback target must be older than the current release"
+
+  local prev_mode prev_tag prev_source resume_partial=0
+  prev_mode="$(printf '%s' "$prev" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("mode") or "")')"
+  prev_tag="$(printf '%s' "$prev" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag") or "")')"
+  prev_source="$(printf '%s' "$prev" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sourceCommit") or "")')"
+  if [ "$prev_mode" = "partial-rollback-manage" ] && [ "$prev_tag" = "$to" ] && [ "$prev_source" = "$source_sha" ]; then
+    resume_partial=1
+  fi
+
+  if [ "$resume_partial" != "1" ]; then
+    local current_version
+    current_version="$(printf '%s' "$prev" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("engineVersion", ""))')"
+    if [ -z "$current_version" ] || ! semver_ge "$current_version" "$target_version" || [ "$current_version" = "$target_version" ]; then
+      die "rollback target must be older than the current release"
+    fi
+    ledger_has_completed "$ledger" "$to" "$source_sha" || die "rollback target $to must match a completed deployment on this instance"
   fi
   floor="$(semver_max "$floor" "$rollback")"
   assert_compatibility_floor "$target_version" "$floor"
@@ -739,16 +791,24 @@ cmd_rollback() {
   fi
 
   local manage_vid read_vid
-  ROLE_CFG_PATH="$m_cfg" ROLE_ACCOUNT="$m_account"
-  manage_vid="$(deploy_one_role "$wrangler" "$instance_dir" manage "$WORK/release" "$dry_run" skip manage)"
-  if [ "$dry_run" != "1" ]; then
-    local partial_rollback_ts
-    partial_rollback_ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    export L_TAG="$to" L_VERSION="$target_version" L_SOURCE="$source_sha" L_ROLLBACK="$rollback" L_FLOOR="$floor" \
-      L_MVID="$manage_vid" L_RVID="pending" L_MNAME="$m_name" L_RNAME="$r_name" \
-      L_MACCT="$m_account" L_MD1="$m_d1" L_MR2="$m_r2" L_RACCT="$r_account" L_RD1="$r_d1" L_RR2="$r_r2" \
-      L_VARIANT="$READ_VARIANT" L_TS="$partial_rollback_ts" L_MODE="partial-rollback-manage"
-    append_ledger "$ledger" "$(make_ledger_payload)"
+  if [ "$resume_partial" = "1" ]; then
+    manage_vid="$(printf '%s' "$prev" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("workerVersionIds") or {}).get("manage") or "")')"
+    if [ -z "$manage_vid" ] || [ "$manage_vid" = "pending" ]; then
+      die "partial rollback ledger missing manage version id"
+    fi
+    info "resuming partial rollback: manage already at $to"
+  else
+    ROLE_CFG_PATH="$m_cfg" ROLE_ACCOUNT="$m_account"
+    manage_vid="$(deploy_one_role "$wrangler" "$instance_dir" manage "$WORK/release" "$dry_run" skip manage)"
+    if [ "$dry_run" != "1" ]; then
+      local partial_rollback_ts
+      partial_rollback_ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+      export L_TAG="$to" L_VERSION="$target_version" L_SOURCE="$source_sha" L_ROLLBACK="$rollback" L_FLOOR="$floor" \
+        L_MVID="$manage_vid" L_RVID="pending" L_MNAME="$m_name" L_RNAME="$r_name" \
+        L_MACCT="$m_account" L_MD1="$m_d1" L_MR2="$m_r2" L_MR2J="$m_r2j" L_RACCT="$r_account" L_RD1="$r_d1" L_RR2="$r_r2" L_RR2J="$r_r2j" \
+        L_VARIANT="$READ_VARIANT" L_TS="$partial_rollback_ts" L_MODE="partial-rollback-manage"
+      append_ledger "$ledger" "$(make_ledger_payload)"
+    fi
   fi
   ROLE_CFG_PATH="$r_cfg" ROLE_ACCOUNT="$r_account"
   read_vid="$(deploy_one_role "$wrangler" "$instance_dir" read "$WORK/release" "$dry_run" skip "$read_entry_key")"
@@ -759,7 +819,7 @@ cmd_rollback() {
   # schemaFloor preserved from previous ledger (never lowered).
   export L_TAG="$to" L_VERSION="$target_version" L_SOURCE="$source_sha" L_ROLLBACK="$rollback" L_FLOOR="$floor" \
     L_MVID="$manage_vid" L_RVID="$read_vid" L_MNAME="$m_name" L_RNAME="$r_name" \
-    L_MACCT="$m_account" L_MD1="$m_d1" L_MR2="$m_r2" L_RACCT="$r_account" L_RD1="$r_d1" L_RR2="$r_r2" \
+    L_MACCT="$m_account" L_MD1="$m_d1" L_MR2="$m_r2" L_MR2J="$m_r2j" L_RACCT="$r_account" L_RD1="$r_d1" L_RR2="$r_r2" L_RR2J="$r_r2j" \
     L_VARIANT="$READ_VARIANT" L_TS="$ts" L_MODE="$mode"
   payload="$(make_ledger_payload)"
   if [ "$dry_run" != "1" ]; then
