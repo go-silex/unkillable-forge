@@ -31,6 +31,9 @@ done
 # findings, and clearing those is its own change, not a mechanical move.
 shellcheck -x scripts/*.sh \
   tests/shell/test_release_plugin.sh \
+  tests/shell/test_build_engine_release.sh \
+  tests/shell/test_forge_deploy.sh \
+  tests/shell/test_forge_bootstrap.sh \
   tests/shell/test_git_env_isolation.sh
 
 echo "lint-shell: clean"

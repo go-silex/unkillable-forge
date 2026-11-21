@@ -80,6 +80,15 @@ def _write_tree(base: Path, *, omp_version: str = "1.8.1", changelog: str = CHAN
     omp["plugins"] = [{"name": "silex-forge", "version": omp_version, "source": "./x"}]
     (base / ".omp-plugin/marketplace.json").write_text(json.dumps(omp), encoding="utf-8")
     (base / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+    (base / "docs").mkdir(exist_ok=True)
+    (base / "engine.json").write_text(
+        json.dumps({"version": "1.0.0", "rollbackCompatibleFrom": "1.0.0"}) + "\n",
+        encoding="utf-8",
+    )
+    (base / "docs/engine-changelog.md").write_text(
+        "# Engine changelog\n\n## [1.0.0]\n\n- fixture engine notes\n",
+        encoding="utf-8",
+    )
     return base
 
 

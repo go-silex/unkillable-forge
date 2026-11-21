@@ -275,12 +275,16 @@ jobs:
         run: python3 -m unittest discover -s tests/python -p 'test_*.py' -v
 
   # Suite runs on every push; release additionally requires explicit opt-in.
+  # Client plugin path: unkillable-forge/vX.Y.Z (no longer tags silex-forge).
+  # TruffleHog lives in secret-scan.yml (separate workflow) — both release jobs
+  # wait for that check-run on this SHA before tagging (cannot needs: across workflows).
   release:
-    needs: [check, test, test-os, test-bash32, test-py39]
+    needs: [check, test, test-os, test-bash32, test-py39, publisher-committed, publisher-native-producer]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.FORGE_RELEASES_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      checks: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -291,7 +295,88 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Tag vX.Y.Z and GitHub Release when plugin version is new
+      - name: Wait for TruffleHog check-run on this SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/wait-check-run.sh --sha "${{ github.sha }}" --name TruffleHog
+
+      - name: Tag unkillable-forge/vX.Y.Z and GitHub Release when plugin version is new
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/release-plugin.sh
+
+  # Engine Workers release: only tested SHAs; attestation then annotated tag.
+  engine-release:
+    name: engine-release
+    needs: [check, test, test-os, test-bash32, test-py39, publisher-committed, publisher-native-producer]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.FORGE_RELEASES_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      checks: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Wait for TruffleHog check-run on this SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/wait-check-run.sh --sha "${{ github.sha }}" --name TruffleHog
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Decide whether engine/vX.Y.Z is new
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          out="$(bash scripts/release-engine.sh check 2>&1)"
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+          if [ "$rc" -eq 78 ]; then
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+          echo "skip=false" >>"$GITHUB_OUTPUT"
+          version="$(python3 scripts/check_plugin_versions.py --print-engine-version)"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "tag=engine/v${version}" >>"$GITHUB_OUTPUT"
+
+      - name: Build engine release artifact
+        if: steps.decide.outputs.skip != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/engine-release"
+          bash scripts/release-engine.sh build "$RUNNER_TEMP/engine-release"
+
+      - name: Attest build provenance (tarball + release.json)
+        if: steps.decide.outputs.skip != 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/engine-release/forge-engine-${{ steps.decide.outputs.version }}.tar.gz
+            ${{ runner.temp }}/engine-release/release.json
+
+      - name: Tag engine/vX.Y.Z and GitHub Release
+        if: steps.decide.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/release-engine.sh publish "$RUNNER_TEMP/engine-release"

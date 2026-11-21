@@ -37,24 +37,34 @@ gh_calls() {
   fi
 }
 
+write_component() {
+  local dest="$1" name="$2" version="$3"
+  local plugin_json
+  plugin_json="$(printf '{"name":"%s","version":"%s"}' "$name" "$version")"
+  mkdir -p \
+    "$dest/plugins/$name/.claude-plugin" \
+    "$dest/plugins/$name/.grok-plugin" \
+    "$dest/plugins/$name/.omp-plugin" \
+    "$dest/plugins/$name/.codex-plugin"
+  printf '%s\n' "$plugin_json" >"$dest/plugins/$name/plugin.json"
+  printf '%s\n' "$plugin_json" >"$dest/plugins/$name/.claude-plugin/plugin.json"
+  printf '%s\n' "$plugin_json" >"$dest/plugins/$name/.grok-plugin/plugin.json"
+  printf '%s\n' "$plugin_json" >"$dest/plugins/$name/.omp-plugin/plugin.json"
+  printf '%s\n' "$plugin_json" >"$dest/plugins/$name/.codex-plugin/plugin.json"
+  printf '%s\n' "$plugin_json" >"$dest/plugins/$name/package.json"
+}
+
 write_version_files() {
   local dest="$1"
-  local plugin_json='{"name":"silex-forge","version":"9.9.9"}'
   mkdir -p \
     "$dest/scripts" \
-    "$dest/plugins/silex-forge/.claude-plugin" \
-    "$dest/plugins/silex-forge/.grok-plugin" \
-    "$dest/plugins/silex-forge/.omp-plugin" \
-    "$dest/plugins/silex-forge/.codex-plugin" \
+    "$dest/docs" \
     "$dest/.claude-plugin" \
     "$dest/.grok-plugin" \
-    "$dest/.omp-plugin"
-  printf '%s\n' "$plugin_json" >"$dest/plugins/silex-forge/plugin.json"
-  printf '%s\n' "$plugin_json" >"$dest/plugins/silex-forge/.claude-plugin/plugin.json"
-  printf '%s\n' "$plugin_json" >"$dest/plugins/silex-forge/.grok-plugin/plugin.json"
-  printf '%s\n' "$plugin_json" >"$dest/plugins/silex-forge/.omp-plugin/plugin.json"
-  printf '%s\n' "$plugin_json" >"$dest/plugins/silex-forge/.codex-plugin/plugin.json"
-  printf '%s\n' "$plugin_json" >"$dest/plugins/silex-forge/package.json"
+    "$dest/.omp-plugin" \
+    "$dest/.agents/plugins"
+  write_component "$dest" "silex-forge" "9.9.9"
+  write_component "$dest" "unkillable-forge" "9.9.9"
   cat >"$dest/.claude-plugin/marketplace.json" <<'EOF'
 {
   "name": "silex-forge",
@@ -82,12 +92,38 @@ EOF
   ]
 }
 EOF
+  cat >"$dest/.agents/plugins/marketplace.json" <<'EOF'
+{
+  "name": "unkillable-forge",
+  "plugins": [
+    {"name": "unkillable-forge", "source": {"source": "local", "path": "./plugins/unkillable-forge"}},
+    {"name": "silex-forge", "source": {"source": "local", "path": "./plugins/silex-forge"}}
+  ]
+}
+EOF
   cat >"$dest/CHANGELOG.md" <<'EOF'
 # Changelog
 
 ## [9.9.9]
 
 - Test notes for release 9.9.9.
+EOF
+  cat >"$dest/plugins/unkillable-forge/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## [9.9.9]
+
+- Test notes for unkillable-forge 9.9.9.
+EOF
+  cat >"$dest/engine.json" <<'EOF'
+{"version": "1.0.0", "rollbackCompatibleFrom": "1.0.0"}
+EOF
+  cat >"$dest/docs/engine-changelog.md" <<'EOF'
+# Engine changelog
+
+## [1.0.0]
+
+- Test engine notes.
 EOF
 }
 
@@ -118,7 +154,7 @@ run_release() {
   set -e
 }
 
-tag_ref="refs/tags/silex-forge/v9.9.9"
+tag_ref="refs/tags/unkillable-forge/v9.9.9"
 
 # --- main fixture (cases 1–4) ---
 FIXTURE="$TMP/repo"
@@ -140,7 +176,11 @@ if git -C "$FIXTURE" rev-parse -q --verify "refs/tags/v9.9.9" >/dev/null; then
   echo "FAIL nominal (naked v9.9.9 tag must not be created)"
   cas1=1
 fi
-if ! git -C "$FIXTURE" ls-remote --tags origin | grep -F -q "refs/tags/silex-forge/v9.9.9"; then
+if git -C "$FIXTURE" rev-parse -q --verify "refs/tags/silex-forge/v9.9.9" >/dev/null; then
+  echo "FAIL nominal (silex-forge tag must not be created)"
+  cas1=1
+fi
+if ! git -C "$FIXTURE" ls-remote --tags origin | grep -F -q "refs/tags/unkillable-forge/v9.9.9"; then
   echo "FAIL nominal (remote tag missing)"
   cas1=1
 fi
@@ -148,8 +188,8 @@ if [ "$(gh_calls)" != "1" ]; then
   echo "FAIL nominal (gh calls=$(gh_calls) want 1)"
   cas1=1
 fi
-if ! grep -q "release create silex-forge/v9.9.9" "$GH_LOG"; then
-  echo "FAIL nominal (gh missing release create silex-forge/v9.9.9)"
+if ! grep -q "release create unkillable-forge/v9.9.9" "$GH_LOG"; then
+  echo "FAIL nominal (gh missing release create unkillable-forge/v9.9.9)"
   cas1=1
 fi
 if ! grep -q -- "--verify-tag" "$GH_LOG"; then
@@ -245,7 +285,7 @@ fi
 FIXTURE5="$TMP/repo5"
 BARE5="$TMP/origin5.git"
 setup_fixture "$FIXTURE5" "$BARE5"
-cat >"$FIXTURE5/CHANGELOG.md" <<'EOF'
+cat >"$FIXTURE5/plugins/unkillable-forge/CHANGELOG.md" <<'EOF'
 # Changelog
 
 ## [Unreleased]
