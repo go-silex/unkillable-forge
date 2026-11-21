@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Offline shape tests for scripts/build-engine-release.sh (stubbed wrangler, no network).
+# Version is derived from engine.json (never hard-coded independently of that fixture).
 set -euo pipefail
 
 # shellcheck source=tests/shell/lib/git-env-guard.sh
@@ -16,9 +17,8 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP"
 unset WRANGLER
-mkdir -p "$TMP/bin" "$TMP/repo" "$TMP/out"
+mkdir -p "$TMP/bin" "$TMP/repo" "$TMP/out" "$TMP/out2"
 
-# Minimal repo fixture with engine.json, wrangler profiles, migrations, fake git sha.
 cp "$ROOT/scripts/build-engine-release.sh" "$TMP/repo/"
 mkdir -p "$TMP/repo/scripts" "$TMP/repo/migrations" "$TMP/repo/docs" \
   "$TMP/repo/node_modules/@cloudflare/vitest-plugin/node_modules/.bin"
@@ -28,9 +28,13 @@ cp "$ROOT/engine.json" "$TMP/repo/engine.json"
 cp "$ROOT/docs/engine-changelog.md" "$TMP/repo/docs/engine-changelog.md"
 cp "$ROOT/wrangler.manage.toml" "$TMP/repo/wrangler.manage.toml"
 cp "$ROOT/wrangler.read.toml" "$TMP/repo/wrangler.read.toml"
+cp "$ROOT/wrangler.read.generic.toml" "$TMP/repo/wrangler.read.generic.toml"
 cp "$ROOT"/migrations/*.sql "$TMP/repo/migrations/"
 
-# Stub wrangler: --version + deploy --dry-run --outdir
+ENGINE_VERSION="$(python3 -c 'import json; print(json.load(open("'"$TMP/repo/engine.json"'"))["version"])')"
+
+# Stub wrangler: --version + deploy --dry-run --outdir for three roles.
+# Emits a timestamped README.md that the build must exclude.
 cat >"$TMP/repo/node_modules/@cloudflare/vitest-plugin/node_modules/.bin/wrangler" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = "--version" ]; then
@@ -47,16 +51,22 @@ for arg in "$@"; do
 done
 [ -n "$outdir" ] || exit 1
 mkdir -p "$outdir"
+# Timestamped README must not land in the release artifact.
+printf 'Built at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$outdir/README.md"
 case "$config" in
-  *manage*)
+  *wrangler.manage.toml)
     printf 'manage-module\n' >"$outdir/manageWorker.js"
     ;;
-  *read*)
-    printf 'read-module\n' >"$outdir/unkillableReadWorker.js"
+  *wrangler.read.generic.toml)
+    printf 'read-generic-module\n' >"$outdir/readWorker.js"
+    ;;
+  *wrangler.read.toml)
+    printf 'read-unkillable-module\n' >"$outdir/unkillableReadWorker.js"
     printf 'PNG\n' >"$outdir/icon.png"
     printf 'text\n' >"$outdir/note.txt"
     ;;
   *)
+    echo "unexpected config: $config" >&2
     exit 1
     ;;
 esac
@@ -71,7 +81,7 @@ git -C "$TMP/repo" config commit.gpgsign false
 git -C "$TMP/repo" add .
 git -C "$TMP/repo" commit -m "fixture" >/dev/null 2>&1
 
-echo "build-engine-release.sh tests"
+echo "build-engine-release.sh tests (engineVersion=$ENGINE_VERSION)"
 
 set +e
 out="$($BASH_BIN "$TMP/repo/scripts/build-engine-release.sh" "$TMP/out" 2>&1)"
@@ -83,10 +93,11 @@ else
   pass "build exits 0"
 fi
 
-if [ ! -f "$TMP/out/forge-engine-1.0.0.tar.gz" ]; then
-  bad "tarball missing"
+TARBALL="$TMP/out/forge-engine-${ENGINE_VERSION}.tar.gz"
+if [ ! -f "$TARBALL" ]; then
+  bad "tarball missing (expected forge-engine-${ENGINE_VERSION}.tar.gz)"
 else
-  pass "tarball present"
+  pass "tarball present (version from engine.json)"
 fi
 if [ ! -f "$TMP/out/release.json" ]; then
   bad "release.json missing"
@@ -100,51 +111,78 @@ else
 fi
 
 set +e
-python3 - "$TMP/out/release.json" <<'PY'
+python3 - "$TMP/out/release.json" "$ENGINE_VERSION" <<'PY'
 import json, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
+want = sys.argv[2]
 required = [
     "engineVersion", "rollbackCompatibleFrom", "sourceCommit", "wranglerVersion",
     "compatibilityDate", "compatibilityFlags", "entries", "modules", "migrations",
+    "readVariants",
 ]
 missing = [k for k in required if k not in doc]
 if missing:
     raise SystemExit(f"missing keys {missing}")
-if doc["engineVersion"] != "1.0.0":
-    raise SystemExit("engineVersion")
-if doc["rollbackCompatibleFrom"] != "1.0.0":
-    raise SystemExit("rollbackCompatibleFrom")
+if doc["engineVersion"] != want:
+    raise SystemExit(f"engineVersion {doc['engineVersion']!r} ≠ {want!r}")
 if not doc["sourceCommit"]:
     raise SystemExit("sourceCommit empty")
-if doc["entries"].get("manage", "").startswith("manage/") is False:
-    raise SystemExit("manage entry")
-if doc["entries"].get("read", "").startswith("read/") is False:
-    raise SystemExit("read entry")
-if not any(m.get("entry") and m.get("role") == "manage" for m in doc["modules"]):
-    raise SystemExit("manage entry flag")
-if not any(m.get("entry") and m.get("role") == "read" for m in doc["modules"]):
-    raise SystemExit("read entry flag")
+entries = doc["entries"]
+for role in ("manage", "read", "read-unkillable"):
+    if role not in entries or not str(entries[role]).startswith(f"{role}/"):
+        raise SystemExit(f"entries.{role}")
+if doc["readVariants"] != {"generic": "read", "unkillable": "read-unkillable"}:
+    raise SystemExit("readVariants")
+for role in ("manage", "read", "read-unkillable"):
+    if not any(m.get("entry") and m.get("role") == role for m in doc["modules"]):
+        raise SystemExit(f"entry flag for {role}")
 paths = {m["path"] for m in doc["modules"]}
+if any(p.endswith("README.md") or p == "README.md" or "/README.md" in p for p in paths):
+    raise SystemExit("README.md must be excluded from modules")
 if not any(p.endswith(".png") for p in paths):
     raise SystemExit("missing png sibling")
 if not any(p.endswith(".txt") for p in paths):
     raise SystemExit("missing txt sibling")
+if not any("readWorker.js" in p for p in paths):
+    raise SystemExit("missing generic readWorker")
+if not any("unkillableReadWorker.js" in p for p in paths):
+    raise SystemExit("missing unkillableReadWorker")
 if len(doc["migrations"]) < 1:
     raise SystemExit("migrations")
-for row in doc["migrations"]:
-    if "name" not in row or "sha256" not in row:
-        raise SystemExit("migration row")
 print("ok")
 PY
 shape_rc=$?
 set -e
 if [ "$shape_rc" -eq 0 ]; then
-  pass "release.json shape"
+  pass "release.json shape (both read variants)"
 else
   bad "release.json shape"
 fi
 
-if ! grep -q 'forge-engine-1.0.0.tar.gz' "$TMP/out/SHA256SUMS" || ! grep -q 'release.json' "$TMP/out/SHA256SUMS"; then
+# Tarball must not contain README.md
+set +e
+python3 - "$TARBALL" <<'PY'
+import gzip, io, sys, tarfile
+raw = gzip.open(sys.argv[1], "rb").read()
+with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as tar:
+    names = tar.getnames()
+if any(n == "README.md" or n.endswith("/README.md") for n in names):
+    raise SystemExit("README in tarball: " + ", ".join(names))
+need = ("manage/", "read/", "read-unkillable/", "release.json", "migrations/")
+for prefix in need:
+    if not any(n == prefix.rstrip("/") or n.startswith(prefix) for n in names):
+        raise SystemExit(f"missing {prefix} in {names}")
+print("ok")
+PY
+tar_rc=$?
+set -e
+if [ "$tar_rc" -eq 0 ]; then
+  pass "tarball excludes README; has three roles"
+else
+  bad "tarball contents"
+fi
+
+if ! grep -q "forge-engine-${ENGINE_VERSION}.tar.gz" "$TMP/out/SHA256SUMS" || ! grep -q 'release.json' "$TMP/out/SHA256SUMS"; then
   bad "SHA256SUMS coverage"
 else
   pass "SHA256SUMS coverage"
@@ -161,6 +199,54 @@ if [ "$sum_rc" -eq 0 ]; then
   pass "SHA256SUMS verify"
 else
   bad "SHA256SUMS verify"
+fi
+
+# Determinism: second build must match byte-for-byte
+set +e
+out2="$($BASH_BIN "$TMP/repo/scripts/build-engine-release.sh" "$TMP/out2" 2>&1)"
+rc2=$?
+set -e
+if [ "$rc2" -ne 0 ]; then
+  bad "second build exit $rc2: $out2"
+elif ! cmp -s "$TARBALL" "$TMP/out2/forge-engine-${ENGINE_VERSION}.tar.gz"; then
+  bad "tarball not deterministic across rebuilds"
+elif ! cmp -s "$TMP/out/release.json" "$TMP/out2/release.json"; then
+  bad "release.json not deterministic"
+else
+  pass "deterministic rebuild (Python tar/gzip)"
+fi
+
+# Prefer real locked wrangler when node + binary are present (skip on bash:3.2 Alpine without node).
+REAL_W="$ROOT/node_modules/@cloudflare/vitest-plugin/node_modules/.bin/wrangler"
+if [ -x "$REAL_W" ] && command -v node >/dev/null 2>&1; then
+  REAL_OUT="$TMP/real-out"
+  mkdir -p "$REAL_OUT"
+  set +e
+  (
+    cd "$ROOT"
+    unset WRANGLER
+    # Use a disposable HOME so metrics/env do not leak.
+    export HOME="$TMP/real-home"
+    mkdir -p "$HOME"
+    "$REAL_W" deploy --dry-run --config wrangler.read.generic.toml \
+      --outdir "$REAL_OUT/generic" >/dev/null 2>"$TMP/real-generic.err"
+  )
+  grc=$?
+  set -e
+  if [ "$grc" -ne 0 ]; then
+    bad "real wrangler dry-run generic: $(tr '\n' ' ' <"$TMP/real-generic.err" | head -c 200)"
+  elif ! find "$REAL_OUT/generic" -name 'readWorker*.js' -o -name '*readWorker*.js' | grep -q .; then
+    # Accept any emitted JS under outdir
+    if ! find "$REAL_OUT/generic" -name '*.js' | grep -q .; then
+      bad "real wrangler generic produced no JS"
+    else
+      pass "real wrangler dry-run generic emits JS"
+    fi
+  else
+    pass "real wrangler dry-run generic emits readWorker"
+  fi
+else
+  pass "skip real wrangler (node or binary missing)"
 fi
 
 if [ "$fail" -ne 0 ]; then

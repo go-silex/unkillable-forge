@@ -46,10 +46,10 @@ if not isinstance(name, str) or not name.strip():
 db = None
 for row in cfg.get("d1_databases") or []:
     if isinstance(row, dict) and row.get("binding") == "DB":
-        db = row.get("database_name") or row.get("id")
+        db = row.get("database_id") or row.get("id")
         break
-if not isinstance(db, str) or not db:
-    raise SystemExit("missing d1_databases entry with binding DB")
+if not isinstance(db, str) or not db.strip():
+    raise SystemExit("missing d1_databases[].database_id for binding DB")
 print(account)
 print(name)
 print(db)

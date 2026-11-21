@@ -7,13 +7,17 @@ Keep this file only as a pointer to the offline dry-run shape that `scripts/buil
 ```sh
 umask 077
 WORK=$(mktemp -d) && chmod 700 "$WORK"
-mkdir "$WORK/home" "$WORK/manage" "$WORK/read"
+mkdir "$WORK/home" "$WORK/manage" "$WORK/read" "$WORK/read-unkillable"
 : > "$WORK/empty.env"
 W=node_modules/@cloudflare/vitest-plugin/node_modules/.bin/wrangler
 env -i PATH="$PATH" HOME="$WORK/home" CI=1 WRANGLER_SEND_METRICS=false CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=false \
   "$W" deploy --dry-run --config wrangler.manage.toml --env-file "$WORK/empty.env" --outdir "$WORK/manage"
 env -i PATH="$PATH" HOME="$WORK/home" CI=1 WRANGLER_SEND_METRICS=false CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=false \
-  "$W" deploy --dry-run --config wrangler.read.toml --env-file "$WORK/empty.env" --outdir "$WORK/read"
+  "$W" deploy --dry-run --config wrangler.read.generic.toml --env-file "$WORK/empty.env" --outdir "$WORK/read"
+env -i PATH="$PATH" HOME="$WORK/home" CI=1 WRANGLER_SEND_METRICS=false CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=false \
+  "$W" deploy --dry-run --config wrangler.read.toml --env-file "$WORK/empty.env" --outdir "$WORK/read-unkillable"
 ```
+
+Release packaging ships both read variants; the instance picks one via `instance.json` `readVariant` (`generic` | `unkillable`).
 
 Private instance Wrangler configs remain operator-owned outside Git. Never deploy the checked-in local-only profiles. Code-only rollback stays on the same current R2/D1 with a compatible Worker — never restore an old database or rights as rollback.

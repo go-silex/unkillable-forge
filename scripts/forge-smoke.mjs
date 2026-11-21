@@ -93,11 +93,33 @@ function buildShareArgs(tools, pageId, artifactId, policyEpoch) {
   return args
 }
 
-async function fetchStatus(url, { cookie = null, redirect = 'manual' } = {}) {
+function sameOriginHttps(url, origin) {
+  let parsed
+  try { parsed = new URL(url) } catch { return false }
+  if (parsed.protocol !== 'https:') return false
+  return parsed.origin === origin
+}
+
+async function fetchStatus(url, { cookie = null, redirect = 'manual', allowCookie = false } = {}) {
   const headers = {}
-  if (cookie) headers.cookie = cookie
+  if (cookie) {
+    if (!allowCookie) throw new Error('cookie_without_allow')
+    headers.cookie = cookie
+  }
   const res = await fetch(url, { method: 'GET', redirect, headers })
-  return res.status
+  const location = res.headers.get('location')
+  return { status: res.status, location }
+}
+
+function expectLoginRedirect(result, readOrigin) {
+  if (result.status !== 302 && result.status !== 301 && result.status !== 303 && result.status !== 307 && result.status !== 308) {
+    return false
+  }
+  if (!result.location) return false
+  let loc
+  try { loc = new URL(result.location, readOrigin) } catch { return false }
+  if (loc.origin !== readOrigin) return false
+  return loc.pathname === '/login' || loc.pathname === '/login.html'
 }
 
 async function main() {
@@ -109,11 +131,9 @@ async function main() {
 
   let readOrigin
   try {
-    readOrigin = new URL(args.readOrigin)
-    if (readOrigin.origin !== args.readOrigin.replace(/\/$/, '') && readOrigin.href !== args.readOrigin) {
-      // allow either origin or full URL; normalize to origin
-    }
-    readOrigin = new URL(args.readOrigin).origin
+    const u = new URL(args.readOrigin)
+    if (u.protocol !== 'https:') die('--read-origin must be https')
+    readOrigin = u.origin
   } catch {
     die('invalid --read-origin')
   }
@@ -139,18 +159,12 @@ async function main() {
 
   const transport = new StdioClientTransport({ command, args: commandArgs, env, stderr: 'pipe' })
   if (transport.stderr) {
-    // Discard stderr to avoid leaking secrets into the parent console.
     transport.stderr.pipe(createWriteStream('/dev/null'))
   }
   const client = new Client({ name: 'forge-smoke', version: '1.0.0' })
   await client.connect(transport)
 
-  const report = {
-    ok: true,
-    slug,
-    steps: [],
-  }
-
+  const report = { ok: true, slug, steps: [] }
   const step = (name, ok, detail = {}) => {
     report.steps.push({ name, ok, ...redact(detail) })
     if (!ok) report.ok = false
@@ -171,23 +185,19 @@ async function main() {
     const page = pages[0]
     if (!artifactId || !page?.pageId || !page?.url) throw new Error('publish_incomplete')
     const pageUrl = new URL(page.url, readOrigin).href
-    step('forge_publish', true, { artifactId, pageId: page.pageId, url: page.url })
+    if (!sameOriginHttps(pageUrl, readOrigin)) throw new Error('page_url_origin')
+    step('forge_publish', true, { artifactId, pageId: page.pageId, path: page.url })
 
-    const authStatus = await fetchStatus(pageUrl, { cookie })
-    step('authenticated_read', authStatus === 200, { status: authStatus })
+    const auth = await fetchStatus(pageUrl, { cookie, allowCookie: true })
+    step('authenticated_read', auth.status === 200, { status: auth.status })
 
-    const anonStatus = await fetchStatus(pageUrl)
-    step('anonymous_read_denied', anonStatus !== 200, { status: anonStatus })
+    const anon = await fetchStatus(pageUrl)
+    step('anonymous_login_redirect', expectLoginRedirect(anon, readOrigin), { status: anon.status, location: anon.location || null })
 
     let policyEpoch = 0
-    try {
-      const policy = await callTool(client, 'forge_page_policy', { pageId: page.pageId })
-      if (typeof policy.policyEpoch === 'number') policyEpoch = policy.policyEpoch
-      if (typeof policy.artifactId === 'string' && policy.artifactId !== artifactId) throw new Error('policy_artifact_mismatch')
-    } catch (error) {
-      step('forge_page_policy', false, { error: String(error.message || error) })
-      throw error
-    }
+    const policy = await callTool(client, 'forge_page_policy', { pageId: page.pageId })
+    if (typeof policy.policyEpoch === 'number') policyEpoch = policy.policyEpoch
+    if (typeof policy.artifactId === 'string' && policy.artifactId !== artifactId) throw new Error('policy_artifact_mismatch')
     step('forge_page_policy', true, { policyEpoch })
 
     const shareArgs = buildShareArgs(tools, page.pageId, artifactId, policyEpoch)
@@ -199,8 +209,8 @@ async function main() {
 
     const sharePath = `/s/${encodeURIComponent(slug)}/${encodeURIComponent(shareKey)}/`
     const shareUrl = new URL(sharePath, readOrigin).href
-    const shareStatus = await fetchStatus(shareUrl)
-    step('share_key_access', shareStatus === 200, { status: shareStatus })
+    const shareOk = await fetchStatus(shareUrl)
+    step('share_key_access', shareOk.status === 200, { status: shareOk.status })
 
     const revoke = await callTool(client, 'forge_revoke_share', {
       pageId: page.pageId,
@@ -210,8 +220,8 @@ async function main() {
     })
     step('forge_revoke_share', true, { policyEpoch: revoke.policyEpoch })
 
-    const revokedStatus = await fetchStatus(shareUrl)
-    step('share_key_denied', revokedStatus !== 200, { status: revokedStatus })
+    const revoked = await fetchStatus(shareUrl)
+    step('share_key_404', revoked.status === 404, { status: revoked.status })
 
     const unpublish = await callTool(client, 'forge_unpublish', {
       command: {
@@ -222,19 +232,42 @@ async function main() {
     })
     step('forge_unpublish', true, { result: redact(unpublish) })
 
-    const after = await fetchStatus(pageUrl, { cookie })
-    step('unpublished_authenticated_404', after === 404, { status: after })
+    const after = await fetchStatus(pageUrl, { cookie, allowCookie: true })
+    step('unpublished_authenticated_404', after.status === 404, { status: after.status })
 
     if (args.linksFile) {
       const links = JSON.parse(await readFile(args.linksFile, 'utf8'))
       if (!Array.isArray(links)) throw new Error('links_not_array')
+      let index = 0
       for (const entry of links) {
+        const id = typeof entry.id === 'string' ? entry.id : `link-${index}`
+        index += 1
         const path = entry.path
         const expectStatus = entry.expectStatus
         if (typeof path !== 'string' || typeof expectStatus !== 'number') throw new Error('invalid_link_entry')
-        const url = new URL(path, readOrigin).href
-        const status = await fetchStatus(url, { cookie, redirect: 'manual' })
-        step(`link:${path}`, status === expectStatus, { status, expectStatus })
+        let url
+        try { url = new URL(path, readOrigin) } catch { throw new Error('invalid_link_url') }
+        const external = url.origin !== readOrigin
+        if (!external && url.protocol !== 'https:') throw new Error('link_must_be_https')
+        const useCookie = !external && entry.authenticated === true
+        if (useCookie && !sameOriginHttps(url.href, readOrigin)) throw new Error('cookie_origin')
+        const result = await fetchStatus(url.href, {
+          cookie: useCookie ? cookie : null,
+          allowCookie: useCookie,
+          redirect: 'manual',
+        })
+        let ok = result.status === expectStatus
+        if (ok && entry.expectLocation) {
+          const expected = new URL(entry.expectLocation, readOrigin)
+          const actual = result.location ? new URL(result.location, readOrigin) : null
+          ok = !!actual && actual.href === expected.href
+        }
+        step(`fixture:${id}`, ok, {
+          status: result.status,
+          expectStatus,
+          location: result.location || null,
+          external,
+        })
       }
     }
   } catch (error) {

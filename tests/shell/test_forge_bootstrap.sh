@@ -136,7 +136,7 @@ cat >"$TMP/instance/manage.json" <<'EOF'
 {
   "account_id": "acct-bootstrap",
   "name": "forge-manage-test",
-  "d1_databases": [{"binding": "DB", "database_name": "forge-db-test"}]
+  "d1_databases": [{"binding": "DB", "database_id": "bbbbbbbb-2222-2222-2222-222222222222", "database_name": "forge-db-test"}]
 }
 EOF
 printf 'CLOUDFLARE_API_TOKEN=secret-token-value\n' >"$TMP/instance/deploy.env"

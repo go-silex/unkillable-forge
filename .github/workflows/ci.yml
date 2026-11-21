@@ -276,12 +276,15 @@ jobs:
 
   # Suite runs on every push; release additionally requires explicit opt-in.
   # Client plugin path: unkillable-forge/vX.Y.Z (no longer tags silex-forge).
+  # TruffleHog lives in secret-scan.yml (separate workflow) — both release jobs
+  # wait for that check-run on this SHA before tagging (cannot needs: across workflows).
   release:
     needs: [check, test, test-os, test-bash32, test-py39, publisher-committed, publisher-native-producer]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.FORGE_RELEASES_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      checks: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -291,6 +294,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Wait for TruffleHog check-run on this SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/wait-check-run.sh --sha "${{ github.sha }}" --name TruffleHog
 
       - name: Tag unkillable-forge/vX.Y.Z and GitHub Release when plugin version is new
         env:
@@ -307,6 +315,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+      checks: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -322,11 +331,18 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Wait for TruffleHog check-run on this SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/wait-check-run.sh --sha "${{ github.sha }}" --name TruffleHog
+
       - name: Install locked dependencies
         run: npm ci
 
       - name: Decide whether engine/vX.Y.Z is new
         id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set +e
           out="$(bash scripts/release-engine.sh check 2>&1)"

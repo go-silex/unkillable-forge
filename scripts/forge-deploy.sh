@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Operator verify / deploy / rollback for CI-qualified forge-engine releases.
-# Instance configs live outside git. Never prints tokens or config vars.
+# Instance configs live outside git. Never prints tokens, vars, or raw Wrangler output.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,8 +18,27 @@ EOF
 }
 
 DEFAULT_W="$ROOT/node_modules/@cloudflare/vitest-plugin/node_modules/.bin/wrangler"
-DEFAULT_CHECKS="${FORGE_REQUIRED_CHECKS:-check,test,test-os / macos-bash32,test-bash32,test-py39}"
+# Check-run display names that must be success on the tag SHA (publisher matrices matched by prefix).
+DEFAULT_CHECKS="${FORGE_REQUIRED_CHECKS:-check,test,test-os / macos-bash32,test-bash32,test-py39,TruffleHog}"
+DEFAULT_CHECK_PREFIXES="${FORGE_REQUIRED_CHECK_PREFIXES:-publisher-committed,publisher-native-producer}"
 DEFAULT_REPO="${FORGE_RELEASE_REPO:-go-silex/unkillable-forge}"
+SIGNER_WORKFLOW="${FORGE_SIGNER_WORKFLOW:-go-silex/unkillable-forge/.github/workflows/ci.yml}"
+
+# Session temp root — every temporary file lives here; cleaned on EXIT.
+WORK=""
+cleanup() {
+  if [ -n "${WORK:-}" ] && [ -d "$WORK" ]; then
+    rm -rf "$WORK"
+  fi
+}
+trap cleanup EXIT
+
+ensure_work() {
+  if [ -z "${WORK:-}" ]; then
+    WORK="$(mktemp -d "${TMPDIR:-/tmp}/forge-deploy.XXXXXX")"
+    chmod 700 "$WORK"
+  fi
+}
 
 resolve_wrangler() {
   if [ -n "${WRANGLER:-}" ]; then
@@ -57,6 +76,10 @@ sys.exit(0 if t(sys.argv[1]) >= t(sys.argv[2]) else 1)
 PY
 }
 
+semver_max() {
+  if semver_ge "$1" "$2"; then printf '%s\n' "$1"; else printf '%s\n' "$2"; fi
+}
+
 json_field() {
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); print(d[sys.argv[2]])' "$1" "$2"
 }
@@ -68,8 +91,8 @@ for k in sys.argv[2].split("."):
 print(cur)' "$1" "$2"
 }
 
+# Validate manage/read JSON; print account_id, name, d1_database_id, r2_bucket_name
 validate_role_config() {
-  # prints account_id\nname\ndb on success
   python3 - "$1" <<'PY'
 import json, sys
 cfg = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -85,16 +108,24 @@ if not isinstance(account, str) or not account.strip():
 name = cfg.get("name")
 if not isinstance(name, str) or not name.strip():
     raise SystemExit("missing name")
-db = None
+db_id = None
 for row in cfg.get("d1_databases") or []:
     if isinstance(row, dict) and row.get("binding") == "DB":
-        db = row.get("database_name") or row.get("id")
+        db_id = row.get("database_id") or row.get("id")
         break
-if not isinstance(db, str) or not db:
-    raise SystemExit("missing d1_databases entry with binding DB")
+if not isinstance(db_id, str) or not db_id.strip():
+    raise SystemExit("missing d1_databases[].database_id for binding DB")
+r2 = None
+for row in cfg.get("r2_buckets") or []:
+    if isinstance(row, dict) and row.get("binding") == "REVISION_BYTES":
+        r2 = row.get("bucket_name") or row.get("id")
+        break
+if not isinstance(r2, str) or not r2.strip():
+    raise SystemExit("missing r2_buckets[].bucket_name for binding REVISION_BYTES")
 print(account)
 print(name)
-print(db)
+print(db_id)
+print(r2)
 PY
 }
 
@@ -103,42 +134,42 @@ load_role() {
   ROLE_CFG_PATH="$dir/${role}.json"
   [ -f "$ROLE_CFG_PATH" ] || die "missing $ROLE_CFG_PATH"
   local out
-  out="$(validate_role_config "$ROLE_CFG_PATH")" || die "invalid ${role} config: $(validate_role_config "$ROLE_CFG_PATH" 2>&1 || true)"
+  if ! out="$(validate_role_config "$ROLE_CFG_PATH" 2>"$WORK/cfg.err")"; then
+    die "invalid ${role} config: $(tr '\n' ' ' <"$WORK/cfg.err")"
+  fi
   ROLE_ACCOUNT="$(printf '%s\n' "$out" | sed -n '1p')"
   ROLE_NAME="$(printf '%s\n' "$out" | sed -n '2p')"
-  ROLE_DB="$(printf '%s\n' "$out" | sed -n '3p')"
+  ROLE_D1_ID="$(printf '%s\n' "$out" | sed -n '3p')"
+  ROLE_R2="$(printf '%s\n' "$out" | sed -n '4p')"
 }
 
-ledger_last_name() {
-  python3 - "$1" "$2" <<'PY'
+load_instance_meta() {
+  local dir="$1"
+  local path="$dir/instance.json"
+  [ -f "$path" ] || die "missing $path (required: {\"readVariant\":\"generic\"|\"unkillable\"})"
+  READ_VARIANT="$(python3 - "$path" <<'PY'
 import json, sys
-path, role = sys.argv[1], sys.argv[2]
-try:
-    lines = open(path, encoding="utf-8").read().splitlines()
-except FileNotFoundError:
-    raise SystemExit(0)
-for line in reversed(lines):
-    if not line.strip():
-        continue
-    names = json.loads(line).get("workerNames") or {}
-    if role in names:
-        print(names[role])
-        break
+cfg = json.load(open(sys.argv[1], encoding="utf-8"))
+if not isinstance(cfg, dict) or set(cfg) - {"readVariant"}:
+    raise SystemExit("instance.json must contain only readVariant")
+v = cfg.get("readVariant")
+if v not in ("generic", "unkillable"):
+    raise SystemExit("readVariant must be generic|unkillable")
+print(v)
 PY
+)" || die "invalid instance.json"
 }
 
-ledger_last_field() {
-  python3 - "$1" "$2" <<'PY'
+ledger_last_json() {
+  python3 - "$1" <<'PY'
 import json, sys
-path, field = sys.argv[1], sys.argv[2]
+path = sys.argv[1]
 try:
-    lines = open(path, encoding="utf-8").read().splitlines()
+    lines = [ln for ln in open(path, encoding="utf-8").read().splitlines() if ln.strip()]
 except FileNotFoundError:
+    print("{}")
     raise SystemExit(0)
-for line in reversed(lines):
-    if line.strip():
-        print(json.loads(line).get(field, ""))
-        break
+print(lines[-1] if lines else "{}")
 PY
 }
 
@@ -190,11 +221,8 @@ verify_checksums() {
 
 attest_tarball() {
   local tarball="$1" repo="$2"
-  if gh attestation verify --help 2>&1 | grep -q -- '--signer-workflow'; then
-    gh attestation verify "$tarball" --repo "$repo" --signer-workflow ".github/workflows/ci.yml" >/dev/null
-  else
-    gh attestation verify "$tarball" --repo "$repo" >/dev/null
-  fi
+  # Fail closed: fully-qualified signer workflow only (gh prepends host, not repo).
+  gh attestation verify "$tarball" --repo "$repo" --signer-workflow "$SIGNER_WORKFLOW" >/dev/null
 }
 
 resolve_tag_commit() {
@@ -222,18 +250,96 @@ extract_release() {
   [ -f "$extract_to/release.json" ] || die "release.json missing after extract"
 }
 
-prepare_verified_release() {
-  local tag="$1" repo="$2" work="$3"
-  download_release "$tag" "$repo" "$work/dl"
-  verify_checksums "$work/dl"
+check_runs_ok() {
+  local repo="$1" sha="$2"
+  local payload
+  payload="$(gh api "repos/${repo}/commits/${sha}/check-runs" --paginate)"
+  CHECKS_CSV="$DEFAULT_CHECKS" PREFIXES_CSV="$DEFAULT_CHECK_PREFIXES" python3 - "$payload" <<'PY'
+import json, os, sys
+raw = sys.argv[1]
+runs = []
+try:
+    data = json.loads(raw)
+    runs = data.get("check_runs") if isinstance(data, dict) else data
+except json.JSONDecodeError:
+    dec = json.JSONDecoder(); idx = 0
+    while idx < len(raw):
+        while idx < len(raw) and raw[idx].isspace():
+            idx += 1
+        if idx >= len(raw):
+            break
+        obj, end = dec.raw_decode(raw, idx); idx = end
+        if isinstance(obj, dict) and "check_runs" in obj:
+            runs.extend(obj["check_runs"] or [])
+by_name = {}
+for r in runs or []:
+    if not isinstance(r, dict):
+        continue
+    n = r.get("name") or ""
+    prev = by_name.get(n)
+    if prev is None or (r.get("id") or 0) > (prev.get("id") or 0):
+        by_name[n] = r
+required = [x.strip() for x in os.environ.get("CHECKS_CSV", "").split(",") if x.strip()]
+prefixes = [x.strip() for x in os.environ.get("PREFIXES_CSV", "").split(",") if x.strip()]
+errors = []
+for name in required:
+    r = by_name.get(name)
+    if not r:
+        errors.append(f"missing:{name}")
+    elif r.get("conclusion") != "success":
+        errors.append(f"{name}:{r.get('conclusion') or r.get('status')}")
+for prefix in prefixes:
+    matched = [n for n in by_name if n == prefix or n.startswith(prefix + " ") or n.startswith(prefix + " (")]
+    if not matched:
+        errors.append(f"missing-prefix:{prefix}")
+    for n in matched:
+        if by_name[n].get("conclusion") != "success":
+            errors.append(f"{n}:{by_name[n].get('conclusion') or by_name[n].get('status')}")
+if errors:
+    raise SystemExit("; ".join(errors))
+PY
+}
+
+# Full artifact verification used by verify/deploy/rollback.
+verify_release_bundle() {
+  local tag="$1" repo="$2" archive_dir="$3" extract_to="$4"
+  download_release "$tag" "$repo" "$archive_dir"
+  verify_checksums "$archive_dir"
   local tarball
-  tarball="$(find "$work/dl" -maxdepth 1 -name 'forge-engine-*.tar.gz' | head -n 1)"
+  tarball="$(find "$archive_dir" -maxdepth 1 -name 'forge-engine-*.tar.gz' | head -n 1)"
   [ -n "$tarball" ] || die "tarball missing after download"
   attest_tarball "$tarball" "$repo"
-  extract_release "$work/dl" "$work/release"
+  extract_release "$archive_dir" "$extract_to"
+
+  local tag_sha version source expected_version
+  tag_sha="$(resolve_tag_commit "$repo" "$tag")"
+  version="$(json_field "$extract_to/release.json" engineVersion)"
+  source="$(json_field "$extract_to/release.json" sourceCommit)"
+  expected_version="$(parse_tag_version "$tag")"
+  [ "$version" = "$expected_version" ] || die "release.json engineVersion $version ≠ tag $expected_version"
+  [ "$source" = "$tag_sha" ] || die "release.json sourceCommit ${source:0:7} ≠ peeled tag ${tag_sha:0:7}"
+
+  local default_branch default_sha status
+  default_branch="$(gh api "repos/${repo}" --jq '.default_branch')"
+  default_sha="$(gh api "repos/${repo}/commits/${default_branch}" --jq '.sha')"
+  status="$(gh api "repos/${repo}/compare/${tag_sha}...${default_sha}" --jq '.status')"
+  case "$status" in
+    ahead|identical) ;;
+    *) die "tag commit ${tag_sha:0:7} is not an ancestor of ${default_branch} (status=$status)" ;;
+  esac
+
+  if ! check_runs_ok "$repo" "$tag_sha" 2>"$WORK/checks.err"; then
+    die "required checks not green on ${tag_sha:0:7}: $(tr '\n' ' ' <"$WORK/checks.err")"
+  fi
+  VERIFIED_TAG_SHA="$tag_sha"
+  # Retained for callers/tests that inspect verify_release_bundle side effects.
+  VERIFIED_VERSION="$version"
+  VERIFIED_SOURCE="$source"
+  export VERIFIED_TAG_SHA VERIFIED_VERSION VERIFIED_SOURCE
 }
 
 write_temp_wrangler_config() {
+  # Always .json suffix so Wrangler uses JSON parser (bare mktemp → {}).
   python3 - "$1" "$2" "$3" "$4" <<'PY'
 import json, sys
 src, main, migrations_dir, out = sys.argv[1:5]
@@ -249,7 +355,7 @@ if migrations_dir:
     if isinstance(dbs, list):
         rewritten = []
         for row in dbs:
-            if isinstance(row, dict):
+            if isinstance(row, dict) and row.get("binding") == "DB":
                 r = dict(row)
                 r["migrations_dir"] = migrations_dir
                 rewritten.append(r)
@@ -263,7 +369,6 @@ PY
 }
 
 parse_version_id() {
-  # Arg is a file path — do not read stdin (heredoc would steal it).
   python3 - "$1" <<'PY'
 import re, sys
 text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
@@ -271,50 +376,120 @@ m = re.search(r"Current Version ID:\s*([0-9a-fA-F-]{36})", text)
 if not m:
     m = re.search(r"Version ID:\s*([0-9a-fA-F-]{36})", text)
 if not m:
-    sys.stderr.write("could not parse Worker Version ID from wrangler output\n")
+    sys.stderr.write("could not parse Worker Version ID\n")
     sys.exit(1)
 print(m.group(1))
 PY
 }
 
-compute_unapplied_migrations() {
-  python3 - "$1" "$2" <<'PY'
-import json, re, sys
-rel = json.load(open(sys.argv[1], encoding="utf-8"))
-text = open(sys.argv[2], encoding="utf-8").read()
-pending, applied = set(), set()
+# Wrangler `d1 migrations list --remote` prints ONLY unapplied filenames (or
+# "No migrations to apply" / empty). Fail closed on command errors.
+list_unapplied_migrations() {
+  local wrangler="$1" instance_dir="$2" account="$3" config="$4" db_id="$5" out_file="$6"
+  local raw rc
+  raw="$WORK/mig-raw.txt"
+  set +e
+  with_deploy_env "$instance_dir" "$account" -- \
+    "$wrangler" d1 migrations list "$db_id" --remote --config "$config" >"$raw" 2>"$WORK/mig-err.txt"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    die "d1 migrations list failed (exit $rc) — not treating as empty; dry-run also initializes the migrations table"
+  fi
+  python3 - "$raw" "$out_file" <<'PY'
+import re, sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+low = text.lower()
+# Explicit empty markers
+if "no migrations" in low and "to apply" in low:
+    Path(sys.argv[2]).write_text("", encoding="utf-8")
+    raise SystemExit(0)
+names = []
 for line in text.splitlines():
     m = re.search(r"([0-9]{4}_[\w.-]+\.sql)", line)
-    if not m:
-        continue
-    name = m.group(1)
-    low = line.lower()
-    if "not applied" in low or "pending" in low or "❌" in line or "not yet" in low:
-        pending.add(name)
-    elif "applied" in low or "✅" in line or "complete" in low:
-        applied.add(name)
-    else:
-        applied.add(name)
-if pending:
-    needed = [row["name"] for row in rel.get("migrations") or [] if row["name"] in pending]
-else:
-    needed = [row["name"] for row in rel.get("migrations") or [] if row["name"] not in applied]
-for name in needed:
-    print(name)
+    if m:
+        names.append(m.group(1))
+# Deduplicate preserving order
+seen = set(); out = []
+for n in names:
+    if n not in seen:
+        seen.add(n); out.append(n)
+Path(sys.argv[2]).write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
 PY
 }
 
-unknown_remote_migrations() {
-  python3 - "$1" "$2" <<'PY'
-import json, re, sys
-known = {row["name"] for row in json.load(open(sys.argv[1], encoding="utf-8")).get("migrations") or []}
-text = open(sys.argv[2], encoding="utf-8").read()
-for name in sorted(set(re.findall(r"([0-9]{4}_[\w.-]+\.sql)", text)) - known):
-    print(name)
+assert_compatibility_floor() {
+  local target_version="$1" floor="$2"
+  [ -n "$floor" ] || return 0
+  if ! semver_ge "$target_version" "$floor"; then
+    die "target engine $target_version < schema floor $floor — refuse (code-only rollback cannot lower D1 floor)"
+  fi
+}
+
+ledger_schema_floor() {
+  python3 - "$1" <<'PY'
+import json, sys
+row = json.loads(sys.argv[1] or "{}")
+print(row.get("schemaFloor") or row.get("rollbackCompatibleFrom") or "")
+PY
+}
+
+preflight_bindings() {
+  local ledger_json="$1" role="$2" account="$3" name="$4" d1="$5" r2="$6"
+  python3 - "$ledger_json" "$role" "$account" "$name" "$d1" "$r2" <<'PY'
+import json, sys
+row, role, account, name, d1, r2 = sys.argv[1:7]
+data = json.loads(row or "{}")
+if not data:
+    raise SystemExit(0)
+names = data.get("workerNames") or {}
+if role in names and names[role] != name:
+    raise SystemExit(f"{role} name {name!r} ≠ ledger {names[role]!r}")
+binds = (data.get("bindings") or {}).get(role) or {}
+if binds.get("account_id") and binds["account_id"] != account:
+    raise SystemExit(f"{role} account_id drift")
+if binds.get("d1_database_id") and binds["d1_database_id"] != d1:
+    raise SystemExit(f"{role} d1_database_id drift")
+if binds.get("r2_bucket_name") and binds["r2_bucket_name"] != r2:
+    raise SystemExit(f"{role} r2_bucket_name drift")
+PY
+}
+
+make_ledger_payload() {
+  python3 - <<'PY'
+import json, sys
+# argv via env to avoid huge command lines
+import os
+print(json.dumps({
+  "tag": os.environ["L_TAG"],
+  "engineVersion": os.environ["L_VERSION"],
+  "sourceCommit": os.environ["L_SOURCE"],
+  "rollbackCompatibleFrom": os.environ["L_ROLLBACK"],
+  "schemaFloor": os.environ["L_FLOOR"],
+  "workerVersionIds": {"manage": os.environ["L_MVID"], "read": os.environ["L_RVID"]},
+  "workerNames": {"manage": os.environ["L_MNAME"], "read": os.environ["L_RNAME"]},
+  "bindings": {
+    "manage": {
+      "account_id": os.environ["L_MACCT"],
+      "d1_database_id": os.environ["L_MD1"],
+      "r2_bucket_name": os.environ["L_MR2"],
+    },
+    "read": {
+      "account_id": os.environ["L_RACCT"],
+      "d1_database_id": os.environ["L_RD1"],
+      "r2_bucket_name": os.environ["L_RR2"],
+    },
+  },
+  "readVariant": os.environ["L_VARIANT"],
+  "timestamp": os.environ["L_TS"],
+  "mode": os.environ["L_MODE"],
+}, sort_keys=True))
 PY
 }
 
 cmd_verify() {
+  ensure_work
   local tag="" repo="$DEFAULT_REPO"
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -326,127 +501,75 @@ cmd_verify() {
   [ -n "$tag" ] || die "verify requires --tag"
   parse_tag_version "$tag" >/dev/null
   require_cmd gh
-
-  local tmp
-  tmp="$(mktemp -d)"
-  # shellcheck disable=SC2064
-  trap "rm -rf '$tmp'" RETURN
-  chmod 700 "$tmp"
-  download_release "$tag" "$repo" "$tmp"
-  verify_checksums "$tmp"
-  local tarball
-  tarball="$(find "$tmp" -maxdepth 1 -name 'forge-engine-*.tar.gz' | head -n 1)"
-  [ -n "$tarball" ] || die "tarball missing after download"
-  attest_tarball "$tarball" "$repo"
-
-  local tag_sha default_branch default_sha status
-  tag_sha="$(resolve_tag_commit "$repo" "$tag")"
-  default_branch="$(gh api "repos/${repo}" --jq '.default_branch')"
-  default_sha="$(gh api "repos/${repo}/commits/${default_branch}" --jq '.sha')"
-  status="$(gh api "repos/${repo}/compare/${tag_sha}...${default_sha}" --jq '.status')"
-  case "$status" in
-    ahead|identical) ;;
-    *) die "tag commit ${tag_sha:0:7} is not an ancestor of ${default_branch} (compare status=$status)" ;;
-  esac
-
-  local checks_csv="$DEFAULT_CHECKS" name conclusion
-  local IFS=','
-  # shellcheck disable=SC2086
-  set -- $checks_csv
-  unset IFS
-  for name in "$@"; do
-    name="$(printf '%s' "$name" | sed 's/^ *//;s/ *$//')"
-    [ -n "$name" ] || continue
-    conclusion="$(gh api "repos/${repo}/commits/${tag_sha}/check-runs" --paginate \
-      --jq ".check_runs[] | select(.name == \"$name\") | .conclusion" | head -n 1)"
-    [ "$conclusion" = "success" ] || die "required check '$name' not success on ${tag_sha:0:7} (got ${conclusion:-missing})"
-  done
-  info "verified $tag (commit ${tag_sha:0:7})"
+  verify_release_bundle "$tag" "$repo" "$WORK/dl" "$WORK/release"
+  info "verified $tag (commit ${VERIFIED_TAG_SHA:0:7})"
 }
 
-deploy_role() {
-  # apply_migrations: 0=refuse unapplied, 1=apply, skip=do not gate (rollback)
-  local wrangler="$1" instance_dir="$2" role="$3" release_dir="$4" dry_run="$5" apply_migrations="$6"
-  load_role "$instance_dir" "$role"
-  local ledger="$instance_dir/deploys.jsonl" prev_name
-  prev_name="$(ledger_last_name "$ledger" "$role")"
-  if [ -n "$prev_name" ] && [ "$prev_name" != "$ROLE_NAME" ]; then
-    die "$role worker name '$ROLE_NAME' differs from ledger previous '$prev_name'"
-  fi
-
-  local entry entry_abs migrations_dir="" tmpcfg
-  entry="$(json_nested "$release_dir/release.json" "entries.$role")"
+deploy_one_role() {
+  # Prints ONLY the Worker Version ID on stdout.
+  # apply_migrations: 0|1|skip
+  local wrangler="$1" instance_dir="$2" role="$3" release_dir="$4" dry_run="$5" apply_migrations="$6" entry_key="$7" db_id="$8"
+  local entry entry_abs migrations_dir="" tmpcfg mig_list
+  entry="$(json_nested "$release_dir/release.json" "entries.$entry_key")"
   entry_abs="$release_dir/$entry"
   [ -f "$entry_abs" ] || die "missing release entry $entry"
   if [ "$role" = "manage" ]; then
     migrations_dir="$release_dir/migrations"
   fi
-  tmpcfg="$(mktemp)"
+  tmpcfg="$WORK/${role}.wrangler.json"
   write_temp_wrangler_config "$ROLE_CFG_PATH" "$entry_abs" "$migrations_dir" "$tmpcfg"
 
   if [ "$role" = "manage" ] && [ "$apply_migrations" != "skip" ]; then
-    local mig_list mig_unapplied
-    mig_list="$(mktemp)"
-    set +e
-    with_deploy_env "$instance_dir" "$ROLE_ACCOUNT" -- \
-      "$wrangler" d1 migrations list "$ROLE_DB" --remote --config "$tmpcfg" >"$mig_list" 2>&1
-    set -e
-    mig_unapplied="$(mktemp)"
-    compute_unapplied_migrations "$release_dir/release.json" "$mig_list" >"$mig_unapplied"
-    if [ -s "$mig_unapplied" ]; then
+    mig_list="$WORK/unapplied.txt"
+    # Note: wrangler d1 migrations list initializes the migrations table on a
+    # fresh remote — not read-only. Avoid on --dry-run unless apply is requested.
+    if [ "$dry_run" = "1" ] && [ "$apply_migrations" != "1" ]; then
+      info "dry-run: skipping remote migrations list (initializes table on fresh D1)"
+      : >"$mig_list"
+    else
+      list_unapplied_migrations "$wrangler" "$instance_dir" "$ROLE_ACCOUNT" "$tmpcfg" "$db_id" "$mig_list"
+    fi
+    if [ -s "$mig_list" ]; then
       if [ "$apply_migrations" != "1" ]; then
-        die "unapplied migrations require --apply-migrations: $(tr '\n' ' ' <"$mig_unapplied")"
+        die "unapplied migrations require --apply-migrations: $(tr '\n' ' ' <"$mig_list")"
       fi
       if [ "$dry_run" = "1" ]; then
-        info "dry-run: would apply migrations: $(tr '\n' ' ' <"$mig_unapplied")"
+        info "dry-run: would apply migrations: $(tr '\n' ' ' <"$mig_list")"
       else
+        local mig_out="$WORK/mig-apply.txt"
+        set +e
         with_deploy_env "$instance_dir" "$ROLE_ACCOUNT" -- \
-          "$wrangler" d1 migrations apply "$ROLE_DB" --remote --config "$tmpcfg"
+          "$wrangler" d1 migrations apply "$db_id" --remote --config "$tmpcfg" >"$mig_out" 2>"$WORK/mig-apply.err"
+        local mrc=$?
+        set -e
+        if [ "$mrc" -ne 0 ]; then
+          die "d1 migrations apply failed (exit $mrc)"
+        fi
       fi
     fi
-    rm -f "$mig_list" "$mig_unapplied"
   fi
 
-  local deploy_out version_id=""
-  deploy_out="$(mktemp)"
   if [ "$dry_run" = "1" ]; then
-    info "dry-run: would deploy $role entry $entry as worker (name redacted)"
-    version_id="dry-run"
-  else
-    set +e
-    with_deploy_env "$instance_dir" "$ROLE_ACCOUNT" -- \
-      "$wrangler" deploy "$entry_abs" --no-bundle --config "$tmpcfg" --keep-vars >"$deploy_out" 2>&1
-    local rc=$?
-    set -e
-    if [ "$rc" -ne 0 ]; then
-      tail -n 20 "$deploy_out" | sed -e '/[Tt][Oo][Kk][Ee][Nn]/d' -e '/[Aa]uthorization/d' >&2
-      rm -f "$tmpcfg" "$deploy_out"
-      die "wrangler deploy failed for $role"
-    fi
-    version_id="$(parse_version_id "$deploy_out")"
+    info "dry-run: would deploy $role entry $entry"
+    printf '%s\n' "dry-run"
+    return 0
   fi
-  rm -f "$tmpcfg" "$deploy_out"
-  printf '%s\n' "$version_id"
-}
 
-make_ledger_payload() {
-  python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" <<'PY'
-import json, sys
-tag, version, source, rollback, mvid, rvid, mname, rname, ts, mode = sys.argv[1:]
-print(json.dumps({
-    "tag": tag,
-    "engineVersion": version,
-    "sourceCommit": source,
-    "rollbackCompatibleFrom": rollback,
-    "workerVersionIds": {"manage": mvid, "read": rvid},
-    "workerNames": {"manage": mname, "read": rname},
-    "timestamp": ts,
-    "mode": mode,
-}, sort_keys=True))
-PY
+  local deploy_out="$WORK/${role}-deploy.txt"
+  set +e
+  with_deploy_env "$instance_dir" "$ROLE_ACCOUNT" -- \
+    "$wrangler" deploy "$entry_abs" --no-bundle --config "$tmpcfg" --keep-vars >"$deploy_out" 2>"$WORK/${role}-deploy.err"
+  local rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    # Allowlisted summary only — never relay Wrangler bindings/vars.
+    die "wrangler deploy failed for $role (exit $rc); see private log $WORK/${role}-deploy.err (not echoed)"
+  fi
+  parse_version_id "$deploy_out"
 }
 
 cmd_deploy() {
+  ensure_work
   local instance_dir="" tag="" apply_migrations=0 dry_run=0 repo="$DEFAULT_REPO"
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -467,35 +590,70 @@ cmd_deploy() {
   local wrangler
   wrangler="$(resolve_wrangler)"
 
-  local work
-  work="$(mktemp -d)"
-  # shellcheck disable=SC2064
-  trap "rm -rf '$work'" RETURN
-  chmod 700 "$work"
-  prepare_verified_release "$tag" "$repo" "$work"
+  load_instance_meta "$instance_dir"
+  local read_entry_key
+  if [ "$READ_VARIANT" = "generic" ]; then read_entry_key="read"; else read_entry_key="read-unkillable"; fi
 
-  local version source_sha rollback manage_vid read_vid
-  version="$(json_field "$work/release/release.json" engineVersion)"
-  source_sha="$(json_field "$work/release/release.json" sourceCommit)"
-  rollback="$(json_field "$work/release/release.json" rollbackCompatibleFrom)"
-
-  manage_vid="$(deploy_role "$wrangler" "$instance_dir" manage "$work/release" "$dry_run" "$apply_migrations")"
-  read_vid="$(deploy_role "$wrangler" "$instance_dir" read "$work/release" "$dry_run" 0)"
-
+  # Preflight both roles before any mutation.
   load_role "$instance_dir" manage
-  local manage_name="$ROLE_NAME" manage_account="$ROLE_ACCOUNT"
+  local m_account="$ROLE_ACCOUNT" m_name="$ROLE_NAME" m_d1="$ROLE_D1_ID" m_r2="$ROLE_R2" m_cfg="$ROLE_CFG_PATH"
   load_role "$instance_dir" read
-  local read_name="$ROLE_NAME" ts mode payload
+  local r_account="$ROLE_ACCOUNT" r_name="$ROLE_NAME" r_d1="$ROLE_D1_ID" r_r2="$ROLE_R2" r_cfg="$ROLE_CFG_PATH"
+
+  local ledger="$instance_dir/deploys.jsonl"
+  local prev
+  prev="$(ledger_last_json "$ledger")"
+  preflight_bindings "$prev" manage "$m_account" "$m_name" "$m_d1" "$m_r2" || die "manage binding preflight failed"
+  preflight_bindings "$prev" read "$r_account" "$r_name" "$r_d1" "$r_r2" || die "read binding preflight failed"
+
+  verify_release_bundle "$tag" "$repo" "$WORK/dl" "$WORK/release"
+
+  local version source_sha rollback floor
+  version="$(json_field "$WORK/release/release.json" engineVersion)"
+  source_sha="$(json_field "$WORK/release/release.json" sourceCommit)"
+  rollback="$(json_field "$WORK/release/release.json" rollbackCompatibleFrom)"
+  floor="$(ledger_schema_floor "$prev")"
+  assert_compatibility_floor "$version" "$floor"
+
+  local new_floor
+  if [ -n "$floor" ]; then new_floor="$(semver_max "$floor" "$rollback")"; else new_floor="$rollback"; fi
+
+  # Deploy manage then read; record partial state if read fails after manage.
+  ROLE_CFG_PATH="$m_cfg" ROLE_ACCOUNT="$m_account"
+  local manage_vid
+  manage_vid="$(deploy_one_role "$wrangler" "$instance_dir" manage "$WORK/release" "$dry_run" "$apply_migrations" manage "$m_d1")"
+
+  if [ "$dry_run" != "1" ]; then
+    local partial_ts partial
+    partial_ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    export L_TAG="$tag" L_VERSION="$version" L_SOURCE="$source_sha" L_ROLLBACK="$rollback" L_FLOOR="$new_floor" \
+      L_MVID="$manage_vid" L_RVID="pending" L_MNAME="$m_name" L_RNAME="$r_name" \
+      L_MACCT="$m_account" L_MD1="$m_d1" L_MR2="$m_r2" L_RACCT="$r_account" L_RD1="$r_d1" L_RR2="$r_r2" \
+      L_VARIANT="$READ_VARIANT" L_TS="$partial_ts" L_MODE="partial-manage"
+    partial="$(make_ledger_payload)"
+    append_ledger "$ledger" "$partial"
+  fi
+
+  ROLE_CFG_PATH="$r_cfg" ROLE_ACCOUNT="$r_account"
+  local read_vid
+  read_vid="$(deploy_one_role "$wrangler" "$instance_dir" read "$WORK/release" "$dry_run" 0 "$read_entry_key" "$r_d1")"
+
+  local ts mode payload
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   if [ "$dry_run" = "1" ]; then mode="dry-run"; else mode="deploy"; fi
-  payload="$(make_ledger_payload "$tag" "$version" "$source_sha" "$rollback" "$manage_vid" "$read_vid" "$manage_name" "$read_name" "$ts" "$mode")"
+  export L_TAG="$tag" L_VERSION="$version" L_SOURCE="$source_sha" L_ROLLBACK="$rollback" L_FLOOR="$new_floor" \
+    L_MVID="$manage_vid" L_RVID="$read_vid" L_MNAME="$m_name" L_RNAME="$r_name" \
+    L_MACCT="$m_account" L_MD1="$m_d1" L_MR2="$m_r2" L_RACCT="$r_account" L_RD1="$r_d1" L_RR2="$r_r2" \
+    L_VARIANT="$READ_VARIANT" L_TS="$ts" L_MODE="$mode"
+  payload="$(make_ledger_payload)"
   if [ "$dry_run" != "1" ]; then
-    append_ledger "$instance_dir/deploys.jsonl" "$payload"
+    append_ledger "$ledger" "$payload"
   fi
-  info "deployed $tag manage=${manage_vid:0:8}… read=${read_vid:0:8}… account=${manage_account:0:4}…"
+  info "deployed $tag manage=${manage_vid:0:8}… read=${read_vid:0:8}… variant=$READ_VARIANT"
 }
 
 cmd_rollback() {
+  ensure_work
   local instance_dir="" to="" dry_run=0 repo="$DEFAULT_REPO"
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -515,57 +673,66 @@ cmd_rollback() {
   local wrangler
   wrangler="$(resolve_wrangler)"
 
-  local ledger="$instance_dir/deploys.jsonl" current_tag current_rollback
-  current_tag="$(ledger_last_field "$ledger" tag)"
-  [ -n "$current_tag" ] || die "ledger empty — cannot determine current release"
-  current_rollback="$(ledger_last_field "$ledger" rollbackCompatibleFrom)"
-
-  local work
-  work="$(mktemp -d)"
-  # shellcheck disable=SC2064
-  trap "rm -rf '$work'" RETURN
-  chmod 700 "$work"
-  prepare_verified_release "$to" "$repo" "$work"
-
-  local target_version
-  target_version="$(json_field "$work/release/release.json" engineVersion)"
+  load_instance_meta "$instance_dir"
+  local read_entry_key
+  if [ "$READ_VARIANT" = "generic" ]; then read_entry_key="read"; else read_entry_key="read-unkillable"; fi
 
   load_role "$instance_dir" manage
-  local tmpcfg entry mig_list unknown
-  entry="$(json_nested "$work/release/release.json" entries.manage)"
-  tmpcfg="$(mktemp)"
-  write_temp_wrangler_config "$ROLE_CFG_PATH" "$work/release/$entry" "$work/release/migrations" "$tmpcfg"
-  mig_list="$(mktemp)"
-  set +e
-  with_deploy_env "$instance_dir" "$ROLE_ACCOUNT" -- \
-    "$wrangler" d1 migrations list "$ROLE_DB" --remote --config "$tmpcfg" >"$mig_list" 2>&1
-  set -e
-  unknown="$(unknown_remote_migrations "$work/release/release.json" "$mig_list")"
-  rm -f "$tmpcfg" "$mig_list"
-  if [ -n "$unknown" ]; then
-    if [ -z "$current_rollback" ] || ! semver_ge "$target_version" "$current_rollback"; then
-      die "remote D1 has migrations unknown to $to ($unknown); refuse rollback (need target >= current rollbackCompatibleFrom ${current_rollback:-unset})"
+  local m_account="$ROLE_ACCOUNT" m_name="$ROLE_NAME" m_d1="$ROLE_D1_ID" m_r2="$ROLE_R2" m_cfg="$ROLE_CFG_PATH"
+  load_role "$instance_dir" read
+  local r_account="$ROLE_ACCOUNT" r_name="$ROLE_NAME" r_d1="$ROLE_D1_ID" r_r2="$ROLE_R2" r_cfg="$ROLE_CFG_PATH"
+
+  local ledger="$instance_dir/deploys.jsonl"
+  local prev floor
+  prev="$(ledger_last_json "$ledger")"
+  [ "$prev" != "{}" ] || die "ledger empty — cannot determine schema floor"
+  floor="$(ledger_schema_floor "$prev")"
+  preflight_bindings "$prev" manage "$m_account" "$m_name" "$m_d1" "$m_r2" || die "manage binding preflight failed"
+  preflight_bindings "$prev" read "$r_account" "$r_name" "$r_d1" "$r_r2" || die "read binding preflight failed"
+
+  verify_release_bundle "$to" "$repo" "$WORK/dl" "$WORK/release"
+  local target_version source_sha rollback
+  target_version="$(json_field "$WORK/release/release.json" engineVersion)"
+  source_sha="$(json_field "$WORK/release/release.json" sourceCommit)"
+  rollback="$(json_field "$WORK/release/release.json" rollbackCompatibleFrom)"
+  assert_compatibility_floor "$target_version" "$floor"
+
+  # Target must not require applying migrations (code-only rollback).
+  ROLE_CFG_PATH="$m_cfg" ROLE_ACCOUNT="$m_account"
+  local tmpcfg="$WORK/rollback.wrangler.json" entry
+  entry="$(json_nested "$WORK/release/release.json" entries.manage)"
+  write_temp_wrangler_config "$m_cfg" "$WORK/release/$entry" "$WORK/release/migrations" "$tmpcfg"
+  if [ "$dry_run" != "1" ]; then
+    local mig_list="$WORK/unapplied.txt"
+    list_unapplied_migrations "$wrangler" "$instance_dir" "$m_account" "$tmpcfg" "$m_d1" "$mig_list"
+    # Unapplied relative to *target* means target expects migrations not on D1.
+    # For rollback to older code, list should be empty (all target migrations already applied).
+    if [ -s "$mig_list" ]; then
+      die "target $to has unapplied migrations on remote ($(tr '\n' ' ' <"$mig_list")) — refuse code-only rollback"
     fi
+  else
+    info "dry-run: skipping migrations list on rollback (list mutates empty remotes)"
   fi
 
   local manage_vid read_vid
-  manage_vid="$(deploy_role "$wrangler" "$instance_dir" manage "$work/release" "$dry_run" skip)"
-  read_vid="$(deploy_role "$wrangler" "$instance_dir" read "$work/release" "$dry_run" skip)"
+  ROLE_CFG_PATH="$m_cfg" ROLE_ACCOUNT="$m_account"
+  manage_vid="$(deploy_one_role "$wrangler" "$instance_dir" manage "$WORK/release" "$dry_run" skip manage "$m_d1")"
+  ROLE_CFG_PATH="$r_cfg" ROLE_ACCOUNT="$r_account"
+  read_vid="$(deploy_one_role "$wrangler" "$instance_dir" read "$WORK/release" "$dry_run" skip "$read_entry_key" "$r_d1")"
 
-  load_role "$instance_dir" manage
-  local manage_name="$ROLE_NAME" manage_account="$ROLE_ACCOUNT"
-  load_role "$instance_dir" read
-  local read_name="$ROLE_NAME" version source_sha rollback ts mode payload
-  version="$(json_field "$work/release/release.json" engineVersion)"
-  source_sha="$(json_field "$work/release/release.json" sourceCommit)"
-  rollback="$(json_field "$work/release/release.json" rollbackCompatibleFrom)"
+  local ts mode payload
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   if [ "$dry_run" = "1" ]; then mode="dry-run-rollback"; else mode="rollback"; fi
-  payload="$(make_ledger_payload "$to" "$version" "$source_sha" "$rollback" "$manage_vid" "$read_vid" "$manage_name" "$read_name" "$ts" "$mode")"
+  # schemaFloor preserved from previous ledger (never lowered).
+  export L_TAG="$to" L_VERSION="$target_version" L_SOURCE="$source_sha" L_ROLLBACK="$rollback" L_FLOOR="$floor" \
+    L_MVID="$manage_vid" L_RVID="$read_vid" L_MNAME="$m_name" L_RNAME="$r_name" \
+    L_MACCT="$m_account" L_MD1="$m_d1" L_MR2="$m_r2" L_RACCT="$r_account" L_RD1="$r_d1" L_RR2="$r_r2" \
+    L_VARIANT="$READ_VARIANT" L_TS="$ts" L_MODE="$mode"
+  payload="$(make_ledger_payload)"
   if [ "$dry_run" != "1" ]; then
-    append_ledger "$instance_dir/deploys.jsonl" "$payload"
+    append_ledger "$ledger" "$payload"
   fi
-  info "rolled back to $to manage=${manage_vid:0:8}… read=${read_vid:0:8}… account=${manage_account:0:4}…"
+  info "rolled back to $to manage=${manage_vid:0:8}… read=${read_vid:0:8}… floor=$floor"
 }
 
 main() {

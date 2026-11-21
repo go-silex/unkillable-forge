@@ -2,6 +2,7 @@
 # Build a deterministic forge-engine-<version>.tar.gz from the locked checkout.
 # Usage: scripts/build-engine-release.sh <outdir>
 # Requires: npm ci already done; wrangler via the repo-locked path (or $WRANGLER).
+# Portable: Python writes the tar/gz (BusyBox tar lacks GNU owner/mtime flags).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,7 +18,6 @@ OUTDIR="$(cd "$OUTDIR" && pwd)"
 
 command -v python3 >/dev/null 2>&1 || die "python3 required"
 command -v sha256sum >/dev/null 2>&1 || die "sha256sum required"
-command -v tar >/dev/null 2>&1 || die "tar required"
 
 ENGINE_JSON="$ROOT/engine.json"
 [ -f "$ENGINE_JSON" ] || die "missing engine.json"
@@ -35,79 +35,73 @@ WRANGLER_VERSION="$("$WRANGLER_BIN" --version 2>/dev/null | head -n 1 | tr -d '\
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 chmod 700 "$WORK"
-mkdir "$WORK/home" "$WORK/manage" "$WORK/read" "$WORK/stage"
+mkdir "$WORK/home" "$WORK/manage" "$WORK/read" "$WORK/read-unkillable" "$WORK/stage"
 : >"$WORK/empty.env"
 umask 077
 
-# Offline dry-run packaging — same env isolation as docs/forge-manual-ops.md.
-env -i \
-  PATH="$PATH" \
-  HOME="$WORK/home" \
-  CI=1 \
-  WRANGLER_SEND_METRICS=false \
-  CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=false \
-  "$WRANGLER_BIN" deploy --dry-run \
-  --config "$ROOT/wrangler.manage.toml" \
-  --env-file "$WORK/empty.env" \
-  --outdir "$WORK/manage"
+dry_run_build() {
+  local config="$1" outdir="$2"
+  env -i \
+    PATH="$PATH" \
+    HOME="$WORK/home" \
+    CI=1 \
+    WRANGLER_SEND_METRICS=false \
+    CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=false \
+    "$WRANGLER_BIN" deploy --dry-run \
+    --config "$config" \
+    --env-file "$WORK/empty.env" \
+    --outdir "$outdir"
+}
 
-env -i \
-  PATH="$PATH" \
-  HOME="$WORK/home" \
-  CI=1 \
-  WRANGLER_SEND_METRICS=false \
-  CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=false \
-  "$WRANGLER_BIN" deploy --dry-run \
-  --config "$ROOT/wrangler.read.toml" \
-  --env-file "$WORK/empty.env" \
-  --outdir "$WORK/read"
+# manage + generic read + Unkillable read (shell assets differ per instance).
+dry_run_build "$ROOT/wrangler.manage.toml" "$WORK/manage"
+dry_run_build "$ROOT/wrangler.read.generic.toml" "$WORK/read"
+dry_run_build "$ROOT/wrangler.read.toml" "$WORK/read-unkillable"
 
 STAGE="$WORK/stage"
-mkdir -p "$STAGE/manage" "$STAGE/read" "$STAGE/migrations"
+mkdir -p "$STAGE/manage" "$STAGE/read" "$STAGE/read-unkillable" "$STAGE/migrations"
 
-# Keep every emitted module (read has Data/Text siblings).
-find "$WORK/manage" -type f -print0 | while IFS= read -r -d '' f; do
-  rel="${f#"$WORK/manage/"}"
-  mkdir -p "$STAGE/manage/$(dirname "$rel")"
-  cp -p "$f" "$STAGE/manage/$rel"
-done
-find "$WORK/read" -type f -print0 | while IFS= read -r -d '' f; do
-  rel="${f#"$WORK/read/"}"
-  mkdir -p "$STAGE/read/$(dirname "$rel")"
-  cp -p "$f" "$STAGE/read/$rel"
-done
+# Copy emitted modules; drop Wrangler README.md (embeds a wall-clock timestamp).
+copy_modules() {
+  local src="$1" dest="$2"
+  find "$src" -type f -print0 | while IFS= read -r -d '' f; do
+    rel="${f#"$src/"}"
+    case "$rel" in
+      README.md|*/README.md) continue ;;
+    esac
+    mkdir -p "$dest/$(dirname "$rel")"
+    cp -p "$f" "$dest/$rel"
+  done
+}
+
+copy_modules "$WORK/manage" "$STAGE/manage"
+copy_modules "$WORK/read" "$STAGE/read"
+copy_modules "$WORK/read-unkillable" "$STAGE/read-unkillable"
 
 for mig in "$ROOT"/migrations/*.sql; do
   [ -f "$mig" ] || continue
   cp -p "$mig" "$STAGE/migrations/$(basename "$mig")"
 done
 
-# Detect manage/read JS entry modules (primary .js without sibling-only assets).
-MANAGE_ENTRY="$(python3 - "$STAGE/manage" <<'PY'
+pick_entry() {
+  local root="$1" prefer="$2"
+  python3 - "$root" "$prefer" <<'PY'
 import sys
 from pathlib import Path
 root = Path(sys.argv[1])
+prefer = sys.argv[2]
 cands = sorted(p for p in root.rglob("*.js") if p.is_file())
-prefer = [p for p in cands if "manageWorker" in p.name or p.name == "index.js"]
-pick = prefer[0] if prefer else (cands[0] if cands else None)
+pref = [p for p in cands if prefer in p.name]
+pick = pref[0] if pref else (cands[0] if cands else None)
 if pick is None:
-    sys.exit("no manage JS module")
+    sys.exit(f"no JS module under {root}")
 print(pick.relative_to(root).as_posix())
 PY
-)"
+}
 
-READ_ENTRY="$(python3 - "$STAGE/read" <<'PY'
-import sys
-from pathlib import Path
-root = Path(sys.argv[1])
-cands = sorted(p for p in root.rglob("*.js") if p.is_file())
-prefer = [p for p in cands if "unkillableReadWorker" in p.name or "readWorker" in p.name or p.name == "index.js"]
-pick = prefer[0] if prefer else (cands[0] if cands else None)
-if pick is None:
-    sys.exit("no read JS module")
-print(pick.relative_to(root).as_posix())
-PY
-)"
+MANAGE_ENTRY="$(pick_entry "$STAGE/manage" "manageWorker")"
+READ_ENTRY="$(pick_entry "$STAGE/read" "readWorker")"
+READ_UNK_ENTRY="$(pick_entry "$STAGE/read-unkillable" "unkillableReadWorker")"
 
 COMPAT_DATE="$(python3 - <<'PY'
 import re
@@ -122,15 +116,14 @@ import json, re
 from pathlib import Path
 text = Path("wrangler.manage.toml").read_text(encoding="utf-8")
 m = re.search(r'^compatibility_flags\s*=\s*\[([^\]]*)\]', text, re.M)
-flags = []
-if m:
-    flags = re.findall(r'"([^"]+)"', m.group(1))
+flags = re.findall(r'"([^"]+)"', m.group(1)) if m else []
 print(json.dumps(flags))
 PY
 )"
 
 RELEASE_JSON="$STAGE/release.json"
-python3 - "$STAGE" "$VERSION" "$ROLLBACK" "$SOURCE_SHA" "$WRANGLER_VERSION" "$COMPAT_DATE" "$COMPAT_FLAGS" "$MANAGE_ENTRY" "$READ_ENTRY" "$RELEASE_JSON" <<'PY'
+python3 - "$STAGE" "$VERSION" "$ROLLBACK" "$SOURCE_SHA" "$WRANGLER_VERSION" "$COMPAT_DATE" "$COMPAT_FLAGS" \
+  "$MANAGE_ENTRY" "$READ_ENTRY" "$READ_UNK_ENTRY" "$RELEASE_JSON" <<'PY'
 import hashlib, json, sys
 from pathlib import Path
 
@@ -138,8 +131,8 @@ stage = Path(sys.argv[1])
 version, rollback, source_sha, wrangler_version = sys.argv[2:6]
 compat_date = sys.argv[6]
 compat_flags = json.loads(sys.argv[7])
-manage_entry, read_entry = sys.argv[8], sys.argv[9]
-out = Path(sys.argv[10])
+manage_entry, read_entry, read_unk_entry = sys.argv[8:11]
+out = Path(sys.argv[11])
 
 def sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -148,27 +141,24 @@ def sha256(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+roles = (
+    ("manage", manage_entry),
+    ("read", read_entry),
+    ("read-unkillable", read_unk_entry),
+)
 modules = []
-for role in ("manage", "read"):
+for role, entry in roles:
     root = stage / role
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
-        rel = f"{role}/{path.relative_to(root).as_posix()}"
-        entry = False
-        if role == "manage" and path.relative_to(root).as_posix() == manage_entry:
-            entry = True
-        if role == "read" and path.relative_to(root).as_posix() == read_entry:
-            entry = True
+        rel_inside = path.relative_to(root).as_posix()
         modules.append({
-            "path": rel,
+            "path": f"{role}/{rel_inside}",
             "sha256": sha256(path),
-            "entry": entry,
+            "entry": rel_inside == entry,
             "role": role,
         })
 
-migrations = []
-mig_root = stage / "migrations"
-for path in sorted(mig_root.glob("*.sql")):
-    migrations.append({"name": path.name, "sha256": sha256(path)})
+migrations = [{"name": p.name, "sha256": sha256(p)} for p in sorted((stage / "migrations").glob("*.sql"))]
 
 doc = {
     "engineVersion": version,
@@ -177,7 +167,12 @@ doc = {
     "wranglerVersion": wrangler_version,
     "compatibilityDate": compat_date,
     "compatibilityFlags": compat_flags,
-    "entries": {"manage": f"manage/{manage_entry}", "read": f"read/{read_entry}"},
+    "entries": {
+        "manage": f"manage/{manage_entry}",
+        "read": f"read/{read_entry}",
+        "read-unkillable": f"read-unkillable/{read_unk_entry}",
+    },
+    "readVariants": {"generic": "read", "unkillable": "read-unkillable"},
     "modules": modules,
     "migrations": migrations,
 }
@@ -187,17 +182,36 @@ PY
 TARBALL_NAME="forge-engine-${VERSION}.tar.gz"
 TARBALL="$OUTDIR/$TARBALL_NAME"
 
-# Deterministic archive: sorted members, fixed mtime/owner.
-(
-  cd "$STAGE"
-  find . -type f | sed 's|^\./||' | LC_ALL=C sort | tar \
-    --numeric-owner --owner=0 --group=0 \
-    --mtime='UTC 1970-01-01' \
-    --mode='u=rw,go=r' \
-    -cf - -T - | gzip -n >"$TARBALL"
-)
+# Deterministic archive via Python (works on BusyBox hosts without GNU tar).
+python3 - "$STAGE" "$TARBALL" <<'PY'
+import gzip, io, os, sys, tarfile
+from pathlib import Path
 
-# Also place a copy of release.json beside the tarball for CI attestation subjects.
+stage = Path(sys.argv[1])
+tarball = Path(sys.argv[2])
+members = []
+for path in sorted(p for p in stage.rglob("*") if p.is_file()):
+    members.append(path.relative_to(stage).as_posix())
+
+buf = io.BytesIO()
+with tarfile.open(fileobj=buf, mode="w") as tar:
+    for name in members:
+        path = stage / name
+        info = tarfile.TarInfo(name=name)
+        info.size = path.stat().st_size
+        info.mtime = 0
+        info.uid = 0
+        info.gid = 0
+        info.uname = ""
+        info.gname = ""
+        info.mode = 0o644
+        with path.open("rb") as f:
+            tar.addfile(info, f)
+raw = buf.getvalue()
+with gzip.GzipFile(filename="", mode="wb", fileobj=open(tarball, "wb"), mtime=0) as gz:
+    gz.write(raw)
+PY
+
 cp -p "$RELEASE_JSON" "$OUTDIR/release.json"
 
 {

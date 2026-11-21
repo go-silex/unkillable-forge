@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Decide whether to publish engine/vX.Y.Z and optionally build the release artifact.
+# Decide whether to publish engine/vX.Y.Z and optionally build / publish the release.
 #
-#   scripts/release-engine.sh check   — exit 0=publish, 78=skip, 1=refuse move
+#   scripts/release-engine.sh check   — exit 0=publish/resume, 78=complete skip, 1=refuse move
 #   scripts/release-engine.sh build <outdir>
+#   scripts/release-engine.sh publish <outdir>
 #
-# Effects (tag/release) stay in CI after attestation. Never moves an existing tag.
+# On the exact tagged SHA, an incomplete GitHub Release (missing assets) is resumed
+# without moving the tag. Effects stay in CI after attestation.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,6 +15,21 @@ cd "$ROOT"
 CHECK="$ROOT/scripts/check_plugin_versions.py"
 VERSION="$(python3 "$CHECK" --print-engine-version)"
 TAG="engine/v${VERSION}"
+TARBALL_NAME="forge-engine-${VERSION}.tar.gz"
+
+release_complete() {
+  # True if GitHub Release exists with tarball, release.json, SHA256SUMS.
+  command -v gh >/dev/null 2>&1 || return 1
+  local assets
+  assets="$(gh release view "$TAG" --json assets --jq '[.assets[].name] | @json' 2>/dev/null || true)"
+  [ -n "$assets" ] || return 1
+  python3 - "$assets" "$TARBALL_NAME" <<'PY'
+import json, sys
+names = set(json.loads(sys.argv[1]))
+need = {sys.argv[2], "release.json", "SHA256SUMS"}
+sys.exit(0 if need <= names else 1)
+PY
+}
 
 cmd_check() {
   git fetch --tags --force origin
@@ -20,8 +37,15 @@ cmd_check() {
     existing="$(git rev-list -n 1 "$TAG")"
     head="$(git rev-parse HEAD)"
     if [ "$existing" = "$head" ]; then
-      echo "tag ${TAG} already on HEAD — skip"
-      exit 78
+      if release_complete; then
+        echo "tag ${TAG} already on HEAD with complete release — skip"
+        exit 78
+      fi
+      echo "tag ${TAG} already on HEAD — resume incomplete GitHub Release"
+      echo "ENGINE_VERSION=${VERSION}"
+      echo "ENGINE_TAG=${TAG}"
+      echo "ENGINE_RESUME=1"
+      return 0
     fi
     if git merge-base --is-ancestor "$existing" "$head"; then
       echo "tag ${TAG} already at ${existing:0:7} (ancestor of HEAD) — skip"
@@ -33,6 +57,7 @@ cmd_check() {
   fi
   echo "ENGINE_VERSION=${VERSION}"
   echo "ENGINE_TAG=${TAG}"
+  echo "ENGINE_RESUME=0"
   echo "will publish ${TAG}"
 }
 
@@ -43,10 +68,9 @@ cmd_build() {
 }
 
 cmd_publish() {
-  # Tag + GitHub Release with artifacts already built and attested in <outdir>.
   local outdir="${1:-}"
   [ -n "$outdir" ] || { echo "usage: $0 publish <outdir>" >&2; exit 2; }
-  local tarball="$outdir/forge-engine-${VERSION}.tar.gz"
+  local tarball="$outdir/$TARBALL_NAME"
   [ -f "$tarball" ] || { echo "missing $tarball" >&2; exit 1; }
   [ -f "$outdir/release.json" ] || { echo "missing release.json" >&2; exit 1; }
   [ -f "$outdir/SHA256SUMS" ] || { echo "missing SHA256SUMS" >&2; exit 1; }
@@ -76,20 +100,36 @@ for j in range(start + 1, len(lines)):
 sys.stdout.write("\n".join(lines[start:end]).strip() + "\n")
 PY
 
-  git config user.name "github-actions[bot]"
-  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-  git tag -a "$TAG" -m "forge-engine v${VERSION}"
-  git push origin "refs/tags/${TAG}"
+  if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+    git config user.name "github-actions[bot]"
+    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    git tag -a "$TAG" -m "forge-engine v${VERSION}"
+    git push origin "refs/tags/${TAG}"
+  else
+    existing="$(git rev-list -n 1 "$TAG")"
+    head="$(git rev-parse HEAD)"
+    [ "$existing" = "$head" ] || { echo "tag ${TAG} not on HEAD — refuse" >&2; exit 1; }
+  fi
 
-  gh release create "$TAG" \
-    "$tarball" \
-    "$outdir/release.json" \
-    "$outdir/SHA256SUMS" \
-    --title "forge-engine v${VERSION}" \
-    --notes-file "$NOTES" \
-    --verify-tag
-
-  echo "created ${TAG}"
+  if gh release view "$TAG" >/dev/null 2>&1; then
+    # Resume: upload any missing assets; refresh notes.
+    gh release upload "$TAG" \
+      "$tarball" \
+      "$outdir/release.json" \
+      "$outdir/SHA256SUMS" \
+      --clobber
+    gh release edit "$TAG" --notes-file "$NOTES" >/dev/null
+    echo "resumed ${TAG}"
+  else
+    gh release create "$TAG" \
+      "$tarball" \
+      "$outdir/release.json" \
+      "$outdir/SHA256SUMS" \
+      --title "forge-engine v${VERSION}" \
+      --notes-file "$NOTES" \
+      --verify-tag
+    echo "created ${TAG}"
+  fi
 }
 
 main() {
