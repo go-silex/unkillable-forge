@@ -132,7 +132,6 @@ const SHARE_KEY = /^[A-Za-z0-9_-]{8,128}$/
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const SHA256_RE = /^[a-f0-9]{64}$/
 const PAGES_DIGEST_RE = /^[a-f0-9]{32}$/
-const MAX_CONTINUATION_REQUESTS = 256
 // Worker public error codes (adapters/http/manage-edge.ts PublicErrorCode).
 const SAFE_ERROR_CODES = new Set([
   'invalid_request', 'payload_too_large', 'request_timeout', 'unsupported_media_type',
@@ -140,6 +139,20 @@ const SAFE_ERROR_CODES = new Set([
   'upload_incomplete', 'not_sealed', 'session_closed', 'session_expired',
   'invalid_state', 'integrity_error', 'internal_error', 'configuration_error', 'unavailable',
 ])
+const IMPORT_ISSUE_CODES = new Set([
+  ...SAFE_ERROR_CODES,
+  'g1b_evidence_required', 'selection_graph_mismatch', 'expiring_policy_unsupported',
+  'missing_policy_evidence', 'import_metadata_limit', 'inventory_size_exceeds_approved_limit',
+  'source_integrity', 'import_file_too_large', 'unknown_visibility_private',
+])
+const RESULT_STATES = new Set(['checking', 'blocked', 'ready', 'staging', 'committed'])
+
+/** Finite request budget from selection size (Worker stores/checks <= 8 files per step). */
+function continuationBudget(selection) {
+  const files = Array.isArray(selection?.command?.files) ? selection.command.files.length : 0
+  const steps = Math.ceil(Math.max(files, 1) / 8)
+  return steps * 6 + 64
+}
 
 /** Pages Direct Upload asset hash: BLAKE3(base64(bytes) + extWithoutDot).hex[:32]. */
 export function pagesAssetHash(bytes, publishedPath) {
@@ -174,13 +187,19 @@ function readMetadataV(item) {
   return { ok: true, value: meta.v }
 }
 
+function readExpiration(value) {
+  if (value == null) return { ok: true, value: null }
+  if (typeof value === 'number' && Number.isFinite(value)) return { ok: true, value }
+  return { ok: false, value: null }
+}
+
 function loadKvMaps(entries) {
   if (!Array.isArray(entries)) fail('invalid_capture', 'kv.json must be an array')
   const vis = new Map()
   const share = new Map()
   for (const item of entries) {
     if (!item || typeof item.name !== 'string') continue
-    const expiresAt = typeof item.expiration === 'number' ? item.expiration : null
+    const exp = readExpiration(item.expiration)
     if (item.name.startsWith('vis:')) {
       const meta = readMetadataV(item)
       vis.set(item.name.slice(4), {
@@ -188,13 +207,15 @@ function loadKvMaps(entries) {
         metadataV: meta.ok ? meta.value : null,
         metadataOk: meta.ok,
         metadataReason: meta.ok ? null : meta.reason,
-        expiresAt,
+        expiresAt: exp.value,
+        expirationOk: exp.ok,
         keyName: item.name,
       })
     } else if (item.name.startsWith('share:')) {
       share.set(item.name.slice(6), {
         key: item.value,
-        expiresAt,
+        expiresAt: exp.value,
+        expirationOk: exp.ok,
         keyName: item.name,
       })
     }
@@ -215,19 +236,20 @@ function resolveVisibility(vis, slug) {
       metadataOk: hit.metadataOk !== false,
       metadataReason: hit.metadataReason ?? null,
       expiresAt: hit.expiresAt,
+      expirationOk: hit.expirationOk !== false,
       key: slug,
       keyName: hit.keyName,
     }
   }
-  return { state: 'absent', value: null, metadataV: null, metadataOk: true, metadataReason: null, expiresAt: null, key: null, keyName: null }
+  return { state: 'absent', value: null, metadataV: null, metadataOk: true, metadataReason: null, expiresAt: null, expirationOk: true, key: null, keyName: null }
 }
 
 function resolveShare(share, slug) {
   if (share.has(slug)) {
     const hit = share.get(slug)
-    return { state: 'present', key: hit.key, expiresAt: hit.expiresAt, mapKey: slug, keyName: hit.keyName }
+    return { state: 'present', key: hit.key, expiresAt: hit.expiresAt, expirationOk: hit.expirationOk !== false, mapKey: slug, keyName: hit.keyName }
   }
-  return { state: 'absent', key: null, expiresAt: null, mapKey: null, keyName: null }
+  return { state: 'absent', key: null, expiresAt: null, expirationOk: true, mapKey: null, keyName: null }
 }
 
 function hubEntry(hit) {
@@ -424,6 +446,7 @@ export async function prepareSelection(options) {
     const visHit = resolveVisibility(vis, slug)
     let visibilityValue = 'private'
     if (visHit.state === 'present') {
+      if (!visHit.expirationOk) fail('invalid_expiration', visHit.keyName)
       if (visHit.expiresAt != null && !allowExpiring) fail('expiring_policy_unsupported', visHit.keyName)
       if (!visHit.metadataOk) {
         refused.push({ kind: 'visibility', slug, reason: visHit.metadataReason ?? 'invalid_metadata_v' })
@@ -446,6 +469,7 @@ export async function prepareSelection(options) {
         refused.push({ kind: 'share', slug, reason: 'share_key_absent' })
         continue
       }
+      if (!shareHit.expirationOk) fail('invalid_expiration', shareHit.keyName)
       if (shareHit.expiresAt != null && !allowExpiring) fail('expiring_policy_unsupported', shareHit.keyName)
       if (!SHARE_KEY.test(shareHit.key)) {
         refused.push({ kind: 'share', slug, reason: 'invalid_share_key', length: shareHit.key.length })
@@ -500,19 +524,24 @@ export async function prepareSelection(options) {
       await copyFile(source.path, dest)
       const copiedBytes = await readFile(dest)
       const digest = sha256(copiedBytes)
+      let verified = false
       if (source.expectedSha256) {
         if (digest !== source.expectedSha256) {
           refused.push({ kind: 'entry', path: member.path, reason: 'digest_mismatch' })
           artifactFailed = true
           break
         }
-      } else if (PAGES_DIGEST_RE.test(member.digest)) {
+        verified = true
+      }
+      if (PAGES_DIGEST_RE.test(member.digest)) {
         if (pagesAssetHash(copiedBytes, member.path) !== member.digest) {
           refused.push({ kind: 'entry', path: member.path, reason: 'digest_mismatch' })
           artifactFailed = true
           break
         }
-      } else {
+        verified = true
+      }
+      if (!verified) {
         refused.push({ kind: 'entry', path: member.path, reason: 'digest_unverified' })
         artifactFailed = true
         break
@@ -860,13 +889,14 @@ export async function applyImport(options) {
   const results = []
 
   for (const selection of selections) {
+    const budget = continuationBudget(selection)
     let cursor = null
     let dry
     const seenDry = new Set()
     let dryRequests = 0
     for (;;) {
       dryRequests += 1
-      if (dryRequests > MAX_CONTINUATION_REQUESTS) fail('invalid_continuation', 'dry_run request cap')
+      if (dryRequests > budget) fail('invalid_continuation', 'dry_run request cap')
       dry = await postJson(fetchImpl, endpoint, headers, { op: 'dry_run', selection, cursor })
       const result = dry.body?.result
       if (dry.status === 200 && dry.body?.ok && result?.state === 'checking') {
@@ -879,22 +909,21 @@ export async function applyImport(options) {
     }
     const dryState = dry.body?.result?.state
     if (dry.status >= 400 || !dry.body?.ok) {
-      results.push({ selectionId: selection.selectionId, phase: 'dry_run', ok: false, httpStatus: dry.status, state: dryState ?? null, body: publicBody(dry.body) })
+      results.push(publicOutcome(selection.selectionId, 'dry_run', false, dry.status, dry.body))
       break
     }
     if (dryState === 'blocked') {
       const replay = !options.dryRunOnly && isAlreadyCommittedConflict(dry.body)
       if (!replay) {
-        results.push({ selectionId: selection.selectionId, phase: 'dry_run', ok: false, httpStatus: dry.status, state: dryState, body: publicBody(dry.body) })
+        results.push(publicOutcome(selection.selectionId, 'dry_run', false, dry.status, dry.body))
         if (!options.continueOnBlock) break
         continue
       }
-      // Apply-mode reconciliation: route conflict to apply/replay without a dry_run failure row.
     } else if (dryState !== 'ready') {
-      results.push({ selectionId: selection.selectionId, phase: 'dry_run', ok: false, httpStatus: dry.status, state: dryState ?? null, body: publicBody(dry.body) })
+      results.push(publicOutcome(selection.selectionId, 'dry_run', false, dry.status, dry.body))
       break
     } else if (options.dryRunOnly) {
-      results.push({ selectionId: selection.selectionId, phase: 'dry_run', ok: true, httpStatus: dry.status, state: dryState, body: publicBody(dry.body) })
+      results.push(publicOutcome(selection.selectionId, 'dry_run', true, dry.status, dry.body))
       continue
     }
     cursor = undefined
@@ -905,12 +934,12 @@ export async function applyImport(options) {
     let applyRequests = 0
     for (;;) {
       applyRequests += 1
-      if (applyRequests > MAX_CONTINUATION_REQUESTS) fail('invalid_continuation', 'apply request cap')
+      if (applyRequests > budget) fail('invalid_continuation', 'apply request cap')
       const payload = cursor === undefined ? { op: 'apply', selection } : { op: 'apply', selection, cursor }
       applyRes = await postJson(fetchImpl, endpoint, headers, payload)
       const result = applyRes.body?.result
       if (applyRes.status === 200 && applyRes.body?.ok && result?.state === 'staging' && result.nextCursor == null) {
-        // An open session is resumed without a cursor; each step stores up to eight files.
+        // Native staging progress uses session.files[].stored (domains/publication/import.ts).
         const stored = (result.session?.files ?? []).filter(f => f?.stored).length
         if (stored > maxStored) {
           maxStored = stored
@@ -932,14 +961,7 @@ export async function applyImport(options) {
     }
     const applyState = applyRes.body?.result?.state
     const applyOk = applyRes.status < 400 && !!applyRes.body?.ok && applyState === 'committed'
-    results.push({
-      selectionId: selection.selectionId,
-      phase: 'apply',
-      ok: applyOk,
-      httpStatus: applyRes.status,
-      state: applyState ?? null,
-      body: publicBody(applyRes.body),
-    })
+    results.push(publicOutcome(selection.selectionId, 'apply', applyOk, applyRes.status, applyRes.body))
     if (!applyOk) {
       if (applyRes.status >= 400) break
       if (applyState === 'blocked' && options.continueOnBlock) continue
@@ -953,16 +975,59 @@ function malformedBody(status) {
   return { ok: false, error: `malformed_response:${status}` }
 }
 
+function decodeHexDigest(value) {
+  return typeof value === 'string' && SHA256_RE.test(value) ? value : null
+}
+
+function decodeIssues(value) {
+  if (value == null) return []
+  if (!Array.isArray(value)) return null
+  const issues = []
+  for (const issue of value) {
+    if (!record(issue) || typeof issue.code !== 'string' || !IMPORT_ISSUE_CODES.has(issue.code)) return null
+    issues.push({ code: issue.code })
+  }
+  return issues
+}
+
+/** Strict Worker envelope: only recognized states and allowlisted codes; keep session.files for progress. */
 function decodeWorkerEnvelope(parsed, status) {
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return malformedBody(status)
+  if (!record(parsed)) return malformedBody(status)
   if (parsed.ok === false) {
     const err = parsed.error
-    if (err && typeof err === 'object' && !Array.isArray(err) && typeof err.code === 'string' && SAFE_ERROR_CODES.has(err.code)) {
+    if (record(err) && typeof err.code === 'string' && SAFE_ERROR_CODES.has(err.code)) {
       return { ok: false, error: { code: err.code } }
     }
     return malformedBody(status)
   }
-  return publicBody(parsed)
+  if (parsed.ok !== true) return malformedBody(status)
+  if (parsed.result == null) return { ok: true, result: null }
+  if (!record(parsed.result) || !RESULT_STATES.has(parsed.result.state)) return malformedBody(status)
+  const src = parsed.result
+  const result = { state: src.state }
+  for (const key of ['planDigest', 'sourceDigest', 'targetDigest']) {
+    if (src[key] == null) continue
+    const digest = decodeHexDigest(src[key])
+    if (!digest) return malformedBody(status)
+    result[key] = digest
+  }
+  if (src.nextCursor != null) {
+    if (typeof src.nextCursor !== 'string' || src.nextCursor.length === 0 || src.nextCursor.length > 16384) return malformedBody(status)
+    result.nextCursor = src.nextCursor
+  }
+  const issues = decodeIssues(src.issues)
+  if (issues === null) return malformedBody(status)
+  if (issues.length) result.issues = issues
+  const warnings = decodeIssues(src.warnings)
+  if (warnings === null) return malformedBody(status)
+  if (warnings.length) result.warnings = warnings
+  if (src.session != null) {
+    if (!record(src.session) || !Array.isArray(src.session.files)) return malformedBody(status)
+    result.session = {
+      files: src.session.files.map(file => ({ stored: !!(file && file.stored) })),
+    }
+  }
+  return { ok: true, result }
 }
 
 async function postJson(fetchImpl, url, headers, body) {
@@ -985,51 +1050,23 @@ async function postJson(fetchImpl, url, headers, body) {
   return { status: res.status, body: decodeWorkerEnvelope(parsed, res.status) }
 }
 
-function publicBody(body) {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return malformedBody(0)
-  const out = {}
-  if (typeof body.ok === 'boolean') out.ok = body.ok
-  if (typeof body.error === 'string' && /^malformed_response:\d+$/.test(body.error)) out.error = body.error
-  else if (body.error && typeof body.error === 'object' && !Array.isArray(body.error) && typeof body.error.code === 'string' && SAFE_ERROR_CODES.has(body.error.code)) {
-    out.error = { code: body.error.code }
+/** Stdout/result summary: fixed enumerations + counts only (no cursors, digests, or file paths). */
+function publicOutcome(selectionId, phase, ok, httpStatus, body) {
+  const state = body?.result?.state
+  const out = {
+    selectionId,
+    phase,
+    ok,
+    httpStatus,
+    state: RESULT_STATES.has(state) ? state : null,
   }
-  if (body.result && typeof body.result === 'object' && !Array.isArray(body.result)) {
-    const src = body.result
-    const result = {}
-    if (typeof src.state === 'string') result.state = src.state
-    if (typeof src.planDigest === 'string') result.planDigest = src.planDigest
-    if (typeof src.sourceDigest === 'string') result.sourceDigest = src.sourceDigest
-    if (typeof src.targetDigest === 'string') result.targetDigest = src.targetDigest
-    if (typeof src.nextCursor === 'string') result.nextCursor = src.nextCursor
-    if (Array.isArray(src.issues)) {
-      result.issues = src.issues.map(issue => {
-        if (!issue || typeof issue !== 'object') return null
-        const row = {}
-        if (typeof issue.code === 'string') row.code = issue.code
-        if (typeof issue.path === 'string') row.path = issue.path
-        if (typeof issue.pageId === 'string') row.pageId = issue.pageId
-        return row.code ? row : null
-      }).filter(Boolean)
-    }
-    if (Array.isArray(src.warnings)) {
-      result.warnings = src.warnings.map(issue => {
-        if (!issue || typeof issue !== 'object') return null
-        const row = {}
-        if (typeof issue.code === 'string') row.code = issue.code
-        if (typeof issue.path === 'string') row.path = issue.path
-        if (typeof issue.pageId === 'string') row.pageId = issue.pageId
-        return row.code ? row : null
-      }).filter(Boolean)
-    }
-    if (src.session && typeof src.session === 'object' && !Array.isArray(src.session)) {
-      const files = Array.isArray(src.session.files) ? src.session.files : []
-      result.session = {
-        state: typeof src.session.state === 'string' ? src.session.state : undefined,
-        filesStored: files.filter(f => f?.stored).length,
-        filesTotal: files.length,
-      }
-    }
-    out.result = result
+  if (body?.ok === false) {
+    if (typeof body.error === 'string' && /^malformed_response:\d+$/.test(body.error)) out.error = body.error
+    else if (record(body.error) && SAFE_ERROR_CODES.has(body.error.code)) out.error = body.error.code
+  }
+  if (Array.isArray(body?.result?.issues)) out.issueCount = body.result.issues.length
+  if (Array.isArray(body?.result?.session?.files)) {
+    out.filesStored = body.result.session.files.filter(f => f.stored).length
   }
   return out
 }

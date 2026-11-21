@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile, stat, chmod, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import blake3 from 'blake3-wasm'
 import {
   applyImport,
   batchApprovals,
@@ -614,7 +615,8 @@ describe('forge-import-legacy-pages', () => {
     })
     expect(seen).toEqual(['sel_a'])
     expect(applied.results).toHaveLength(1)
-    expect(applied.results[0].body).toEqual({ ok: false, error: { code: 'forbidden' } })
+    expect(applied.results[0].error).toBe('forbidden')
+    expect(JSON.stringify(applied.results[0])).not.toContain('nextCursor')
   })
 
   it('stall detection terminates when the stored-file maximum never increases', async () => {
@@ -655,7 +657,7 @@ describe('forge-import-legacy-pages', () => {
       fetch: async () => new Response(JSON.stringify('SECRET_PAYLOAD'), { status: 500 }),
     })
     expect(JSON.stringify(jsonString)).not.toContain('SECRET_PAYLOAD')
-    expect(JSON.stringify(jsonString.results[0].body)).toContain('malformed_response:500')
+    expect(jsonString.results[0].error).toBe('malformed_response:500')
 
     const stringError = await applyImport({
       manageHost: 'manage.example.test',
@@ -664,7 +666,7 @@ describe('forge-import-legacy-pages', () => {
       fetch: async () => new Response(JSON.stringify({ ok: false, error: 'leaked-object-key' }), { status: 502 }),
     })
     expect(JSON.stringify(stringError)).not.toContain('leaked-object-key')
-    expect(JSON.stringify(stringError.results[0].body)).toContain('malformed_response:502')
+    expect(stringError.results[0].error).toBe('malformed_response:502')
 
     const safe = await applyImport({
       manageHost: 'manage.example.test',
@@ -672,8 +674,23 @@ describe('forge-import-legacy-pages', () => {
       headers: { cookie: 'CF_Authorization=fixture-jwt' },
       fetch: async () => new Response(JSON.stringify({ ok: false, error: { code: 'forbidden', detail: 'secret' } }), { status: 403 }),
     })
-    expect(safe.results[0].body).toEqual({ ok: false, error: { code: 'forbidden' } })
+    expect(safe.results[0].error).toBe('forbidden')
     expect(JSON.stringify(safe)).not.toContain('secret')
+
+    const weirdState = await applyImport({
+      manageHost: 'manage.example.test',
+      selections: [{ version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: {} }],
+      headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      fetch: async () => new Response(JSON.stringify({
+        ok: true,
+        result: { state: 'totally-made-up', planDigest: 'not-a-digest', issues: [{ code: 'evil_code' }], secret: 'leak' },
+      }), { status: 200 }),
+    })
+    expect(weirdState.results[0].ok).toBe(false)
+    expect(weirdState.results[0].error).toBe('malformed_response:200')
+    expect(JSON.stringify(weirdState)).not.toContain('totally-made-up')
+    expect(JSON.stringify(weirdState)).not.toContain('evil_code')
+    expect(JSON.stringify(weirdState)).not.toContain('leak')
   })
 
   it('refuses a non-empty batch out-dir so stale batch files cannot survive', async () => {
@@ -709,6 +726,107 @@ describe('forge-import-legacy-pages', () => {
     })
     expect(applied.results[0]).toMatchObject({ ok: true, state: 'committed' })
     expect(bodies.filter(b => b.op === 'apply').every(b => !Object.hasOwn(b, 'cursor'))).toBe(true)
+  })
+
+  it('commits after five or more cursorless staging progress steps', async () => {
+    let stored = 0
+    const total = 41
+    let applyCalls = 0
+    const applied = await applyImport({
+      manageHost: 'manage.example.test',
+      selections: [{
+        version: 1,
+        inventoryId: 'inv',
+        selectionId: 'sel',
+        planId: 'plan',
+        command: { files: Array.from({ length: total }, (_, i) => ({ path: `/a/s/${i}` })) },
+      }],
+      headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        if (body.op === 'dry_run') return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
+        applyCalls += 1
+        if (stored >= total) return new Response(JSON.stringify({ ok: true, result: { state: 'committed' } }), { status: 200 })
+        stored = Math.min(total, stored + 8)
+        const files = Array.from({ length: total }, (_, i) => ({ path: `/a/s/${i}`, stored: i < stored }))
+        return new Response(JSON.stringify({ ok: true, result: { state: 'staging', nextCursor: null, session: { files } } }), { status: 200 })
+      },
+    })
+    expect(applyCalls).toBeGreaterThanOrEqual(6)
+    expect(applied.results[0]).toMatchObject({ ok: true, state: 'committed' })
+    expect(JSON.stringify(applied)).not.toContain('/a/s/')
+  })
+
+  it('rejects non-numeric expiration on selected policy keys', async () => {
+    const { root, cleanup } = await sandbox()
+    try {
+      const { instance } = await writeCapture(root, {
+        slug: 'bad-exp',
+        visibility: 'public',
+        kvOverride: [
+          { name: 'vis:bad-exp', metadata: null, expiration: '2026-01-01T00:00:00Z', value: 'public' },
+        ],
+      })
+      await expect(prepareSelection({
+        captureDir: instance,
+        selectionOut: join(root, 'selection.json'),
+        captureRootOut: join(root, 'capture-root'),
+        instance: 'unkillable',
+        ...synthetic,
+      })).rejects.toMatchObject({ code: 'invalid_expiration', message: expect.stringContaining('vis:bad-exp') })
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('verifies both SHA-256 sidecar and Pages digest when both are present', async () => {
+    const { root, cleanup } = await sandbox()
+    try {
+      const indexPath = '/a/both-dig/index.html'
+      const indexBytes = Buffer.from('<html>legacy</html>')
+      const { instance } = await writeCapture(root, {
+        slug: 'both-dig',
+        visibility: 'private',
+        hubDigests: {
+          [indexPath]: sha256(indexBytes),
+        },
+      })
+      const pages = JSON.parse(await readFile(join(instance, 'pages-files.json'), 'utf8'))
+      pages.result.files[indexPath] = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      await writeFile(join(instance, 'pages-files.json'), JSON.stringify(pages))
+      await expect(prepareSelection({
+        captureDir: instance,
+        selectionOut: join(root, 'selection.json'),
+        captureRootOut: join(root, 'capture-root'),
+        instance: 'unkillable',
+        ...synthetic,
+      })).rejects.toMatchObject({ code: 'prepare_selection_refused' })
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('pagesAssetHash matches an independent Wrangler known-answer vector', () => {
+    const bytes = Buffer.from('known-answer-pages-hash')
+    const known = 'c2075a08cfb400cd564138428e7c50d0'
+    const independent = blake3.hash(bytes.toString('base64') + 'txt').toString('hex').slice(0, 32)
+    expect(independent).toBe(known)
+    expect(pagesAssetHash(bytes, '/a/demo/note.txt')).toBe(known)
+  })
+
+  it('sizes the continuation budget from selection file count', async () => {
+    let n = 0
+    const files = Array.from({ length: 2049 }, (_, i) => ({ path: `/a/f/${i}` }))
+    await expect(applyImport({
+      manageHost: 'manage.example.test',
+      selections: [{ version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: { files } }],
+      headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      fetch: async () => {
+        n += 1
+        return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: `c${n}` } }), { status: 200 })
+      },
+    })).rejects.toMatchObject({ code: 'invalid_continuation', message: expect.stringContaining('request cap') })
+    expect(n).toBeGreaterThan(256)
   })
 
   it('prepare-selection refuses unresolved bytes and unmappable shortlinks', async () => {
