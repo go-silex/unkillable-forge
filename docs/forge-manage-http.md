@@ -209,6 +209,47 @@ graph; Claude native publication is deferred and no private operation grant
 is active. Historical execution requires separate current authority and evidence.
 
 
+### Legacy Pages capture cutover
+
+`scripts/forge-import-legacy-pages.mjs` turns a private capture directory
+(`pages-files.json`, `hub-match.json`, `reinject.json`, `kv.json`, optional
+`shlink.json`) into a selection v1 document and a hard-copied capture-root of
+published `/a/` bytes, then drives production pin/apply. It does not call
+Cloudflare unless the operator runs `pin` / `apply`.
+
+```sh
+node scripts/forge-import-legacy-pages.mjs prepare-selection \
+  --capture /private/cutover/<instance> \
+  --selection /private/selection.json \
+  --capture-root-out /private/capture-root \
+  --instance unkillable   # or roxabi
+
+node scripts/forge-import-offline.mjs prepare \
+  --selection /private/selection.json \
+  --workspace /private/workspace \
+  --capture-root capture=/private/capture-root
+
+node scripts/forge-import-offline.mjs plan --workspace /private/workspace
+```
+
+Production sequence (no discovery; credentials from env, never printed):
+
+1. `pin --workspace … --capture-root capture=/private/capture-root --bucket <r2> --account-id <id>`
+   uploads source objects and inventory JSON with `wrangler r2 object put --remote`
+   and prints `FORGE_IMPORT_INVENTORIES`.
+2. Configure the manage Worker with binding `FORGE_IMPORT_SOURCE` → that bucket and
+   var `FORGE_IMPORT_INVENTORIES` → the printed JSON array.
+3. `apply --workspace … --manage-host <manageHost>` runs `dry_run` then `apply`
+   with cursor continuation. Prefer `CF_ACCESS_TOKEN` as
+   `Cf-Access-Jwt-Assertion` for a Catalogue installation admin (manage audience,
+   nonempty `sub`, active admin grant in D1). `CF_ACCESS_CLIENT_ID` /
+   `CF_ACCESS_CLIENT_SECRET` are only for the Access edge; the Worker itself does
+   not treat those headers as manage identity. Optional `--dry-run-only true`.
+
+Unmappable capture rows are refused with counts (never silently dropped). Share
+keys are preserved literally; `forge.gosilex.com` destinations are normalized to
+the canonical host. Shell paths outside `/a/` are not imported.
+
 `POST /api/maintenance/import` is a separate, administrator-only interface for
 an operator-approved selection, not an arbitrary source or SQL API. It accepts
 exactly one of the following JSON envelopes; `command` is the normal
