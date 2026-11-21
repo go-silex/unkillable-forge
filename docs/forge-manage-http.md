@@ -223,7 +223,7 @@ Unkillable production reader projection (selection `reader` + `sourceInstance`):
 `routeGrammars` `[subtree]`, `shareGrammars` `[slug]`, `shareCookie` false,
 `shellPaths` `[/, /index.html, /login, /login.html]`. Manage host
 `forge-manage.unkillablecompanies.com`, Access team `gosilex.cloudflareaccess.com`,
-import R2 bucket `unkillable-forge-import` on account `f8026cffc9463a03e1a6a76af5301861`
+import R2 bucket `unkillable-forge-import` on the Unkillable account (from `forge.env`)
 (binding `FORGE_IMPORT_SOURCE`), Shlink domain `unkill.si`. Roxabi uses
 `sourceInstance`/`instanceId` `roxabi` and `canonicalHost` `forge.roxabi.dev` with the
 same subtree/slug reader shape. Captured `forge.gosilex.com` longUrls are rewritten
@@ -246,7 +246,7 @@ node scripts/forge-import-offline.mjs plan --workspace /private/workspace
 
 Production sequence (no discovery; credentials from env, never printed):
 
-1. `pin --workspace … --capture-root capture=/private/capture-root --bucket unkillable-forge-import --account-id f8026cffc9463a03e1a6a76af5301861 --inventories-out /private/inventories.json`
+1. `pin --workspace … --capture-root capture=/private/capture-root --bucket unkillable-forge-import --account-id "$CLOUDFLARE_ACCOUNT_ID" --inventories-out /private/inventories.json`
    uploads source objects and inventory JSON with `cf r2 objects put` (the
    approval pins the native R2 `version`, which wrangler and the S3 API do not
    expose; they report only etags) and writes the approvals.

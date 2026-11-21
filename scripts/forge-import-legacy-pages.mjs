@@ -78,7 +78,6 @@ const INSTANCES = {
     shortDomain: 'unkill.si',
     providerOrigin: 'https://unkill.si',
     importBucket: 'unkillable-forge-import',
-    importAccountId: 'f8026cffc9463a03e1a6a76af5301861',
     // Captured Shlink longUrls may still name the old alias host.
     destinationHosts: ['forge.unkillablecompanies.com', 'forge-next.unkillablecompanies.com', 'forge.gosilex.com'],
   },
@@ -97,7 +96,6 @@ const INSTANCES = {
     shortDomain: null,
     providerOrigin: null,
     importBucket: null,
-    importAccountId: null,
     destinationHosts: ['forge.roxabi.dev'],
   },
 }
@@ -789,7 +787,6 @@ async function main(argv = process.argv.slice(2)) {
         instanceId: profile.instanceId ?? null,
         manageHost: profile.manageHost ?? null,
         importBucket: profile.importBucket ?? null,
-        importAccountId: profile.importAccountId ?? null,
         shortDomain: profile.shortDomain ?? null,
       },
       refusedRecords: refusedRecords.map(r => ({ kind: r.kind, reason: r.reason, slug: r.slug ?? null, path: r.path ?? null, shortCode: r.shortCode ?? null })),
