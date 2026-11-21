@@ -1,7 +1,7 @@
-import { parseReadConfig } from '../../domains/catalogue/instance-config'
+import { parseReadConfig, readProfileShellPaths } from '../../domains/catalogue/instance-config'
 import { authenticate, accessJwksSource, type JwksSource } from '../../domains/catalogue/identity'
 import { resolveRead } from '../../domains/catalogue/resolve'
-import { accessLoginLocation, normalizeRequestPath, parseRequest } from '../../domains/catalogue/routing/grammar'
+import { accessLoginLocation, parseRequest, unlistedPathClass } from '../../domains/catalogue/routing/grammar'
 import { listCatalogue } from '../../domains/catalogue/catalogue-list'
 import type { ReadInstanceConfig } from '../../domains/catalogue/instance-config'
 import { RevisionStore } from '../../domains/store/revision-store'
@@ -49,12 +49,6 @@ function redirect(location: string, status: number, cookie?: string, unlisted = 
   if (unlisted) headers.set('x-robots-tag', UNLISTED_ROBOTS_TAG)
   return new Response(null, { status, headers })
 }
-function markUnlistedPath(rawPathname: string, response: Response, shellPaths: readonly string[]): Response {
-  const path = normalizeRequestPath(rawPathname)
-  const pinned = rawPathname.startsWith('/_revisions/') || !!path && (path === '/_revisions' || path.startsWith('/_revisions/'))
-  if (pinned || (!!path && shellPaths.includes(path))) response.headers.set('x-robots-tag', UNLISTED_ROBOTS_TAG)
-  return response
-}
 function pinCookie(request: Request): string | null {
   for (const part of (request.headers.get('cookie') ?? '').split(';')) {
     const trimmed = part.trim()
@@ -63,17 +57,22 @@ function pinCookie(request: Request): string | null {
   return null
 }
 
+/** Single outer finalizer: share Vary + unlisted robots from path class. */
+function finalizeRead(request: Request, response: Response, profileShellPaths: readonly string[]): Response {
+  const rawPathname = new URL(request.url).pathname
+  if (rawPathname.startsWith('/s/')) {
+    response.headers.append('vary', 'User-Agent')
+    response.headers.append('vary', 'Sec-Fetch-Dest')
+  }
+  if (unlistedPathClass(rawPathname, profileShellPaths) !== null) response.headers.set('x-robots-tag', UNLISTED_ROBOTS_TAG)
+  return response
+}
+
 // User-Agent selects a presentation, never an authorization path.
 const unfurlAgent = /(?:Slackbot|Discordbot|Twitterbot|facebookexternalhit|Facebot|LinkedInBot|TelegramBot|WhatsApp|SkypeUriPreview|Google-InspectionTool)/i
 
 export async function handleRead(request: Request, deps: ReadRuntime): Promise<Response> {
-  const pathname = new URL(request.url).pathname
-  const response = await handleReadResponse(request, deps)
-  if (pathname.startsWith('/s/')) {
-    response.headers.append('vary', 'User-Agent')
-    response.headers.append('vary', 'Sec-Fetch-Dest')
-  }
-  return markUnlistedPath(pathname, response, deps.config.shellPaths)
+  return finalizeRead(request, await handleReadResponse(request, deps), deps.config.shellPaths)
 }
 
 async function handleReadResponse(request: Request, deps: ReadRuntime): Promise<Response> {
@@ -136,21 +135,26 @@ async function handleReadResponse(request: Request, deps: ReadRuntime): Promise<
 
 type RuntimeSlot = { readonly deps: ReadRuntime | null; readonly shellPaths: readonly string[] }
 async function runtimeFor(env: Record<string, unknown>, shellAssets: FixedShellAssets): Promise<RuntimeSlot> {
+  const shellPaths = readProfileShellPaths(env)
   const config = await parseReadConfig(env)
-  if (!config.ok) return { deps: null, shellPaths: [] }
-  const shellPaths = config.config.shellPaths
+  if (!config.ok) return { deps: null, shellPaths }
   const bucket = env.REVISION_BYTES as R2Bucket | undefined
-  if (!validateShellAssets(shellPaths, shellAssets) || !bucket || typeof bucket.head !== 'function' || typeof bucket.get !== 'function') return { deps: null, shellPaths }
-  return { deps: { db: env.DB as D1Database, config: config.config, jwks: accessJwksSource(), nowSeconds: () => Date.now() / 1000, store: new RevisionStore(bucket, config.config.instanceId), shellAssets }, shellPaths }
+  if (!validateShellAssets(config.config.shellPaths, shellAssets) || !bucket || typeof bucket.head !== 'function' || typeof bucket.get !== 'function') {
+    return { deps: null, shellPaths: config.config.shellPaths }
+  }
+  return { deps: { db: env.DB as D1Database, config: config.config, jwks: accessJwksSource(), nowSeconds: () => Date.now() / 1000, store: new RevisionStore(bucket, config.config.instanceId), shellAssets }, shellPaths: config.config.shellPaths }
 }
 export function createReadWorker(shellAssets: FixedShellAssets = EMPTY_SHELL_ASSETS) {
   const runtimes = new WeakMap<object, Promise<RuntimeSlot>>()
   return { async fetch(request: Request, env: Record<string, unknown>): Promise<Response> {
     let runtime = runtimes.get(env)
-    if (!runtime) { runtime = runtimeFor(env, shellAssets).catch(() => ({ deps: null, shellPaths: [] as const })); runtimes.set(env, runtime) }
+    if (!runtime) {
+      runtime = runtimeFor(env, shellAssets).catch(() => ({ deps: null, shellPaths: readProfileShellPaths(env) }))
+      runtimes.set(env, runtime)
+    }
     const slot = await runtime
     if (slot.deps) return handleRead(request, slot.deps)
-    return markUnlistedPath(new URL(request.url).pathname, textResponse(503, 'Unavailable', request.method), slot.shellPaths)
+    return finalizeRead(request, textResponse(503, 'Unavailable', request.method), slot.shellPaths)
   } }
 }
 export default createReadWorker()

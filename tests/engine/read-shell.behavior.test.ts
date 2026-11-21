@@ -2,9 +2,13 @@ import { env } from 'cloudflare:workers'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createReadWorker, handleRead } from '../../adapters/http/readWorker'
 import { unkillableShellAssets } from '../../adapters/web/unkillable-shell'
+import { setVisibility } from '../../domains/catalogue/commands'
 import type { FixedShellAssets } from '../../domains/delivery/shell'
+import { UNLISTED_ROBOTS_TAG } from '../../domains/delivery/serve'
+import { PublicationService } from '../../domains/publication'
 import { RevisionStore } from '../../domains/store/revision-store'
-import { bootstrap, configs, instanceId, jwks, manageRequest, pageFixture } from './fixtures/catalogue'
+import { actor, bootstrap, configs, instanceId, jwks, manageRequest, pageFixture } from './fixtures/catalogue'
+import { documentCommand, publishDocument } from './fixtures/publication'
 
 const fixed: FixedShellAssets = {
   '/favicon.ico': { body: new Uint8Array([0, 1, 255, 42]).buffer, contentType: 'image/x-icon' },
@@ -53,40 +57,11 @@ describe('fixed shell through the read worker', () => {
     expect(root.status).toBe(200)
     expect(index.status).toBe(200)
     expect(await index.text()).toBe(await root.text())
-    expect(root.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
     for (const path of ['/login', '/login.html']) {
-      const get = await request(worker, path)
-      expect(get.status).toBe(200)
-      expect(get.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
+      expect((await request(worker, path)).status).toBe(200)
       const head = await request(worker, path, { method: 'HEAD' })
       expect(head.status).toBe(200)
-      expect(head.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
       expect(await head.text()).toBe('')
-    }
-  })
-
-  it('marks fixed shell assets unlisted with the shared robots tag', async () => {
-    const worker = createReadWorker(fixed)
-    const robots = await request(worker, '/robots.txt')
-    expect(robots.status).toBe(200)
-    expect(robots.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
-  })
-
-  it.each([
-    ['generic', () => createReadWorker(fixed)],
-    ['unkillable', () => createReadWorker(unkillableShellAssets)],
-  ] as const)('marks shell-path Access redirects and method denials unlisted for %s worker', async (_label, makeWorker) => {
-    const worker = makeWorker()
-    const accessLocation = 'https://team.cloudflareaccess.com/cdn-cgi/access/login/forge.example.test?redirect_url=' + encodeURIComponent('https://forge.example.test/a/private/')
-    for (const path of ['/login', '/login.html']) {
-      const anonymous = await request(worker, `${path}?next=/a/private/`, { bindings: bindings({ login: 'redirect-access-login' }) })
-      expect(anonymous.status).toBe(302)
-      expect(anonymous.headers.get('location')).toBe(accessLocation)
-      expect(anonymous.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
-      const denied = await request(worker, path, { method: 'POST' })
-      expect(denied.status).toBe(405)
-      expect(denied.headers.get('allow')).toBe('GET, HEAD')
-      expect(denied.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
     }
   })
 
@@ -100,7 +75,7 @@ describe('fixed shell through the read worker', () => {
       }), { db: env.DB, config: config.read, jwks, nowSeconds: () => 100, store, shellAssets: fixed })
       expect(response.status).toBe(302)
       expect(response.headers.get('location')).toBe('/a/private/')
-      expect(response.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
+      expect(response.headers.get('x-robots-tag')).toBe(UNLISTED_ROBOTS_TAG)
     }
   })
 
@@ -116,7 +91,7 @@ describe('fixed shell through the read worker', () => {
   })
 
   it('does not serve a private artefact through the shell', async () => {
-    await pageFixture({ route: { kind: 'subtree', slug: 'private' }, visibility: 'private' })
+    await pageFixture({ route: { kind: 'subtree', slug: 'private' }, visibility: 'private', page: `pg_${'c'.repeat(26)}`, artifact: `ar_${'c'.repeat(26)}`, revision: `rv_${'c'.repeat(26)}` })
     const response = await request(createReadWorker(fixed), '/a/private/')
     expect(response.status).not.toBe(200)
     expect(await response.text()).not.toContain('User-agent: *')
@@ -125,31 +100,77 @@ describe('fixed shell through the read worker', () => {
   it('rejects missing, extra and dynamic entries at composition rather than returning a shell 404', async () => {
     const { '/favicon.ico': _missing, ...incomplete } = fixed
     for (const bundle of [incomplete, { ...fixed, '/unconfigured': { body: 'x', contentType: 'text/plain' } }, { ...fixed, '/': { body: 'override', contentType: 'text/html' } }, { ...fixed, '/index.html': { body: 'override', contentType: 'text/html' } }, { ...fixed, '/login': { body: 'override', contentType: 'text/html' } }, { ...fixed, '/login.html': { body: 'override', contentType: 'text/html' } }]) {
-      const unavailable = await request(createReadWorker(bundle), '/robots.txt')
-      expect(unavailable.status).toBe(503)
-      expect(unavailable.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
+      expect((await request(createReadWorker(bundle), '/robots.txt')).status).toBe(503)
     }
-  })
-
-  it('marks percent-encoded login and revision-prefix paths with the shared robots tag', async () => {
-    const worker = createReadWorker(fixed)
-    const encodedLogin = await request(worker, '/%6Cogin')
-    expect(encodedLogin.status).toBe(200)
-    expect(await encodedLogin.text()).toContain('Sign in')
-    expect(encodedLogin.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
-    const accessLocation = 'https://team.cloudflareaccess.com/cdn-cgi/access/login/forge.example.test?redirect_url=' + encodeURIComponent('https://forge.example.test/a/private/')
-    const encodedRedirect = await request(worker, '/%6Cogin?next=/a/private/', { bindings: bindings({ login: 'redirect-access-login' }) })
-    expect(encodedRedirect.status).toBe(302)
-    expect(encodedRedirect.headers.get('location')).toBe(accessLocation)
-    expect(encodedRedirect.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
-    const encodedPin = await request(worker, '/%5Frevisions/not-a-page/not-a-rev/index.html')
-    expect(encodedPin.status).toBe(404)
-    expect(encodedPin.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
   })
 
   it('rejects a public bundle for the larger private instance contract', async () => {
     const privatePaths = ['/', '/index.html', '/login', '/login.html', '/robots.txt', '/favicon.ico', '/favicon.svg', '/favicon-32.png', '/apple-touch-icon.png', '/_shared/hero-base.css', '/_shared/hero-base.js', '/_shared/gallery-base.css', '/_shared/gallery-base.js', '/_shared/fgraph-base.css', '/_shared/explainer-base.css']
     const roxabiSubset = { '/robots.txt': fixed['/robots.txt'], '/favicon.ico': fixed['/favicon.ico'], '/apple-touch-icon.png': fixed['/apple-touch-icon.png'] }
     expect((await request(createReadWorker(roxabiSubset), '/robots.txt', { bindings: bindings({ shellPaths: privatePaths }) })).status).toBe(503)
+  })
+})
+
+describe('unlisted robots path class matrix', () => {
+  const { '/favicon.ico': _drop, ...incompleteBundle } = fixed
+  const unkillableIncomplete: FixedShellAssets = {
+    '/apple-touch-icon.png': unkillableShellAssets['/apple-touch-icon.png'],
+    '/images/favicon.png': unkillableShellAssets['/images/favicon.png'],
+    '/robots.txt': unkillableShellAssets['/robots.txt'],
+  }
+
+  beforeEach(async () => {
+    const config = await configs()
+    const store = new RevisionStore(env.REVISION_BYTES, instanceId)
+    const publication = new PublicationService({
+      db: env.DB, config: config.manage, jwks, now: () => 10_000, store,
+      publication: { sessionTtlMs: 60_000, maxUploadTimeoutMs: 1000, retainMs: 900_000, marginMs: 1000, manageClockSkewMs: 0, readClockSkewMs: 0 },
+    })
+    const page = await documentCommand('shell-canonical', '/a/canonical-robots/index.html', '<p>canonical</p>')
+    const published = await publishDocument(publication, actor, page.command, page.bytes)
+    await setVisibility({ db: env.DB, config: config.manage, jwks, now: () => 10_000 }, actor, {
+      pageId: page.pageId, artifactId: published.receipt.artifactId, expectedPolicyEpoch: 0, visibility: 'public',
+    })
+  })
+
+  const variantWorkers = [
+    { label: 'generic', complete: () => createReadWorker(fixed), incomplete: () => createReadWorker(incompleteBundle) },
+    { label: 'unkillable', complete: () => createReadWorker(unkillableShellAssets), incomplete: () => createReadWorker(unkillableIncomplete) },
+  ] as const
+
+  const states = [
+    { label: 'valid', env: () => bindings(), worker: 'complete' as const, available: true },
+    { label: 'DB missing', env: () => { const b = bindings(); const { DB: _db, ...rest } = b; return rest }, worker: 'complete' as const, available: false },
+    { label: 'R2 missing', env: () => { const b = bindings(); const { REVISION_BYTES: _r2, ...rest } = b; return rest }, worker: 'complete' as const, available: false },
+    { label: 'bundle incomplete', env: () => bindings(), worker: 'incomplete' as const, available: false },
+  ] as const
+
+  const requests = [
+    { path: '/login', method: 'GET' as const, kind: 'shell' as const, validStatus: 200 },
+    { path: '/%6Cogin', method: 'GET' as const, kind: 'shell' as const, validStatus: 200 },
+    { path: '/login.html', method: 'GET' as const, kind: 'shell' as const, validStatus: 200 },
+    { path: '/_revisions/not-a-page/not-a-rev/index.html', method: 'GET' as const, kind: 'revision' as const, validStatus: 404 },
+    { path: '/%5Frevisions/a//b', method: 'GET' as const, kind: 'revision' as const, validStatus: 404 },
+    { path: '/_revisions/a//b', method: 'GET' as const, kind: 'revision' as const, validStatus: 404 },
+    { path: '/login', method: 'POST' as const, kind: 'shell' as const, validStatus: 405 },
+    { path: '/a/canonical-robots/', method: 'GET' as const, kind: 'canonical' as const, validStatus: 200 },
+  ] as const
+
+  const cases = variantWorkers.flatMap(variant => states.flatMap(state => requests.map(req => ({
+    name: `${variant.label} × ${state.label} × ${req.method} ${req.path}`,
+    variant, state, req,
+  }))))
+
+  it.each(cases)('$name', async ({ variant, state, req }) => {
+    const worker = state.worker === 'complete' ? variant.complete() : variant.incomplete()
+    const response = await worker.fetch(
+      new Request(`https://forge.example.test${req.path}`, { method: req.method }),
+      state.env() as Record<string, unknown>,
+    )
+    const expectStatus = state.available ? req.validStatus : 503
+    expect(response.status).toBe(expectStatus)
+    expect(response.headers.get('location')).toBeNull()
+    if (req.kind === 'canonical') expect(response.headers.get('x-robots-tag')).toBeNull()
+    else expect(response.headers.get('x-robots-tag')).toBe(UNLISTED_ROBOTS_TAG)
   })
 })

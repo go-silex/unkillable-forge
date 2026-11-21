@@ -2,7 +2,7 @@
 
 ## [1.0.1]
 
-- Read Worker marks every `/_revisions/` response and every configured shell-path response (including `/login` redirects and method denials) `x-robots-tag: noindex, nofollow, noarchive`, so search engines never index superseded revisions or the sign-in surface.
+- Read Worker marks revision-namespace and reader-profile shell-path responses `x-robots-tag: noindex, nofollow, noarchive` via one path classifier/finalizer (including encoded prefixes, malformed revision suffixes, login redirects/method denials, and binding/bundle failures that still expose the profile shell list).
 - No migration; code-only rollback to 1.0.0 stays compatible.
 
 ## [1.0.0]

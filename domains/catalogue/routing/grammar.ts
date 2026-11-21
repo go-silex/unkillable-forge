@@ -71,6 +71,22 @@ export function normalizeRequestPath(raw: string): string | null {
   if (/[\\\u0000-\u001f\u007f]/.test(path) || path.split("/").some(s => s === "." || s === ".." || s.includes("/"))) return null
   return path
 }
+
+export type UnlistedPathClass = "shell" | "revision"
+
+/**
+ * Robots/unlisted class for a request path. Revision membership is the percent-decoded first
+ * segment only (suffix may be malformed); shell membership needs a fully normalized path.
+ */
+export function unlistedPathClass(rawPathname: string, profileShellPaths: readonly string[]): UnlistedPathClass | null {
+  const rest = rawPathname.startsWith("/") ? rawPathname.slice(1) : rawPathname
+  const cut = rest.indexOf("/")
+  try {
+    if (decodeURIComponent(cut < 0 ? rest : rest.slice(0, cut)) === "_revisions") return "revision"
+  } catch { /* first segment is not a revision namespace */ }
+  const path = normalizeRequestPath(rawPathname)
+  return path && profileShellPaths.includes(path) ? "shell" : null
+}
 export function isReservedPath(path: string, config: InstanceBase & { readonly shellPaths?: readonly string[] }): boolean {
   return isReservedShellPath(path) || !!config.shellPaths?.includes(path)
 }
