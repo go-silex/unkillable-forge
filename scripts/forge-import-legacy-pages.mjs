@@ -153,10 +153,89 @@ const IMPORT_ISSUE_CODES = new Set([
 ])
 const RESULT_STATES = new Set(['checking', 'blocked', 'ready', 'staging', 'committed'])
 
-/** Finite request budget: one request per file (32 MiB step cap) + phase/metadata overhead. */
+// Protocol window sizes — keep in sync with the native import producers.
+const PREFLIGHT_WINDOW = 128 // domains/publication/staging.ts INSPECTION_CHUNK
+const METADATA_WINDOW = 128 // domains/catalogue/import.ts IMPORT_METADATA_LIMIT
+const TRANSFER_FILE_CAP = 8 // domains/publication/import.ts MAX_FILES (byte cap may force 1/file)
+const TRANSFER_BYTE_CAP = 32 * 1024 * 1024 // domains/publication/import.ts MAX_BYTES
+const BUDGET_SLACK = 8 // ready/seal/commit terminal steps beyond paged windows
+
+function ceilDiv(n, size) {
+  const count = Math.max(0, Number(n) || 0)
+  return count === 0 ? 0 : Math.ceil(count / size)
+}
+
+/** Always-visited preflight phases still cost one request when empty. */
+function visitedWindows(n, size) {
+  return Math.max(1, ceilDiv(n, size))
+}
+
+/** Target/recheck skip empty files/edges (domains/catalogue/import.ts nextPhase). */
+function nonemptyWindows(n, size) {
+  return ceilDiv(n, size)
+}
+
+/**
+ * Finite request budget from the import protocol (not a heuristic pad).
+ * dry_run: preflight + target + source transfers + recheck
+ * apply:   preflight + target + recheck + staging transfers
+ * Each loop uses this budget independently.
+ */
 function continuationBudget(selection) {
-  const files = Array.isArray(selection?.command?.files) ? selection.command.files.length : 0
-  return Math.max(files, 1) + 64
+  const command = selection?.command && typeof selection.command === 'object' ? selection.command : {}
+  const files = Array.isArray(command.files) ? command.files : []
+  const pages = Array.isArray(command.pages) ? command.pages : []
+  const edges = Array.isArray(command.edges) ? command.edges : []
+  const inventoryOps = selection?.inventory && Array.isArray(selection.inventory.operations)
+    ? selection.inventory.operations.length
+    : 0
+  // Inventory ops are not on the wire selection; page_policy ≈ one per page is the floor.
+  const ops = Math.max(inventoryOps, pages.length, 1)
+  const fileCount = files.length
+  const pageCount = pages.length
+  const edgeCount = edges.length
+  const hasArtifact = command.artifactId != null || command.expectedRevisionId != null
+
+  // preflight: files + pages + edges + membership (staging.ts:189–251)
+  const membership = hasArtifact ? visitedWindows(pageCount, PREFLIGHT_WINDOW) : 1
+  const preflight = visitedWindows(fileCount, PREFLIGHT_WINDOW)
+    + visitedWindows(pageCount, PREFLIGHT_WINDOW)
+    + visitedWindows(edgeCount, PREFLIGHT_WINDOW)
+    + membership
+
+  // One target/recheck pass: pages + files + ops (+ edges if any); base phases when revising.
+  let targetPass = Math.max(1, nonemptyWindows(pageCount, METADATA_WINDOW))
+    + nonemptyWindows(fileCount, METADATA_WINDOW)
+    + nonemptyWindows(edgeCount, METADATA_WINDOW)
+    + Math.max(1, nonemptyWindows(ops, METADATA_WINDOW))
+  if (hasArtifact) {
+    // live_pages / resources / owners / previews paginate at METADATA_WINDOW when a base revision exists.
+    targetPass += nonemptyWindows(pageCount, METADATA_WINDOW) // live_pages
+      + nonemptyWindows(fileCount, METADATA_WINDOW) // resources
+      + nonemptyWindows(edgeCount, METADATA_WINDOW) // owners
+      + nonemptyWindows(pageCount, METADATA_WINDOW) // previews
+  }
+
+  // Source-check / staging transfers (publication/import.ts:169–174,250–253).
+  let transfers = 0
+  let batchFiles = 0
+  let batchBytes = 0
+  for (const file of files) {
+    const size = typeof file?.size === 'number' && Number.isFinite(file.size) && file.size >= 0
+      ? file.size
+      : TRANSFER_BYTE_CAP
+    if (batchFiles >= TRANSFER_FILE_CAP || (batchFiles > 0 && batchBytes + size > TRANSFER_BYTE_CAP)) {
+      transfers += 1
+      batchFiles = 0
+      batchBytes = 0
+    }
+    batchFiles += 1
+    batchBytes += size
+  }
+  if (batchFiles > 0) transfers += 1
+  if (transfers === 0) transfers = 1
+
+  return preflight + targetPass + transfers + targetPass + BUDGET_SLACK
 }
 
 /** Pages Direct Upload asset hash: BLAKE3(base64(bytes) + extWithoutDot).hex[:32]. */

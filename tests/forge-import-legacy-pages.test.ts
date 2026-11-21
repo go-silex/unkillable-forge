@@ -814,26 +814,70 @@ describe('forge-import-legacy-pages', () => {
     expect(pagesAssetHash(bytes, '/a/demo/note.txt')).toBe(known)
   })
 
-  it('continues past the old ceil(n/8) budget for large single-file steps', async () => {
-    let n = 0
-    // Old formula ceil(320/8)*6+64 = 304; one-file-per-request needs >304 dry_run steps.
-    const files = Array.from({ length: 320 }, (_, i) => ({ path: `/a/f/${i}`, size: 17 * 1024 * 1024 }))
+  it('protocol budget completes dry-run and apply when paged metadata exceeds files+64', async () => {
+    // Counter-example shape: 3072×17MiB, 1 page, 0 edges, 1 policy op.
+    // files+64 = 3136, but dry needs 3151 and apply needs 3150 protocol steps.
+    const fileCount = 3072
+    const files = Array.from({ length: fileCount }, (_, i) => ({ path: `/a/big/${i}.bin`, size: 17 * 1024 * 1024 }))
+    const pages = [{ pageId: 'pg_budget', disposition: 'new', documentPath: '/a/big/index.html', expectedPolicyEpoch: null }]
+    const edges: unknown[] = []
+    const operations = [{ kind: 'page_policy' }]
+    const selection = {
+      version: 1 as const,
+      inventoryId: 'inv',
+      selectionId: 'sel_budget',
+      planId: 'plan_budget',
+      command: { files, pages, edges, artifactId: null, expectedRevisionId: null },
+      inventory: { operations },
+    }
+    const heuristicCap = fileCount + 64
+    const preflight = Math.ceil(fileCount / 128) + 1 + 1 + 1 // files + pages + edges + membership
+    const targetPass = 1 + Math.ceil(fileCount / 128) + 1 // pages + files + ops
+    const protocolDry = preflight + targetPass + fileCount + targetPass // 3151
+    const protocolApply = preflight + targetPass + (targetPass - 1) + fileCount // planning checks + staging
+    expect(protocolDry).toBeGreaterThan(heuristicCap)
+    expect(protocolApply).toBeGreaterThan(heuristicCap)
+
+    let dryN = 0
+    let applyN = 0
+    let stored = 0
     const applied = await applyImport({
       manageHost: 'manage.example.test',
-      selections: [{ version: 1, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: { files } }],
+      selections: [selection],
       headers: { cookie: 'CF_Authorization=fixture-jwt' },
-      dryRunOnly: true,
-      fetch: async () => {
-        n += 1
-        if (n <= 320) {
-          return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: `c${n}` } }), { status: 200 })
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        if (body.op === 'dry_run') {
+          dryN += 1
+          if (dryN < protocolDry) {
+            return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: `dry-${dryN}` } }), { status: 200 })
+          }
+          return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
         }
-        return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
+        applyN += 1
+        const applyPlanning = preflight + targetPass + (targetPass - 1) // last recheck folds into staging response
+        if (applyN <= applyPlanning) {
+          return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: `apply-${applyN}` } }), { status: 200 })
+        }
+        if (stored < fileCount) {
+          stored += 1
+          // Compact progress vector: driver only counts entries with stored===true.
+          const sessionFiles = [
+            ...Array.from({ length: stored }, () => ({ stored: true })),
+            { stored: false },
+          ]
+          return new Response(JSON.stringify({
+            ok: true,
+            result: { state: 'staging', nextCursor: null, session: { files: sessionFiles } },
+          }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ ok: true, result: { state: 'committed' } }), { status: 200 })
       },
     })
-    expect(n).toBeGreaterThan(304)
+    expect(dryN).toBeGreaterThan(heuristicCap)
+    expect(applyN).toBeGreaterThan(heuristicCap)
     expect(applied.results).toHaveLength(1)
-    expect(applied.results[0]).toMatchObject({ ok: true, state: 'ready' })
+    expect(applied.results[0]).toMatchObject({ ok: true, state: 'committed' })
   })
 
   it('continueOnBlock keeps going after a native shortlink_conflict block', async () => {
