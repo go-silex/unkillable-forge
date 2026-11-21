@@ -1,5 +1,10 @@
 # Engine changelog
 
+## [1.0.1]
+
+- Read Worker marks pinned `/_revisions/` responses and the shell (including `/login`) `x-robots-tag: noindex, nofollow, noarchive`, so search engines never index superseded revisions or the sign-in page.
+- No migration; code-only rollback to 1.0.0 stays compatible.
+
 ## [1.0.0]
 
 - First CI-qualified engine release baseline for manage + read Workers, D1 migrations, and operator deploy tooling (F11).
