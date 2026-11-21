@@ -62,6 +62,31 @@ export function shareUrl(config: InstanceBase, route: SubtreeOrTree, key: string
 export function isReservedShellPath(path: string): boolean {
   return path === "/s" || path.startsWith("/s/") || path === "/a" || path.startsWith("/a/") || path.startsWith("/_derived/") || path.startsWith("/_revisions") || path.startsWith("/api") || path === "/registry" || path.startsWith("/registry/") || path === "/manifest.json" || path === "/asset-owners.json" || path === "/cdn-cgi" || path.startsWith("/cdn-cgi/")
 }
+
+/** Decode path segments the same way as `parseRequest`; null when the raw path is refused as malformed. */
+export function normalizeRequestPath(raw: string): string | null {
+  if (/%(?:2f|2e|5c)/i.test(raw) || /[\\\u0000-\u001f\u007f]/.test(raw) || raw.includes("//")) return null
+  let path: string
+  try { path = raw.split("/").map(decodeURIComponent).join("/") } catch { return null }
+  if (/[\\\u0000-\u001f\u007f]/.test(path) || path.split("/").some(s => s === "." || s === ".." || s.includes("/"))) return null
+  return path
+}
+
+export type UnlistedPathClass = "shell" | "revision"
+
+/**
+ * Robots/unlisted class for a request path. Revision membership is the percent-decoded first
+ * segment only (suffix may be malformed); shell membership needs a fully normalized path.
+ */
+export function unlistedPathClass(rawPathname: string, profileShellPaths: readonly string[]): UnlistedPathClass | null {
+  const rest = rawPathname.startsWith("/") ? rawPathname.slice(1) : rawPathname
+  const cut = rest.indexOf("/")
+  try {
+    if (decodeURIComponent(cut < 0 ? rest : rest.slice(0, cut)) === "_revisions") return "revision"
+  } catch { /* first segment is not a revision namespace */ }
+  const path = normalizeRequestPath(rawPathname)
+  return path && profileShellPaths.includes(path) ? "shell" : null
+}
 export function isReservedPath(path: string, config: InstanceBase & { readonly shellPaths?: readonly string[] }): boolean {
   return isReservedShellPath(path) || !!config.shellPaths?.includes(path)
 }
@@ -104,10 +129,8 @@ export function parseRequest(request: Request, config: ReadInstanceConfig): { re
   if (url.port || (host !== config.canonicalHost && !config.aliasHosts.includes(host))) return deny(403, "host")
   if (request.method !== "GET" && request.method !== "HEAD") return deny(405, "method")
   const raw = url.pathname
-  if (/%(?:2f|2e|5c)/i.test(raw) || /[\\\u0000-\u001f\u007f]/.test(raw) || raw.includes("//")) return deny(404, "malformed")
-  let path: string
-  try { path = raw.split("/").map(decodeURIComponent).join("/") } catch { return deny(404, "malformed") }
-  if (/[\\\u0000-\u001f\u007f]/.test(path) || path.split("/").some(s => s === "." || s === ".." || s.includes("/"))) return deny(404, "malformed")
+  const path = normalizeRequestPath(raw)
+  if (path === null) return deny(404, "malformed")
   if (path.startsWith("/_derived/")) return deny(404, "internal")
   if (path === "/manifest.json" || path === "/asset-owners.json" || path === "/registry" || path.startsWith("/registry/") || (path !== "/api/catalogue" && (path === "/api" || path.startsWith("/api/")))) return deny(404, "internal")
   if (config.shellPaths.includes(path)) return result({ kind: "shell", path, login: path === "/login" || path === "/login.html" ? { next: safeNext(url.searchParams.get("next"), url.origin), host } : null })

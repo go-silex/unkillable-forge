@@ -17,6 +17,9 @@ export function pinPath(pin: PinNamespace): string {
   return `/_revisions/${pin.pageId}/${pin.revisionId}/`
 }
 
+/** Shared unlisted response value for shares, pins, and shell paths. */
+export const UNLISTED_ROBOTS_TAG = 'noindex, nofollow, noarchive'
+
 export function securityHeaders(): Headers {
   return new Headers({ 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'x-frame-options': 'SAMEORIGIN' })
 }
@@ -38,7 +41,7 @@ export async function serve(request: Request, plan: ReadPlan, store: RevisionSto
   const type = plan.resource.contentType.split(';', 1)[0].trim().toLowerCase()
   const transformed = !!pin && (type === 'text/html' || type === 'text/css')
   const headers = securityHeaders()
-  if (options.unlisted) headers.set('x-robots-tag', 'noindex, nofollow, noarchive')
+  if (options.unlisted) headers.set('x-robots-tag', UNLISTED_ROBOTS_TAG)
   headers.set('content-type', plan.resource.contentType)
   if (plan.pinnedProof && pin) headers.append('set-cookie', `forge_pin=${plan.pinnedProof}; Path=${pinPath(pin)}; Max-Age=900; HttpOnly; Secure; SameSite=Lax`)
   const etag = `"${plan.resource.sha256}"`

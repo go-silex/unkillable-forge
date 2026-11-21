@@ -1,14 +1,14 @@
 import type { SharedPreviewPlan } from '../catalogue/previews'
 import type { PreviewCardPlan } from '../catalogue/preview-cards'
 import type { RevisionStore } from '../store/revision-store'
-import { securityHeaders, textResponse } from './serve'
+import { securityHeaders, textResponse, UNLISTED_ROBOTS_TAG } from './serve'
 
 const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
 
 export function unfurl(request: Request, plan: SharedPreviewPlan, key: string): Response {
   const headers = securityHeaders()
   headers.set('content-type', 'text/html; charset=utf-8')
-  headers.set('x-robots-tag', 'noindex, nofollow, noarchive')
+  headers.set('x-robots-tag', UNLISTED_ROBOTS_TAG)
   if (request.method === 'HEAD') return new Response(null, { headers })
   let image = ''
   if (plan.image) {
@@ -31,7 +31,7 @@ export async function serveCard(request: Request, plan: PreviewCardPlan, store: 
   if (!info) return textResponse(404, 'Not found', request.method)
   if (info.sha256 !== expected.sha256 || info.size !== expected.size || info.key !== expected.objectKey || info.version !== expected.objectVersion) return textResponse(503, 'Unavailable', request.method)
   const headers = securityHeaders()
-  headers.set('x-robots-tag', 'noindex, nofollow, noarchive')
+  headers.set('x-robots-tag', UNLISTED_ROBOTS_TAG)
   headers.set('content-type', expected.contentType)
   headers.set('accept-ranges', 'bytes')
   const etag = `"${expected.sha256}"`

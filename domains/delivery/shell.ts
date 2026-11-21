@@ -1,4 +1,4 @@
-import { securityHeaders } from './serve'
+import { securityHeaders, UNLISTED_ROBOTS_TAG } from './serve'
 
 export type ShellAsset = { readonly body: string | ArrayBuffer; readonly contentType: string }
 export type FixedShellAssets = Readonly<Record<string, ShellAsset>>
@@ -20,5 +20,6 @@ export function validateShellAssets(shellPaths: readonly string[], files: FixedS
 export function serveShellAsset(request: Request, file: ShellAsset): Response {
   const headers = securityHeaders()
   headers.set('content-type', file.contentType)
+  headers.set('x-robots-tag', UNLISTED_ROBOTS_TAG)
   return new Response(request.method === 'HEAD' ? null : file.body, { headers })
 }

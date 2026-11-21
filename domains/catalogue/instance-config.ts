@@ -200,6 +200,15 @@ async function parse(env: Readonly<Record<string, unknown>>, surface: "read" | "
   return { ok: true, config: { ...base, surface, manageHost: manageHost as string, manageAudiences, shellPaths, shareSealKey: sealKey } }
 }
 
+/** Reader-profile shell paths from FORGE_INSTANCE only — independent of DB/R2/verifier bindings. */
+export function readProfileShellPaths(env: Readonly<Record<string, unknown>>): readonly string[] {
+  const discarded: string[] = []
+  const parsed = json(env.FORGE_INSTANCE, "FORGE_INSTANCE", discarded)
+  if (!object(parsed)) return []
+  const reader = validateReaderProfile(parsed)
+  return reader.ok ? reader.config.shellPaths : []
+}
+
 export async function parseReadConfig(env: Readonly<Record<string, unknown>>): Promise<ConfigResult<ReadInstanceConfig>> {
   return await parse(env, "read") as ConfigResult<ReadInstanceConfig>
 }
