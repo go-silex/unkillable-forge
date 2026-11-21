@@ -5,7 +5,7 @@ import { accessLoginLocation, parseRequest } from '../../domains/catalogue/routi
 import { listCatalogue } from '../../domains/catalogue/catalogue-list'
 import type { ReadInstanceConfig } from '../../domains/catalogue/instance-config'
 import { RevisionStore } from '../../domains/store/revision-store'
-import { securityHeaders, serve, textResponse, type PinNamespace } from '../../domains/delivery/serve'
+import { securityHeaders, serve, textResponse, UNLISTED_ROBOTS_TAG, type PinNamespace } from '../../domains/delivery/serve'
 import { serveShellAsset, validateShellAssets, type FixedShellAssets } from '../../domains/delivery/shell'
 import { resolveHttpCard, resolveSharedPreview } from '../../domains/catalogue/preview-http'
 import { serveCard, unfurl } from '../../domains/delivery/unfurl'
@@ -40,14 +40,18 @@ export interface ReadRuntime { db: D1Database; config: ReadInstanceConfig; jwks:
 const EMPTY_SHELL_ASSETS: FixedShellAssets = Object.freeze({})
 const escape = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
 function html(body: string, method: string): Response {
-  const headers = securityHeaders(); headers.set('content-type', 'text/html; charset=utf-8'); headers.set('x-robots-tag', 'noindex, nofollow, noarchive')
+  const headers = securityHeaders(); headers.set('content-type', 'text/html; charset=utf-8')
   return new Response(method === 'HEAD' ? null : `<!doctype html><html lang="en"><meta charset="utf-8"><title>Forge</title><body>${body}</body></html>`, { headers })
 }
 function redirect(location: string, status: number, cookie?: string, unlisted = false): Response {
   const headers = securityHeaders(); headers.set('location', location)
   if (cookie) headers.append('set-cookie', cookie)
-  if (unlisted) headers.set('x-robots-tag', 'noindex, nofollow, noarchive')
+  if (unlisted) headers.set('x-robots-tag', UNLISTED_ROBOTS_TAG)
   return new Response(null, { status, headers })
+}
+function markUnlistedPath(pathname: string, response: Response, shellPaths: readonly string[]): Response {
+  if (pathname.startsWith('/_revisions/') || shellPaths.includes(pathname)) response.headers.set('x-robots-tag', UNLISTED_ROBOTS_TAG)
+  return response
 }
 function pinCookie(request: Request): string | null {
   for (const part of (request.headers.get('cookie') ?? '').split(';')) {
@@ -61,12 +65,13 @@ function pinCookie(request: Request): string | null {
 const unfurlAgent = /(?:Slackbot|Discordbot|Twitterbot|facebookexternalhit|Facebot|LinkedInBot|TelegramBot|WhatsApp|SkypeUriPreview|Google-InspectionTool)/i
 
 export async function handleRead(request: Request, deps: ReadRuntime): Promise<Response> {
+  const pathname = new URL(request.url).pathname
   const response = await handleReadResponse(request, deps)
-  if (new URL(request.url).pathname.startsWith('/s/')) {
+  if (pathname.startsWith('/s/')) {
     response.headers.append('vary', 'User-Agent')
     response.headers.append('vary', 'Sec-Fetch-Dest')
   }
-  return response
+  return markUnlistedPath(pathname, response, deps.config.shellPaths)
 }
 
 async function handleReadResponse(request: Request, deps: ReadRuntime): Promise<Response> {
@@ -139,7 +144,9 @@ export function createReadWorker(shellAssets: FixedShellAssets = EMPTY_SHELL_ASS
     let runtime = runtimes.get(env)
     if (!runtime) { runtime = runtimeFor(env, shellAssets).catch(() => null); runtimes.set(env, runtime) }
     const deps = await runtime
-    return deps ? handleRead(request, deps) : textResponse(503, 'Unavailable', request.method)
+    if (deps) return handleRead(request, deps)
+    const pathname = new URL(request.url).pathname
+    return markUnlistedPath(pathname, textResponse(503, 'Unavailable', request.method), [])
   } }
 }
 export default createReadWorker()

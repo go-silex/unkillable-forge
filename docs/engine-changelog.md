@@ -2,7 +2,7 @@
 
 ## [1.0.1]
 
-- Read Worker marks pinned `/_revisions/` responses and the shell (including `/login`) `x-robots-tag: noindex, nofollow, noarchive`, so search engines never index superseded revisions or the sign-in page.
+- Read Worker marks every `/_revisions/` response and every configured shell-path response (including `/login` redirects and method denials) `x-robots-tag: noindex, nofollow, noarchive`, so search engines never index superseded revisions or the sign-in surface.
 - No migration; code-only rollback to 1.0.0 stays compatible.
 
 ## [1.0.0]

@@ -1,8 +1,10 @@
 import { env } from 'cloudflare:workers'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { createReadWorker } from '../../adapters/http/readWorker'
+import { createReadWorker, handleRead } from '../../adapters/http/readWorker'
+import { unkillableShellAssets } from '../../adapters/web/unkillable-shell'
 import type { FixedShellAssets } from '../../domains/delivery/shell'
-import { bootstrap, pageFixture } from './fixtures/catalogue'
+import { RevisionStore } from '../../domains/store/revision-store'
+import { bootstrap, configs, instanceId, jwks, manageRequest, pageFixture } from './fixtures/catalogue'
 
 const fixed: FixedShellAssets = {
   '/favicon.ico': { body: new Uint8Array([0, 1, 255, 42]).buffer, contentType: 'image/x-icon' },
@@ -68,6 +70,38 @@ describe('fixed shell through the read worker', () => {
     const robots = await request(worker, '/robots.txt')
     expect(robots.status).toBe(200)
     expect(robots.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
+  })
+
+  it.each([
+    ['generic', () => createReadWorker(fixed)],
+    ['unkillable', () => createReadWorker(unkillableShellAssets)],
+  ] as const)('marks shell-path Access redirects and method denials unlisted for %s worker', async (_label, makeWorker) => {
+    const worker = makeWorker()
+    const accessLocation = 'https://team.cloudflareaccess.com/cdn-cgi/access/login/forge.example.test?redirect_url=' + encodeURIComponent('https://forge.example.test/a/private/')
+    for (const path of ['/login', '/login.html']) {
+      const anonymous = await request(worker, `${path}?next=/a/private/`, { bindings: bindings({ login: 'redirect-access-login' }) })
+      expect(anonymous.status).toBe(302)
+      expect(anonymous.headers.get('location')).toBe(accessLocation)
+      expect(anonymous.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
+      const denied = await request(worker, path, { method: 'POST' })
+      expect(denied.status).toBe(405)
+      expect(denied.headers.get('allow')).toBe('GET, HEAD')
+      expect(denied.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
+    }
+  })
+
+  it('marks authenticated login redirects unlisted with unchanged Location on both aliases', async () => {
+    const config = await configs()
+    const store = new RevisionStore(env.REVISION_BYTES, instanceId)
+    const jwt = (await manageRequest('reader', 'reader')).headers.get('Cf-Access-Jwt-Assertion')!
+    for (const path of ['/login', '/login.html']) {
+      const response = await handleRead(new Request(`https://forge.example.test${path}?next=/a/private/`, {
+        headers: { 'Cf-Access-Jwt-Assertion': jwt },
+      }), { db: env.DB, config: config.read, jwks, nowSeconds: () => 100, store, shellAssets: fixed })
+      expect(response.status).toBe(302)
+      expect(response.headers.get('location')).toBe('/a/private/')
+      expect(response.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive')
+    }
   })
 
   it('keeps host, method, malformed path and instance gates ahead of shell bytes', async () => {
