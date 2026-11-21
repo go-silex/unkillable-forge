@@ -111,13 +111,13 @@ async function fetchStatus(url, { cookie = null, redirect = 'manual', allowCooki
   return { status: res.status, location }
 }
 
-function expectLoginRedirect(result, readOrigin) {
+function expectLoginRedirect(result, responseUrl, readOrigin) {
   if (result.status !== 302 && result.status !== 301 && result.status !== 303 && result.status !== 307 && result.status !== 308) {
     return false
   }
   if (!result.location) return false
   let loc
-  try { loc = new URL(result.location, readOrigin) } catch { return false }
+  try { loc = new URL(result.location, responseUrl) } catch { return false }
   if (loc.origin !== readOrigin) return false
   return loc.pathname === '/login' || loc.pathname === '/login.html'
 }
@@ -192,7 +192,7 @@ async function main() {
     step('authenticated_read', auth.status === 200, { status: auth.status })
 
     const anon = await fetchStatus(pageUrl)
-    step('anonymous_login_redirect', expectLoginRedirect(anon, readOrigin), { status: anon.status, location: anon.location || null })
+    step('anonymous_login_redirect', expectLoginRedirect(anon, pageUrl, readOrigin), { status: anon.status })
 
     let policyEpoch = 0
     const policy = await callTool(client, 'forge_page_policy', { pageId: page.pageId })
@@ -240,11 +240,15 @@ async function main() {
       if (!Array.isArray(links)) throw new Error('links_not_array')
       let index = 0
       for (const entry of links) {
-        const id = typeof entry.id === 'string' ? entry.id : `link-${index}`
+        const id = `link-${index}`
         index += 1
-        const path = entry.path
-        const expectStatus = entry.expectStatus
+        const path = entry?.path
+        const expectStatus = entry?.expectStatus
         if (typeof path !== 'string' || typeof expectStatus !== 'number') throw new Error('invalid_link_entry')
+        const expectsRedirect = [301, 302, 303, 307, 308].includes(expectStatus)
+        if (expectsRedirect && (typeof entry.expectLocation !== 'string' || !entry.expectLocation)) {
+          throw new Error('redirect_destination_required')
+        }
         let url
         try { url = new URL(path, readOrigin) } catch { throw new Error('invalid_link_url') }
         const external = url.origin !== readOrigin
@@ -256,16 +260,22 @@ async function main() {
           allowCookie: useCookie,
           redirect: 'manual',
         })
-        let ok = result.status === expectStatus
-        if (ok && entry.expectLocation) {
-          const expected = new URL(entry.expectLocation, readOrigin)
-          const actual = result.location ? new URL(result.location, readOrigin) : null
-          ok = !!actual && actual.href === expected.href
+        let destinationMatched = null
+        if (entry.expectLocation !== undefined) {
+          if (typeof entry.expectLocation !== 'string' || !entry.expectLocation) throw new Error('invalid_link_destination')
+          try {
+            const expected = new URL(entry.expectLocation, url)
+            const actual = result.location ? new URL(result.location, url) : null
+            destinationMatched = !!actual && actual.href === expected.href
+          } catch {
+            destinationMatched = false
+          }
         }
+        const ok = result.status === expectStatus && destinationMatched !== false
         step(`fixture:${id}`, ok, {
           status: result.status,
           expectStatus,
-          location: result.location || null,
+          destinationMatched,
           external,
         })
       }

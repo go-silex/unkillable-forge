@@ -17,18 +17,21 @@ VERSION="$(python3 "$CHECK" --print-engine-version)"
 TAG="engine/v${VERSION}"
 TARBALL_NAME="forge-engine-${VERSION}.tar.gz"
 
-release_complete() {
-  # True if GitHub Release exists with tarball, release.json, SHA256SUMS.
-  command -v gh >/dev/null 2>&1 || return 1
-  local assets
-  assets="$(gh release view "$TAG" --json assets --jq '[.assets[].name] | @json' 2>/dev/null || true)"
-  [ -n "$assets" ] || return 1
-  python3 - "$assets" "$TARBALL_NAME" <<'PY'
+release_assets_ready() {
+  # Drafts may have all assets but must not be considered published yet.
+  local release
+  release="$(gh release view "$TAG" --json isDraft,assets 2>/dev/null)" || return 1
+  python3 - "$release" "$TARBALL_NAME" "${1:-published}" <<'PY'
 import json, sys
-names = set(json.loads(sys.argv[1]))
+release = json.loads(sys.argv[1])
 need = {sys.argv[2], "release.json", "SHA256SUMS"}
-sys.exit(0 if need <= names else 1)
+ready = {a["name"] for a in release["assets"] if a["state"] == "uploaded"}
+sys.exit(0 if need <= ready and (sys.argv[3] == "any" or not release["isDraft"]) else 1)
 PY
+}
+
+release_complete() {
+  command -v gh >/dev/null 2>&1 && release_assets_ready
 }
 
 cmd_check() {
@@ -112,13 +115,14 @@ PY
   fi
 
   if gh release view "$TAG" >/dev/null 2>&1; then
-    # Resume: upload any missing assets; refresh notes.
+    # Resume incomplete releases, replacing any incomplete uploads.
     gh release upload "$TAG" \
       "$tarball" \
       "$outdir/release.json" \
       "$outdir/SHA256SUMS" \
       --clobber
-    gh release edit "$TAG" --notes-file "$NOTES" >/dev/null
+    release_assets_ready any || { echo "release assets are not uploaded" >&2; exit 1; }
+    gh release edit "$TAG" --notes-file "$NOTES" --draft=false >/dev/null
     echo "resumed ${TAG}"
   else
     gh release create "$TAG" \

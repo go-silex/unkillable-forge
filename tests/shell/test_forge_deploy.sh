@@ -55,8 +55,9 @@ write_wrangler() {
 printf 'WRANGLER %s\n' "$*" >>"$WRANGLER_LOG"
 case "$*" in
   *d1\ migrations\ list*)
+    [ "${4:-}" = DB ] || { echo "expected DB binding" >&2; exit 1; }
     case "${FORGE_TEST_MIG_MODE:-empty}" in
-      pending)
+      pending|apply-fail)
         echo "Migrations to be applied:"
         echo "┌───────────────────────────┐"
         echo "│ Name                      │"
@@ -75,6 +76,8 @@ case "$*" in
     exit 0
     ;;
   *d1\ migrations\ apply*)
+    [ "${4:-}" = DB ] || { echo "expected DB binding" >&2; exit 1; }
+    [ "${FORGE_TEST_MIG_MODE:-empty}" != apply-fail ] || exit 2
     echo "Applied migrations"
     exit 0
     ;;
@@ -84,6 +87,7 @@ case "$*" in
     for arg in "$@"; do
       if [ "$prev" = "--config" ]; then
         printf 'CONFIG %s\n' "$arg" >>"$WRANGLER_LOG"
+        cp "$arg" "$WRANGLER_LOG.$(basename "$arg")"
       fi
       prev="$arg"
     done
@@ -122,6 +126,8 @@ if [ "$1" = "attestation" ] && [ "$2" = "verify" ]; then
     prev="$arg"
   done
   [ "$has" -eq 1 ] || { echo "missing --signer-workflow" >&2; exit 1; }
+  case " $* " in *" --source-digest sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "*) ;; *) exit 1 ;; esac
+  case " $* " in *" --source-ref refs/heads/main "*) ;; *) exit 1 ;; esac
   exit 0
 fi
 if [ "$1" = "api" ]; then
@@ -148,7 +154,13 @@ if [ "$1" = "api" ]; then
       body='{"object":{"type":"commit","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
       ;;
     repos/*/commits/*/check-runs)
-      body='{"check_runs":[{"name":"check","conclusion":"success"},{"name":"test","conclusion":"success"},{"name":"test-os / macos-bash32","conclusion":"success"},{"name":"test-bash32","conclusion":"success"},{"name":"test-py39","conclusion":"success"},{"name":"TruffleHog","conclusion":"success"},{"name":"publisher-committed (matrix)","conclusion":"success"},{"name":"publisher-native-producer (matrix)","conclusion":"success"}]}'
+      body="$(python3 -c 'import json
+names = ["check", "test", "test-os / macos-bash32", "test-bash32", "test-py39", "TruffleHog"]
+names += [f"publisher-committed ({r}, {n})" for r in ("ubuntu-22.04", "ubuntu-22.04-arm", "macos-15-intel", "macos-15") for n in ("22", "26")]
+names += [f"publisher-native-producer ({r}, {t})" for r,t in (("ubuntu-22.04", "linux-x64"), ("ubuntu-22.04-arm", "linux-arm64"), ("macos-15-intel", "darwin-x64"), ("macos-15", "darwin-arm64"))]
+import os
+if os.environ.get("FORGE_TEST_MISSING_MATRIX") == "1": names.pop()
+print(json.dumps({"check_runs": [{"name": n, "conclusion": "success"} for n in names]}))')"
       ;;
     repos/*/commits/*)
       body='{"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'
@@ -243,6 +255,7 @@ EOF
 {
   "account_id": "acct-test-manage",
   "name": "forge-manage-test",
+  "compatibility_date": "2025-02-14",
   "d1_databases": [{"binding": "DB", "database_id": "dddddddd-1111-1111-1111-111111111111", "database_name": "forge-db-test"}],
   "r2_buckets": [{"binding": "REVISION_BYTES", "bucket_name": "bytes"}]
 }
@@ -251,6 +264,7 @@ EOF
 {
   "account_id": "acct-test-manage",
   "name": "forge-read-test",
+  "compatibility_date": "2025-02-14",
   "d1_databases": [{"binding": "DB", "database_id": "dddddddd-1111-1111-1111-111111111111", "database_name": "forge-db-test"}],
   "r2_buckets": [{"binding": "REVISION_BYTES", "bucket_name": "bytes"}],
   "rules": [{"type": "Data", "globs": ["**/*.png"]}]
@@ -262,6 +276,14 @@ EOF
 write_instance "$TMP/instance" generic
 
 echo "forge-deploy.sh tests"
+
+export FORGE_TEST_MISSING_MATRIX=1
+if "$BASH_BIN" "$DEPLOY" verify --tag engine/v1.0.0 >"$TMP/missing-matrix.log" 2>&1; then
+  bad "missing matrix leg accepted"
+else
+  pass "missing matrix leg rejected"
+fi
+unset FORGE_TEST_MISSING_MATRIX
 
 # 0. refuse missing instance.json / readVariant
 mkdir -p "$TMP/inst-novar"
@@ -374,6 +396,9 @@ if [ "$rc" -ne 0 ]; then
 else
   pass "deploy dry-run with --apply-migrations"
 fi
+if [ -d "$TMP/instance/.forge-deploy.lock" ]; then
+  bad "dry-run left lock: $out; contents: $(ls -la "$TMP/instance/.forge-deploy.lock")"
+fi
 
 # 4b. migrations list failure fails closed
 export FORGE_TEST_MIG_MODE=fail
@@ -387,6 +412,20 @@ if [ "$rc" -eq 0 ] || ! printf '%s\n' "$out" | grep -qi 'migrations list failed\
 else
   pass "migrations list failure fails closed"
 fi
+if [ -f "$TMP/instance/.forge-migration-pending" ]; then
+  bad "list failure incorrectly marked as migration in progress"
+else
+  pass "list failure leaves no pending migration"
+fi
+export FORGE_TEST_MIG_MODE=apply-fail
+if "$BASH_BIN" "$DEPLOY" deploy --instance-dir "$TMP/instance" --tag engine/v1.0.0 --apply-migrations >"$TMP/apply-fail.log" 2>&1; then
+  bad "migration apply failure accepted"
+elif [ ! -f "$TMP/instance/.forge-migration-pending" ]; then
+  bad "failed migration apply lost reconciliation marker"
+else
+  pass "failed migration apply leaves reconciliation marker"
+fi
+rm -f "$TMP/instance/.forge-migration-pending"
 
 # 5. schema floor refusal on deploy of older tag (and rollback)
 export FORGE_TEST_MIG_MODE=empty
@@ -505,27 +544,36 @@ rc=$?
 set -e
 if [ "$rc" -ne 0 ]; then
   bad "unkillable variant deploy (rc=$rc out=$out)"
-elif ! printf '%s\n' "$out" | grep -q 'variant=unkillable'; then
-  bad "unkillable variant not reported: $out"
+elif ! grep -q 'deploy .*read-unkillable/unkillableReadWorker.js --no-bundle' "$WRANGLER_LOG"; then
+  bad "unkillable entry not passed to Wrangler: $out"
 else
   pass "unkillable readVariant deploy"
 fi
 
-# 9. Real wrangler: generated temp .json keeps bindings/rules (bare mktemp drops them).
+# Assert the actual generated config, captured by the Wrangler stub.
+if python3 - "$WRANGLER_LOG.read.wrangler.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1], encoding="utf-8"))
+assert c["name"] == "forge-read-test"
+assert c["r2_buckets"][0]["bucket_name"] == "bytes"
+assert {"type": "Data", "globs": ["**/*.png"]} in c["rules"]
+PY
+then
+  pass "generated config preserves bindings and module rules"
+else
+  bad "generated config lost bindings or module rules"
+fi
+
 REAL_W="$ROOT/node_modules/@cloudflare/vitest-plugin/node_modules/.bin/wrangler"
 if [ -x "$REAL_W" ] && command -v node >/dev/null 2>&1; then
   REAL_JS="$TMP/real-entry.js"
   printf 'export default { fetch() { return new Response("ok"); } }\n' >"$REAL_JS"
   GEN_JSON="$TMP/generated.wrangler.json"
-  python3 - "$TMP/instance/read.json" "$REAL_JS" "$GEN_JSON" <<'PY'
+  python3 - "$WRANGLER_LOG.read.wrangler.json" "$REAL_JS" "$GEN_JSON" <<'PY'
 import json, sys
-src, main, out = sys.argv[1:4]
-cfg = dict(json.load(open(src, encoding="utf-8")))
-cfg["main"] = main
-cfg["compatibility_date"] = "2025-02-14"
-with open(out, "w", encoding="utf-8") as f:
-    json.dump(cfg, f, indent=2, sort_keys=True)
-    f.write("\n")
+c = json.load(open(sys.argv[1], encoding="utf-8"))
+c["main"] = sys.argv[2]
+json.dump(c, open(sys.argv[3], "w", encoding="utf-8"))
 PY
   REAL_OUT="$TMP/real-dry"
   mkdir -p "$REAL_OUT"
@@ -533,17 +581,10 @@ PY
   real_out="$("$REAL_W" deploy --dry-run --config "$GEN_JSON" --outdir "$REAL_OUT" 2>&1)"
   real_rc=$?
   set -e
-  if [ "$real_rc" -ne 0 ]; then
-    bad "real wrangler dry-run .json config (rc=$real_rc): $(printf '%s' "$real_out" | tr '\n' ' ' | head -c 240)"
-  elif ! printf '%s\n' "$real_out" | grep -qi 'forge-read-test\|dry.run\|Total Upload\|Built'; then
-    # Accept exit 0 with any successful packaging message
-    if [ "$real_rc" -eq 0 ]; then
-      pass "real wrangler dry-run accepts generated .json (bindings preserved)"
-    else
-      bad "real wrangler dry-run unexpected output"
-    fi
+  if [ "$real_rc" -ne 0 ] || ! printf '%s\n' "$real_out" | grep -q 'REVISION_BYTES'; then
+    bad "real wrangler did not preserve binding (rc=$real_rc): $(printf '%s' "$real_out" | tr '\n' ' ' | head -c 500)"
   else
-    pass "real wrangler dry-run accepts generated .json"
+    pass "real wrangler preserves generated binding"
   fi
 
   # Bare mktemp (no .json): Wrangler treats as TOML → empty/wrong parse.
@@ -574,6 +615,43 @@ PY
   fi
 else
   pass "skip real wrangler evidence (node or binary missing)"
+fi
+
+write_instance "$TMP/guarded" generic
+mkdir "$TMP/guarded/.forge-deploy.lock"
+if "$BASH_BIN" "$DEPLOY" deploy --instance-dir "$TMP/guarded" --tag engine/v1.0.0 --dry-run >"$TMP/locked.log" 2>&1; then
+  bad "concurrent instance lock accepted"
+else
+  pass "concurrent instance lock rejected"
+fi
+rmdir "$TMP/guarded/.forge-deploy.lock"
+touch "$TMP/guarded/.forge-migration-pending"
+if "$BASH_BIN" "$DEPLOY" deploy --instance-dir "$TMP/guarded" --tag engine/v1.0.0 --dry-run >"$TMP/pending.log" 2>&1; then
+  bad "unreconciled migration accepted"
+else
+  pass "unreconciled migration rejected"
+fi
+rm "$TMP/guarded/.forge-migration-pending"
+: >"$WRANGLER_LOG"
+if ! "$BASH_BIN" "$DEPLOY" deploy --instance-dir "$TMP/guarded" --tag engine/v1.0.0 --dry-run --apply-migrations >"$TMP/dry.log" 2>&1; then
+  bad "dry-run with migration flag failed"
+elif grep -q 'd1 migrations' "$WRANGLER_LOG"; then
+  bad "dry-run contacted remote migrations"
+else
+  pass "dry-run never contacts remote migrations"
+fi
+
+python3 - "$TMP/guarded/read.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+c = json.load(open(p, encoding="utf-8"))
+c["name"] = "forge-manage-test"
+json.dump(c, open(p, "w", encoding="utf-8"))
+PY
+if "$BASH_BIN" "$DEPLOY" deploy --instance-dir "$TMP/guarded" --tag engine/v1.0.0 --dry-run >"$TMP/pair.log" 2>&1; then
+  bad "identical role names accepted"
+else
+  pass "identical role names rejected"
 fi
 
 if [ "$fail" -ne 0 ]; then

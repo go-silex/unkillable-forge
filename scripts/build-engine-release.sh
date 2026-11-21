@@ -61,13 +61,13 @@ dry_run_build "$ROOT/wrangler.read.toml" "$WORK/read-unkillable"
 STAGE="$WORK/stage"
 mkdir -p "$STAGE/manage" "$STAGE/read" "$STAGE/read-unkillable" "$STAGE/migrations"
 
-# Copy emitted modules; drop Wrangler README.md (embeds a wall-clock timestamp).
+# Wrangler's README and source maps contain timestamps or build-specific paths.
 copy_modules() {
   local src="$1" dest="$2"
   find "$src" -type f -print0 | while IFS= read -r -d '' f; do
     rel="${f#"$src/"}"
     case "$rel" in
-      README.md|*/README.md) continue ;;
+      README.md|*/README.md|*.map) continue ;;
     esac
     mkdir -p "$dest/$(dirname "$rel")"
     cp -p "$f" "$dest/$rel"

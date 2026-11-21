@@ -34,7 +34,7 @@ cp "$ROOT"/migrations/*.sql "$TMP/repo/migrations/"
 ENGINE_VERSION="$(python3 -c 'import json; print(json.load(open("'"$TMP/repo/engine.json"'"))["version"])')"
 
 # Stub wrangler: --version + deploy --dry-run --outdir for three roles.
-# Emits a timestamped README.md that the build must exclude.
+# Emits build-specific files that the build must exclude.
 cat >"$TMP/repo/node_modules/@cloudflare/vitest-plugin/node_modules/.bin/wrangler" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = "--version" ]; then
@@ -53,6 +53,7 @@ done
 mkdir -p "$outdir"
 # Timestamped README must not land in the release artifact.
 printf 'Built at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$outdir/README.md"
+printf '{"sourceRoot":"%s"}\n' "$outdir" >"$outdir/bundle.js.map"
 case "$config" in
   *wrangler.manage.toml)
     printf 'manage-module\n' >"$outdir/manageWorker.js"
@@ -159,15 +160,15 @@ else
   bad "release.json shape"
 fi
 
-# Tarball must not contain README.md
+# Tarball and manifest must not contain nondeterministic files.
 set +e
 python3 - "$TARBALL" <<'PY'
 import gzip, io, sys, tarfile
 raw = gzip.open(sys.argv[1], "rb").read()
 with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as tar:
     names = tar.getnames()
-if any(n == "README.md" or n.endswith("/README.md") for n in names):
-    raise SystemExit("README in tarball: " + ", ".join(names))
+if any(n == "README.md" or n.endswith("/README.md") or n.endswith(".map") for n in names):
+    raise SystemExit("nondeterministic file in tarball: " + ", ".join(names))
 need = ("manage/", "read/", "read-unkillable/", "release.json", "migrations/")
 for prefix in need:
     if not any(n == prefix.rstrip("/") or n.startswith(prefix) for n in names):
@@ -177,7 +178,7 @@ PY
 tar_rc=$?
 set -e
 if [ "$tar_rc" -eq 0 ]; then
-  pass "tarball excludes README; has three roles"
+  pass "tarball excludes README and maps; has three roles"
 else
   bad "tarball contents"
 fi
@@ -216,37 +217,27 @@ else
   pass "deterministic rebuild (Python tar/gzip)"
 fi
 
-# Prefer real locked wrangler when node + binary are present (skip on bash:3.2 Alpine without node).
+# Exercise the actual release builder twice with the locked Wrangler.
 REAL_W="$ROOT/node_modules/@cloudflare/vitest-plugin/node_modules/.bin/wrangler"
 if [ -x "$REAL_W" ] && command -v node >/dev/null 2>&1; then
-  REAL_OUT="$TMP/real-out"
-  mkdir -p "$REAL_OUT"
+  mkdir -p "$TMP/real-out" "$TMP/real-out2"
   set +e
-  (
-    cd "$ROOT"
-    unset WRANGLER
-    # Use a disposable HOME so metrics/env do not leak.
-    export HOME="$TMP/real-home"
-    mkdir -p "$HOME"
-    "$REAL_W" deploy --dry-run --config wrangler.read.generic.toml \
-      --outdir "$REAL_OUT/generic" >/dev/null 2>"$TMP/real-generic.err"
-  )
-  grc=$?
+  real_log="$($BASH_BIN "$ROOT/scripts/build-engine-release.sh" "$TMP/real-out" 2>&1)"
+  real_rc=$?
+  real_log2="$($BASH_BIN "$ROOT/scripts/build-engine-release.sh" "$TMP/real-out2" 2>&1)"
+  real_rc2=$?
   set -e
-  if [ "$grc" -ne 0 ]; then
-    bad "real wrangler dry-run generic: $(tr '\n' ' ' <"$TMP/real-generic.err" | head -c 200)"
-  elif ! find "$REAL_OUT/generic" -name 'readWorker*.js' -o -name '*readWorker*.js' | grep -q .; then
-    # Accept any emitted JS under outdir
-    if ! find "$REAL_OUT/generic" -name '*.js' | grep -q .; then
-      bad "real wrangler generic produced no JS"
-    else
-      pass "real wrangler dry-run generic emits JS"
-    fi
+  if [ "$real_rc" -ne 0 ] || [ "$real_rc2" -ne 0 ]; then
+    bad "real builds failed: $real_rc $real_rc2 $real_log $real_log2"
+  elif ! cmp -s "$TMP/real-out/forge-engine-${ENGINE_VERSION}.tar.gz" "$TMP/real-out2/forge-engine-${ENGINE_VERSION}.tar.gz" ||
+       ! cmp -s "$TMP/real-out/release.json" "$TMP/real-out2/release.json" ||
+       ! cmp -s "$TMP/real-out/SHA256SUMS" "$TMP/real-out2/SHA256SUMS"; then
+    bad "real Wrangler builds differ"
   else
-    pass "real wrangler dry-run generic emits readWorker"
+    pass "real Wrangler builds are byte-for-byte identical"
   fi
 else
-  pass "skip real wrangler (node or binary missing)"
+  pass "skip real Wrangler (node or binary missing)"
 fi
 
 if [ "$fail" -ne 0 ]; then

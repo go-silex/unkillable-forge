@@ -90,9 +90,11 @@ Deploy verifies the **same** downloaded bytes (checksums, attestation with signe
 ## Migrations (expand / contract)
 
 - Wrangler `d1 migrations list --remote` prints **only unapplied** filenames (empty / “No migrations…” when up to date). Lookup failures fail closed.
-- That list command **initializes** Wrangler’s migrations table on a fresh remote — not read-only; dry-run without `--apply-migrations` skips it.
+- That list command **initializes** Wrangler’s migrations table on a fresh remote — not read-only; all dry runs skip it and report that migration state was not checked.
 - Unapplied migrations require `--apply-migrations`.
 - Expand-only while older readers remain possible. Contract ⇒ bump `rollbackCompatibleFrom`.
+- An interrupted or failed migration leaves `.forge-migration-pending` and blocks further mutations. Under explicit operator authorization, reconcile the actual remote D1 migration state and the ledger's compatibility floor before removing the marker; never infer success from the failed command.
+- Mutations hold `.forge-deploy.lock`. If it remains after an interruption, confirm no operator process is active before removing the stale lock, then reconcile any pending migration marker.
 
 ## Code-only rollback
 
@@ -101,7 +103,7 @@ scripts/forge-deploy.sh rollback --instance-dir /path/to/instance --to engine/vX
 # then smoke again
 ```
 
-Requires `target.version >= ledger.schemaFloor`. The ledger keeps `schemaFloor` separate from the running `engineVersion` / `rollbackCompatibleFrom` so a code-only rollback cannot lower the D1 floor. Deploy of an older tag is likewise refused against the floor.
+Rollback requires an older release previously deployed to this instance and `target.version >= ledger.schemaFloor`. The ledger keeps `schemaFloor` separate from the running `engineVersion` / `rollbackCompatibleFrom` so a code-only rollback cannot lower the D1 floor. Deploy of an older tag is likewise refused against the floor.
 
 **Do not** (plan §6.4): restore an old D1, re-open with historical rights, re-route blindly to Pages after new writes, or treat DNS alone as data reversibility.
 
