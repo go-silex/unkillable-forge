@@ -814,70 +814,160 @@ describe('forge-import-legacy-pages', () => {
     expect(pagesAssetHash(bytes, '/a/demo/note.txt')).toBe(known)
   })
 
-  it('protocol budget completes dry-run and apply when paged metadata exceeds files+64', async () => {
-    // Counter-example shape: 3072×17MiB, 1 page, 0 edges, 1 policy op.
-    // files+64 = 3136, but dry needs 3151 and apply needs 3150 protocol steps.
-    const fileCount = 3072
-    const files = Array.from({ length: fileCount }, (_, i) => ({ path: `/a/big/${i}.bin`, size: 17 * 1024 * 1024 }))
-    const pages = [{ pageId: 'pg_budget', disposition: 'new', documentPath: '/a/big/index.html', expectedPolicyEpoch: null }]
+  it('ops windows use local counts beside the wire selection, not inventory on the payload', async () => {
+    // 1 page + 1 file + 769 ops (1 policy + 768 shortlinks). Page-count budget was 19; native needs 23 dry windows.
+    const pages = [{ pageId: 'pg_ops', disposition: 'new', documentPath: '/a/ops/index.html', expectedPolicyEpoch: null }]
+    const files = [{ path: '/a/ops/index.html', size: 100, sha256: 'a'.repeat(64), kind: 'document', contentType: 'text/html', source: 'client' }]
     const edges: unknown[] = []
-    const operations = [{ kind: 'page_policy' }]
+    const opCount = 769 // kept beside the wire payload (adapters/http/import.ts:49–52)
     const selection = {
       version: 1 as const,
-      inventoryId: 'inv',
-      selectionId: 'sel_budget',
-      planId: 'plan_budget',
-      command: { files, pages, edges, artifactId: null, expectedRevisionId: null },
-      inventory: { operations },
+      inventoryId: 'inv_ops',
+      selectionId: 'sel_ops',
+      planId: 'plan_ops',
+      command: { files, pages, edges, artifactId: null, expectedRevisionId: null, idempotencyKey: 'idem_ops', expectedContentVersion: 0 },
     }
-    const heuristicCap = fileCount + 64
-    const preflight = Math.ceil(fileCount / 128) + 1 + 1 + 1 // files + pages + edges + membership
-    const targetPass = 1 + Math.ceil(fileCount / 128) + 1 // pages + files + ops
-    const protocolDry = preflight + targetPass + fileCount + targetPass // 3151
-    const protocolApply = preflight + targetPass + (targetPass - 1) + fileCount // planning checks + staging
-    expect(protocolDry).toBeGreaterThan(heuristicCap)
-    expect(protocolApply).toBeGreaterThan(heuristicCap)
-
+    const preflight = 1 + 1 + 1 + 1 // files+pages+edges+membership
+    const targetPass = 1 + 1 + Math.ceil(opCount / 128) // pages+files+ops
+    const protocolDry = preflight + targetPass + 1 + targetPass // +1 source transfer
     let dryN = 0
-    let applyN = 0
-    let stored = 0
     const applied = await applyImport({
       manageHost: 'manage.example.test',
       selections: [selection],
       headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      dryRunOnly: true,
       fetch: async (_url, init) => {
         const body = JSON.parse(String(init?.body ?? '{}'))
-        if (body.op === 'dry_run') {
-          dryN += 1
-          if (dryN < protocolDry) {
-            return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: `dry-${dryN}` } }), { status: 200 })
-          }
-          return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
+        expect(Object.keys(body).sort()).toEqual(['cursor', 'op', 'selection'])
+        expect(Object.keys(body.selection).sort()).toEqual(['command', 'inventoryId', 'planId', 'selectionId', 'version'])
+        expect(body.selection).not.toHaveProperty('inventory')
+        dryN += 1
+        if (dryN < protocolDry) {
+          return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: `ops-${dryN}` } }), { status: 200 })
         }
-        applyN += 1
-        const applyPlanning = preflight + targetPass + (targetPass - 1) // last recheck folds into staging response
-        if (applyN <= applyPlanning) {
-          return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: `apply-${applyN}` } }), { status: 200 })
-        }
-        if (stored < fileCount) {
-          stored += 1
-          // Compact progress vector: driver only counts entries with stored===true.
-          const sessionFiles = [
-            ...Array.from({ length: stored }, () => ({ stored: true })),
-            { stored: false },
-          ]
-          return new Response(JSON.stringify({
-            ok: true,
-            result: { state: 'staging', nextCursor: null, session: { files: sessionFiles } },
-          }), { status: 200 })
-        }
-        return new Response(JSON.stringify({ ok: true, result: { state: 'committed' } }), { status: 200 })
+        return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
       },
     })
-    expect(dryN).toBeGreaterThan(heuristicCap)
-    expect(applyN).toBeGreaterThan(heuristicCap)
-    expect(applied.results).toHaveLength(1)
-    expect(applied.results[0]).toMatchObject({ ok: true, state: 'committed' })
+    expect(dryN).toBe(protocolDry)
+    expect(protocolDry).toBeGreaterThan(19) // old page-as-ops estimate
+    expect(applied.results[0]).toMatchObject({ ok: true, state: 'ready' })
+  })
+
+  it('revised targets paginate old-revision resource windows beyond command.files', async () => {
+    // 1,536 removed resources → ceil(1536/128)=12 windows/pass (catalogue/import.ts:467,474–482).
+    const removedResources = 1536
+    const pages = [{ pageId: 'pg_rev', disposition: 'keep', documentPath: '/a/rev/index.html', expectedPolicyEpoch: 1 }]
+    const files = [{ path: '/a/rev/index.html', size: 100, sha256: 'b'.repeat(64), kind: 'document', contentType: 'text/html', source: 'base' }]
+    const selection = {
+      version: 1 as const,
+      inventoryId: 'inv_rev',
+      selectionId: 'sel_rev',
+      planId: 'plan_rev',
+      command: {
+        files, pages, edges: [],
+        artifactId: 'ar_rev', expectedRevisionId: 'rv_old', expectedContentVersion: 3, idempotencyKey: 'idem_rev',
+      },
+    }
+    const resourceWindows = Math.ceil(removedResources / 128) // 13
+    const preflight = 1 + 1 + 1 + 1
+    const targetPass = 1 + 1 + 1 + resourceWindows // pages+files+ops + old resources
+    const protocolDry = preflight + targetPass + 1 + targetPass
+    let dryN = 0
+    const applied = await applyImport({
+      manageHost: 'manage.example.test',
+      selections: [selection],
+      headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      dryRunOnly: true,
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        expect(Object.keys(body).sort()).toEqual(['cursor', 'op', 'selection'])
+        expect(Object.keys(body.selection).sort()).toEqual(['command', 'inventoryId', 'planId', 'selectionId', 'version'])
+        dryN += 1
+        if (dryN < protocolDry) {
+          return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: `rev-${dryN}` } }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
+      },
+    })
+    expect(resourceWindows).toBe(12)
+    expect(dryN).toBe(protocolDry)
+    expect(applied.results[0]).toMatchObject({ ok: true, state: 'ready' })
+  })
+
+  it('transfer packing follows inventory order-by-path, not command.files insertion order', async () => {
+    // 128 files of 24/8 MiB: command order packs to 64; path order (large-first) packs to 80.
+    const large = 24 * 1024 * 1024
+    const small = 8 * 1024 * 1024
+    const files = [] as Array<{ path: string; size: number; sha256: string; kind: string; contentType: string; source: string }>
+    for (let i = 0; i < 64; i++) {
+      files.push({
+        path: `/z/${String(i).padStart(3, '0')}.bin`, size: small, sha256: 'c'.repeat(64),
+        kind: 'asset', contentType: 'application/octet-stream', source: 'client',
+      })
+      files.push({
+        path: `/a/${String(i).padStart(3, '0')}.bin`, size: large, sha256: 'c'.repeat(64),
+        kind: 'asset', contentType: 'application/octet-stream', source: 'client',
+      })
+    }
+    const packSteps = (list: typeof files) => {
+      let steps = 0, n = 0, bytes = 0
+      for (const f of list) {
+        if (n >= 8 || (n > 0 && bytes + f.size > 32 * 1024 * 1024)) { steps += 1; n = 0; bytes = 0 }
+        n += 1; bytes += f.size
+      }
+      return steps + (n ? 1 : 0)
+    }
+    const commandOrderSteps = packSteps(files)
+    const pathOrderSteps = packSteps([...files].sort((a, b) => a.path.localeCompare(b.path)))
+    expect(commandOrderSteps).toBe(64)
+    expect(pathOrderSteps).toBe(80)
+    const pages = [{ pageId: 'pg_pack', disposition: 'new', documentPath: '/a/pack/index.html', expectedPolicyEpoch: null }]
+    const selection = {
+      version: 1 as const,
+      inventoryId: 'inv_pack',
+      selectionId: 'sel_pack',
+      planId: 'plan_pack',
+      command: { files, pages, edges: [], artifactId: null, expectedRevisionId: null, idempotencyKey: 'idem_pack', expectedContentVersion: 0 },
+    }
+    const preflight = 1 + 1 + 1 + 1
+    const targetPass = 1 + Math.ceil(128 / 128) + 1
+    const protocolDry = preflight + targetPass + pathOrderSteps + targetPass
+    let dryN = 0
+    const applied = await applyImport({
+      manageHost: 'manage.example.test',
+      selections: [selection],
+      headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      dryRunOnly: true,
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        expect(Object.keys(body).sort()).toEqual(['cursor', 'op', 'selection'])
+        expect(Object.keys(body.selection).sort()).toEqual(['command', 'inventoryId', 'planId', 'selectionId', 'version'])
+        dryN += 1
+        if (dryN < protocolDry) {
+          return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: `pack-${dryN}` } }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ ok: true, result: { state: 'ready' } }), { status: 200 })
+      },
+    })
+    expect(dryN).toBe(protocolDry)
+    expect(dryN).toBeGreaterThan(preflight + targetPass + commandOrderSteps + targetPass)
+    expect(applied.results[0]).toMatchObject({ ok: true, state: 'ready' })
+  })
+
+  it('stops runaway distinct checking cursors via the admission safety fuse', async () => {
+    let n = 0
+    await expect(applyImport({
+      manageHost: 'manage.example.test',
+      selections: [{ version: 1 as const, inventoryId: 'inv', selectionId: 'sel', planId: 'plan', command: { files: [], pages: [{ pageId: 'p' }], edges: [] } }],
+      headers: { cookie: 'CF_Authorization=fixture-jwt' },
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        expect(Object.keys(body).sort()).toEqual(['cursor', 'op', 'selection'])
+        n += 1
+        return new Response(JSON.stringify({ ok: true, result: { state: 'checking', nextCursor: `runaway-${n}` } }), { status: 200 })
+      },
+    })).rejects.toMatchObject({ code: 'invalid_continuation', message: expect.stringContaining('request cap') })
+    expect(n).toBeGreaterThan(10_000)
   })
 
   it('continueOnBlock keeps going after a native shortlink_conflict block', async () => {
